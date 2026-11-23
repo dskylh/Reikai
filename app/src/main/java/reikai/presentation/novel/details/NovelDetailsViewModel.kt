@@ -192,6 +192,7 @@ import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.core.common.util.lang.SubscriberGate
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.launchUI
+import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.lang.pausedWhileUnsubscribed
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.chapter.model.NoChaptersException
