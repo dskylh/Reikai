@@ -39,9 +39,11 @@ class AppUpdateChecker(
 
 // RK --> Reikai release repos: nightly builds check the -preview release bucket, stable checks the main
 //        repo. The bucket keeps its repo name: renaming it on GitHub would strand every installed
-//        build that already polls the old one.
+//        build that already polls the old one. A fork's build names its own repo (UPDATE_REPO).
 val GITHUB_REPO: String by lazy {
-    if (isNightlyBuildType) {
+    if (BuildConfig.UPDATE_REPO.isNotEmpty()) {
+        BuildConfig.UPDATE_REPO
+    } else if (isNightlyBuildType) {
         "unseensnick/Reikai-preview"
     } else {
         "unseensnick/Reikai"

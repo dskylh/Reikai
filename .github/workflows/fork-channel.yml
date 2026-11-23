@@ -1,0 +1,145 @@
+name: Fork update channel
+
+# A fork's own update channel. Every day it merges unseensnick/Reikai's main into this fork's main, and
+# whenever main has something new it builds a signed nightly whose in-app updater checks THIS repo, then
+# publishes it here as release r<commit count>. Never runs on unseensnick/Reikai itself.
+#
+# One-time setup, as repository secrets: SIGNING_KEY (the keystore, base64) and SIGNING_PASSWORD (its
+# password, also the key's). The key must never change, or Android refuses to install an update over the
+# installed app. SYNC_TOKEN is optional: GitHub's own token may not push a merge that changes a workflow
+# file, so a sync that does fails until a token with the Workflows permission is stored under that name.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Queued rather than cancelled, so a sync's own push cannot cancel the build it is about to start.
+concurrency:
+  group: fork-channel
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the merge, publish releases
+  actions: write # turn off upstream's publishing workflows
+
+env:
+  UPSTREAM: unseensnick/Reikai
+  KEEP_RELEASES: 10
+
+jobs:
+  channel:
+    name: Sync, build and publish
+    if: github.repository != 'unseensnick/Reikai'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      # Upstream's own release workflows publish to repos only upstream can write, so on a fork they
+      # only fail. Disabled here rather than edited, so merging upstream never conflicts on them.
+      - name: Turn off upstream's publishing workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for workflow in nightly.yml release.yml deploy-docs.yml site-release.yml; do
+            gh workflow disable "$workflow" -R "$GITHUB_REPOSITORY" 2>/dev/null || true
+          done
+
+      - name: Merge upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags "https://github.com/$UPSTREAM.git" main
+          before=$(git rev-parse HEAD)
+          if ! git merge --no-edit -m "chore: merge $UPSTREAM main" FETCH_HEAD; then
+            git merge --abort
+            echo "::error::$UPSTREAM main conflicts with this fork's main. Merge it by hand, then re-run."
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$before" ]; then
+            if ! git push origin HEAD:main; then
+              echo "::error::Could not push the merge. If upstream changed a workflow file, add a SYNC_TOKEN secret with the Contents and Workflows permissions."
+              exit 1
+            fi
+          fi
+
+      - name: Check whether this build is new
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          count=$(git rev-list --count HEAD)
+          echo "COUNT=$count" >> "$GITHUB_ENV"
+          if gh release view "r$count" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "r$count is already published."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the signing secrets
+        if: steps.check.outputs.skip != 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_KEY" ] || [ -z "$SIGNING_PASSWORD" ]; then
+            echo "::error::Add the SIGNING_KEY and SIGNING_PASSWORD repository secrets (see the top of this file)."
+            exit 1
+          fi
+          echo "$SIGNING_KEY" | base64 -d > "$RUNNER_TEMP/reikai.keystore"
+
+      - name: Set up the build
+        if: steps.check.outputs.skip != 'true'
+        uses: ./.github/actions/setup-build
+        with:
+          cache-read-only: false
+          cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+
+      - name: Build the signed nightly
+        if: steps.check.outputs.skip != 'true'
+        run: >
+          ./gradlew assembleNightly -Pdist=github -Pinclude-telemetry=false -Ppreview-docs
+          -Pupdate-repo=${{ github.repository }}
+        env:
+          REIKAI_GITHUB_RELEASE: "true"
+          storeFile: ${{ runner.temp }}/reikai.keystore
+          storePassword: ${{ secrets.SIGNING_PASSWORD }}
+          keyAlias: reikai
+          keyPassword: ${{ secrets.SIGNING_PASSWORD }}
+
+      # The updater picks the asset whose name carries the phone's ABI, else the one without any.
+      - name: Publish
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dir=app/build/outputs/apk/nightly
+          cp "$dir/app-arm64-v8a-nightly.apk" "reikai-arm64-v8a-r$COUNT.apk"
+          cp "$dir/app-universal-nightly.apk" "reikai-r$COUNT.apk"
+          previous=$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName')
+          {
+            echo "Built from $(git rev-parse --short HEAD), with $UPSTREAM main merged in."
+            echo
+            if [ -n "$previous" ] && git fetch --quiet origin "refs/tags/$previous:refs/tags/$previous"; then
+              git log --no-merges --format='- %s' "$previous..HEAD" | head -40
+            else
+              git log --no-merges --format='- %s' -20
+            fi
+          } > notes.md
+          gh release create "r$COUNT" "reikai-arm64-v8a-r$COUNT.apk" "reikai-r$COUNT.apk" \
+            -R "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
+            --title "Reikai r$COUNT" --notes-file notes.md
+
+      - name: Prune old releases
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName -q ".[$KEEP_RELEASES:][].tagName" |
+            while read -r tag; do gh release delete "$tag" -R "$GITHUB_REPOSITORY" --cleanup-tag --yes; done

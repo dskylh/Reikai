@@ -59,6 +59,8 @@ android {
 
         buildConfigField("boolean", "TELEMETRY_INCLUDED", "${Config.includeTelemetry}")
         buildConfigField("boolean", "UPDATER_ENABLED", "${Config.enableUpdater}")
+        // RK: -Pupdate-repo=owner/name points the updater at a fork's own releases; empty keeps Reikai's
+        buildConfigField("String", "UPDATE_REPO", "\"${providers.gradleProperty("update-repo").getOrElse("")}\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
