@@ -2,6 +2,7 @@ package eu.kanade.presentation.more.settings.screen
 
 import android.os.Build
 import android.text.format.Formatter
+import android.widget.Toast
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
@@ -121,6 +122,7 @@ object SettingsNovelReaderScreen : SearchableSettings {
         var renderedBytes by remember { mutableLongStateOf(0L) }
         LaunchedEffect(Unit) { renderedBytes = renderedAudio.usedBytes() }
         val serverClient = remember { context.appGraph.ttsServerClient }
+        val speedTest = remember { context.appGraph.ttsRenderSpeedTest }
         val paired = novelPreferences.readerTtsServerToken().collectAsState().value.isNotBlank()
         var pairing by remember { mutableStateOf(false) }
         if (pairing) {
@@ -201,6 +203,28 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     },
                     title = stringResource(MR.strings.pref_tts_render_cap),
                     visible = audioSource != TtsAudioSource.LIVE,
+                ),
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_tts_render_speed),
+                    visible = audioSource == TtsAudioSource.PHONE,
+                    onClick = {
+                        context.toast(MR.strings.tts_render_speed_running)
+                        scope.launch {
+                            val result = speedTest.run()
+                            val message = if (result == null) {
+                                context.stringResource(MR.strings.tts_render_speed_failed)
+                            } else {
+                                context.stringResource(
+                                    MR.strings.tts_render_speed_result,
+                                    "%.1f".format(result.speed),
+                                    "%.1f".format(result.audioMs / 1000.0),
+                                    "%.1f".format(result.synthMs / 1000.0),
+                                    "%.1f".format(result.encodeMs / 1000.0),
+                                )
+                            }
+                            context.toast(message, Toast.LENGTH_LONG)
+                        }
+                    },
                 ),
                 Preference.PreferenceItem.ListPreference(
                     preference = novelPreferences.readerTtsRenderAhead(),

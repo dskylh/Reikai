@@ -11,6 +11,7 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkerParameters
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.R
@@ -110,6 +111,9 @@ class TtsRenderWorker(context: Context, params: WorkerParameters) : CoroutineWor
                 .addTag(TAG)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(network).build())
                 .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 1, TimeUnit.MINUTES)
+                // As the novel downloader starts: run now, in the foreground, rather than when Android
+                // gets round to deferred work, which a backgrounded app waits long for.
+                .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
                 .build()
             context.workManager.enqueueUniqueWork(TAG, ExistingWorkPolicy.KEEP, request)
         }

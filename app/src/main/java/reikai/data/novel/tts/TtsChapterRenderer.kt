@@ -4,6 +4,10 @@ import android.content.Context
 import android.os.SystemClock
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.util.lang.Hash
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import logcat.LogPriority
 import reikai.domain.novel.NovelChapterRepository
@@ -86,11 +90,12 @@ class TtsChapterRenderer(
         phone = null
     }
 
+    /** The next paragraph is spoken while the last one is encoded, so the engine never waits on Reikai. */
     private suspend fun renderOnPhone(
         chapterId: Long,
         paragraphs: List<String>,
         isWanted: suspend () -> Boolean,
-    ): Boolean {
+    ): Boolean = coroutineScope {
         val renderer = phone ?: PhoneParagraphRenderer(
             context,
             preferences.readerTtsEngine().get(),
@@ -98,12 +103,21 @@ class TtsChapterRenderer(
             store,
         ).also { phone = it }
         var complete = true
+        var keeping: Deferred<Boolean>? = null
         for (text in paragraphs.distinct()) {
-            if (!isWanted()) return false
+            if (!isWanted()) break
             if (renderer.isRendered(text)) continue
-            if (!renderer.render(chapterId, text)) complete = false
+            val synthesized = renderer.synthesize(chapterId, text)
+            if (keeping?.await() == false) complete = false
+            if (synthesized == null) {
+                complete = false
+                keeping = null
+                continue
+            }
+            keeping = async(Dispatchers.Default) { renderer.keep(synthesized) }
         }
-        return complete
+        if (keeping?.await() == false) complete = false
+        complete && isWanted()
     }
 
     private suspend fun renderOnPc(

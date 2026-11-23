@@ -16,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import mihon.core.metro.AppCoroutineScope
 import mihon.core.migration.migrations.MergedDuplicateCarryMigration
 import reikai.data.novel.tts.RenderedTtsAudio
+import reikai.data.novel.tts.TtsRenderSpeedTest
 import reikai.data.novel.tts.TtsRenderWorker
 import reikai.data.novel.tts.TtsServerClient
 import reikai.data.novel.update.NovelUpdateWorker
@@ -97,6 +98,7 @@ interface ReikaiGraph {
     val novelPreferences: NovelPreferences
     val renderedTtsAudio: RenderedTtsAudio // the read-aloud settings show and clear it
     val ttsServerClient: TtsServerClient // the read-aloud settings pair with and test the PC server
+    val ttsRenderSpeedTest: TtsRenderSpeedTest // the read-aloud settings time the engine
     val novelSourceManager: NovelSourceManager
     val iReaderHostServices: IReaderHostServices // the extension loader builds IReader sources with it
     val novelImageRequests: NovelImageRequests // novel covers and pictures take their source's headers
