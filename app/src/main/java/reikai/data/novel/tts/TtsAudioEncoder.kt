@@ -45,37 +45,37 @@ internal object TtsAudioEncoder {
                 var inputDone = false
                 var track = -1
                 val info = MediaCodec.BufferInfo()
-                while (true) {
-                    if (!inputDone) {
-                        val index = codec.dequeueInputBuffer(TIMEOUT_US)
-                        if (index >= 0) {
-                            val buffer = codec.getInputBuffer(index)!!
-                            val want = minOf(
-                                buffer.capacity().toLong(),
-                                chunk.size.toLong(),
-                                pcm.dataLength - fed,
-                            ).toInt()
-                            val read = if (want > 0) input.read(chunk, 0, want) else -1
-                            val timeUs = fed / bytesPerFrame * 1_000_000L / pcm.sampleRate
-                            if (read <= 0) {
-                                codec.queueInputBuffer(index, 0, 0, timeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                                inputDone = true
-                            } else {
-                                buffer.clear()
-                                buffer.put(chunk, 0, read)
-                                codec.queueInputBuffer(index, 0, read, timeUs, 0)
-                                fed += read
-                            }
+                // Each pass fills every free input buffer and drains every ready output without waiting,
+                // and blocks only when neither moved: a wait per AAC frame is slower than the engine.
+                drain@ while (true) {
+                    var moved = false
+                    while (!inputDone) {
+                        val index = codec.dequeueInputBuffer(0)
+                        if (index < 0) break
+                        moved = true
+                        val buffer = codec.getInputBuffer(index)!!
+                        val want = minOf(buffer.capacity().toLong(), chunk.size.toLong(), pcm.dataLength - fed).toInt()
+                        val read = if (want > 0) input.read(chunk, 0, want) else -1
+                        val timeUs = fed / bytesPerFrame * 1_000_000L / pcm.sampleRate
+                        if (read <= 0) {
+                            codec.queueInputBuffer(index, 0, 0, timeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            buffer.clear()
+                            buffer.put(chunk, 0, read)
+                            codec.queueInputBuffer(index, 0, read, timeUs, 0)
+                            fed += read
                         }
                     }
-                    val outIndex = codec.dequeueOutputBuffer(info, TIMEOUT_US)
-                    when {
-                        outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    while (true) {
+                        val outIndex = codec.dequeueOutputBuffer(info, if (moved) 0 else TIMEOUT_US)
+                        if (outIndex == MediaCodec.INFO_TRY_AGAIN_LATER) break
+                        moved = true
+                        if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                             track = muxer.addTrack(codec.outputFormat)
                             muxer.start()
                             muxing = true
-                        }
-                        outIndex >= 0 -> {
+                        } else if (outIndex >= 0) {
                             val isConfig = info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
                             if (info.size > 0 && !isConfig && muxing) {
                                 val buffer = codec.getOutputBuffer(outIndex)!!
@@ -84,7 +84,7 @@ internal object TtsAudioEncoder {
                                 muxer.writeSampleData(track, buffer, info)
                             }
                             codec.releaseOutputBuffer(outIndex, false)
-                            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
+                            if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break@drain
                         }
                     }
                 }
