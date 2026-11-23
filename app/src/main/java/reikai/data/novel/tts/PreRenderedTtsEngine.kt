@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import logcat.LogPriority
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.tts.NovelTtsEngine
@@ -27,14 +28,17 @@ import reikai.domain.novel.tts.TtsParagraphKey
 import reikai.domain.novel.tts.TtsPiece
 import tachiyomi.core.common.util.system.logcat
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * [NovelTtsEngine] that plays a paragraph from a file rendered ahead of time when one exists, and hands it
  * to [live] when not. Voices, engines and splitting all stay [live]'s. The audio source is read on every
- * [speak], so switching it takes effect at the next paragraph. While a paragraph plays, the next few of
- * the prepared chapter are rendered on this phone, so playback catches up with the renders and stays on
- * files. A piece's start inside a file is placed by its share of the paragraph's characters.
+ * [speak], so switching it takes effect at the next paragraph. With the phone as the source, a paragraph
+ * of the prepared chapter that has no file is rendered before it plays (live only past [MISS_RENDER_WAIT]),
+ * and the next few are rendered while it plays. A piece's start inside a file is placed by its share of
+ * the paragraph's characters.
  */
 @OptIn(UnstableApi::class)
 class PreRenderedTtsEngine(
@@ -73,7 +77,7 @@ class PreRenderedTtsEngine(
     private val phone = PhoneParagraphRenderer(context, enginePackage, preferences, store)
 
     /** Keys that failed to render this session, so a paragraph the engine refuses is not retried forever. */
-    private val failedKeys = mutableSetOf<String>()
+    private val failedKeys: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     override fun setRate(rate: Float) {
         this.rate = rate
@@ -106,8 +110,19 @@ class PreRenderedTtsEngine(
         speakJob = scope.launch {
             val key = TtsParagraphKey.of(text)
             val signature = if (source == TtsAudioSource.PC) TtsRenderSignature.pc(preferences) else phone.signature
-            val audio = withContext(io) {
-                store.find(key, signature)?.takeIf { File(it.path).isFile }
+            suspend fun lookup() = withContext(io) { store.find(key, signature)?.takeIf { File(it.path).isFile } }
+            var audio = lookup()
+            // Rendered first rather than spoken live: Android serves one engine request at a time and feeds
+            // live speech at playback pace, so live speech would hold every render behind it.
+            if (audio == null && source == TtsAudioSource.PHONE && renderAheadOf(text, includingIt = true)) {
+                audio = withTimeoutOrNull(MISS_RENDER_WAIT) {
+                    var found = lookup()
+                    while (found == null && key !in failedKeys) {
+                        delay(MISS_RENDER_POLL_MS)
+                        found = lookup()
+                    }
+                    found
+                }
             }
             if (spoken != generation) return@launch
             if (audio == null) {
@@ -115,7 +130,7 @@ class PreRenderedTtsEngine(
             } else {
                 play(audio, text, pieces, spoken, onPieceStart, onDone)
             }
-            renderAheadOf(text)
+            renderAheadOf(text, includingIt = false)
         }
     }
 
@@ -208,12 +223,15 @@ class PreRenderedTtsEngine(
         .setWakeMode(C.WAKE_MODE_LOCAL)
         .build()
 
-    /** Keeps the [RENDER_AHEAD] paragraphs after [text] rendered, one at a time, while the phone is the source. */
-    private fun renderAheadOf(text: String) {
+    /**
+     * Keeps the [RENDER_AHEAD] paragraphs from [text], or from the one after it, rendered one at a time
+     * while the phone is the source. False when [text] is not in the prepared chapter, so nothing renders.
+     */
+    private fun renderAheadOf(text: String, includingIt: Boolean): Boolean {
         val at = chapterParagraphs.indexOf(text)
-        if (at < 0) return
-        renderFrom = at + 1
-        if (renderJob?.isActive == true) return
+        if (at < 0) return false
+        renderFrom = if (includingIt) at else at + 1
+        if (renderJob?.isActive == true) return true
         renderJob = scope.launch(io) {
             while (isActive) {
                 if (preferences.readerTtsAudioSource().get() != TtsAudioSource.PHONE) break
@@ -222,6 +240,7 @@ class PreRenderedTtsEngine(
                 if (!phone.render(id, next)) failedKeys += TtsParagraphKey.of(next)
             }
         }
+        return true
     }
 
     private suspend fun nextToRender(): String? {
@@ -238,5 +257,9 @@ class PreRenderedTtsEngine(
     private companion object {
         const val RENDER_AHEAD = 5
         const val PROGRESS_POLL_MS = 50L
+        const val MISS_RENDER_POLL_MS = 100L
+
+        /** How long a paragraph with no file waits for its render before it is spoken live instead. */
+        val MISS_RENDER_WAIT = 10.seconds
     }
 }

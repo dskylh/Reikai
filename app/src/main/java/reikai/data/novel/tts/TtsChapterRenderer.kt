@@ -1,9 +1,11 @@
 package reikai.data.novel.tts
 
 import android.content.Context
+import android.os.SystemClock
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.util.lang.Hash
 import kotlinx.coroutines.delay
+import logcat.LogPriority
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRepository
@@ -19,6 +21,7 @@ import reikai.novel.source.NovelChapterTextCache
 import reikai.novel.source.NovelChapterTextLoader
 import reikai.novel.source.NovelSourceManager
 import reikai.presentation.reader.text.NovelTextRenderer
+import tachiyomi.core.common.util.system.logcat
 import java.io.File
 import kotlin.time.Duration.Companion.seconds
 
@@ -62,13 +65,20 @@ class TtsChapterRenderer(
      */
     suspend fun render(chapterId: Long, priority: TtsRenderPriority, isWanted: suspend () -> Boolean): Boolean {
         val chapter = chapterRepo.getById(chapterId) ?: return false
+        val started = SystemClock.elapsedRealtime()
         val (html, baseUrl) = loader.load(chapter)
         val paragraphs = NovelTextRenderer.paragraphsOf(html, baseUrl, context.resources.displayMetrics.widthPixels)
-        return if (preferences.readerTtsAudioSource().get() == TtsAudioSource.PC) {
+        val loaded = SystemClock.elapsedRealtime()
+        val complete = if (preferences.readerTtsAudioSource().get() == TtsAudioSource.PC) {
             renderOnPc(chapter, paragraphs, priority, isWanted)
         } else {
             renderOnPhone(chapterId, paragraphs, isWanted)
         }
+        logcat(LogPriority.INFO) {
+            "tts chapter: ${paragraphs.size} paragraphs, text ${loaded - started}ms, " +
+                "render ${SystemClock.elapsedRealtime() - loaded}ms, complete $complete"
+        }
+        return complete
     }
 
     fun shutdown() {

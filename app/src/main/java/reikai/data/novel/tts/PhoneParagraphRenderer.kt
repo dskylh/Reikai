@@ -1,9 +1,12 @@
 package reikai.data.novel.tts
 
 import android.content.Context
+import android.os.SystemClock
+import logcat.LogPriority
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.tts.TtsAudioRepository
 import reikai.domain.novel.tts.TtsParagraphKey
+import tachiyomi.core.common.util.system.logcat
 import java.io.File
 
 /**
@@ -36,13 +39,21 @@ class PhoneParagraphRenderer(
         val out = File(dir, "$name.m4a")
         val engine = renderer ?: SystemTtsRenderer(context, enginePackage).also { renderer = it }
         try {
+            val started = SystemClock.elapsedRealtime()
             if (!engine.render(text, preferences.readerTtsVoice().get(), preferences.readerTtsPitch().get(), wav)) {
                 return false
             }
+            val synthesized = SystemClock.elapsedRealtime()
             val durationMs = TtsAudioEncoder.wavToAac(wav, out) ?: return false
+            val encoded = SystemClock.elapsedRealtime()
             store.add(key, signature, chapterId, out.path, out.length(), durationMs, System.currentTimeMillis())
             val capBytes = preferences.readerTtsRenderCapMb().get() * BYTES_PER_MB
             store.evictOldest(capBytes).forEach { File(it).delete() }
+            // Numbers only, never the text: render speed is what an on-device test measures.
+            logcat(LogPriority.INFO) {
+                "tts render: ${text.length} chars, ${durationMs}ms audio, synth ${synthesized - started}ms, " +
+                    "encode ${encoded - synthesized}ms, store ${SystemClock.elapsedRealtime() - encoded}ms"
+            }
             return true
         } finally {
             wav.delete()
