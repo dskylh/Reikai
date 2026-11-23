@@ -337,8 +337,14 @@ class NovelPreferences(
     /** How many finished chapters keep their pre-rendered audio for rewinds; older ones lose it. */
     fun readerTtsKeepBehind() = preferenceStore.getInt("ln_reader_tts_keep_behind", 2)
 
-    /** The PC render server's address, as `http://host:port`. */
+    /** The PC render server's address on the local network, as `http://host:port`. */
     fun readerTtsServerUrl() = preferenceStore.getString("ln_reader_tts_server_url", "")
+
+    /** The same server from outside the local network (a tunnel or VPN address); tried when the first fails. */
+    fun readerTtsServerAwayUrl() = preferenceStore.getString("ln_reader_tts_server_away_url", "")
+
+    /** Whether the PC server is used on mobile data too, rather than only on unmetered networks. */
+    fun readerTtsServerMobileData() = preferenceStore.getBoolean("ln_reader_tts_server_mobile_data", false)
 
     /** The token the PC render server issued when paired. A credential: never logged or shown. */
     fun readerTtsServerToken() = preferenceStore.getString(Preference.privateKey("ln_reader_tts_server_token"), "")

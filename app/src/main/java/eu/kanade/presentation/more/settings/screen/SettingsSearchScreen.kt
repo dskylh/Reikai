@@ -51,6 +51,7 @@ import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.presentation.components.UpIcon
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.presentation.more.settings.screen.about.AboutScreen
+import eu.kanade.presentation.more.settings.screen.novel.SettingsReadAloudAudioScreen
 import eu.kanade.presentation.util.Screen
 import kotlinx.coroutines.flow.collectLatest
 import mihon.icons.materialsymbols.MaterialSymbols
@@ -329,6 +330,7 @@ private val settingScreens = listOf(
     // silently loses their rows.
     SettingsMangaReaderScreen,
     SettingsNovelReaderScreen,
+    SettingsReadAloudAudioScreen, // RK: read-aloud audio, a sub-screen of the novel reader
     SettingsDownloadScreen,
     SettingsTrackingScreen,
     SettingsBrowseScreen,

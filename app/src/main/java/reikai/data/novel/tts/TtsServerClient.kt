@@ -64,7 +64,7 @@ class TtsServerClient(
     }
 
     suspend fun cancel(jobId: String) {
-        withIOContext { call(Request.Builder().url(url("/v1/jobs/$jobId")).delete().build()) {} }
+        withIOContext { call({ Request.Builder().url(it + "/v1/jobs/$jobId").delete().build() }) {} }
     }
 
     /** Downloads chapter [index] of [jobId] into [into]; false when nothing in it is finished yet. */
@@ -95,39 +95,72 @@ class TtsServerClient(
         }
     }
 
-    private fun get(path: String) = Request.Builder().url(url(path)).get().build()
+    private fun get(path: String): (String) -> Request = { Request.Builder().url(it + path).get().build() }
 
-    private fun post(path: String, body: okhttp3.RequestBody) = Request.Builder().url(url(path)).post(body).build()
+    private fun post(path: String, body: okhttp3.RequestBody): (String) -> Request =
+        { Request.Builder().url(it + path).post(body).build() }
 
-    private fun url(path: String): String {
-        val base = preferences.readerTtsServerUrl().get().trim().trimEnd('/')
-        if (base.isEmpty()) throw TtsServerException(TtsServerFailure.UNREACHABLE)
-        return if (base.startsWith("http://") || base.startsWith("https://")) "$base$path" else "http://$base$path"
+    /** The addresses to try, the one that last answered first, so leaving home costs one timeout, not one per call. */
+    private fun bases(): List<String> {
+        val bases = listOf(preferences.readerTtsServerUrl().get(), preferences.readerTtsServerAwayUrl().get())
+            .mapNotNull(::normalizedBase)
+            .distinct()
+        if (bases.isEmpty()) throw TtsServerException(TtsServerFailure.UNREACHABLE)
+        return bases.sortedByDescending { it == lastAnswered }
     }
 
-    private fun <T> call(request: Request, authorized: Boolean = true, read: (Response) -> T): T {
-        val sent = if (authorized) {
-            request.newBuilder().header("Authorization", "Bearer ${preferences.readerTtsServerToken().get()}").build()
-        } else {
-            request
+    @Volatile
+    private var lastAnswered: String? = null
+
+    private fun <T> call(build: (String) -> Request, authorized: Boolean = true, read: (Response) -> T): T {
+        var failure: IOException? = null
+        for (base in bases()) {
+            val request = build(base)
+            val sent = if (authorized) {
+                request.newBuilder()
+                    .header("Authorization", "Bearer ${preferences.readerTtsServerToken().get()}")
+                    .build()
+            } else {
+                request
+            }
+            val response = try {
+                client.newCall(sent).execute()
+            } catch (e: IOException) {
+                failure = e
+                continue
+            }
+            lastAnswered = base
+            return answer(response, read)
         }
-        val response = try {
-            client.newCall(sent).execute()
-        } catch (e: IOException) {
-            throw TtsServerException(TtsServerFailure.UNREACHABLE, e)
-        }
+        throw TtsServerException(TtsServerFailure.UNREACHABLE, failure)
+    }
+
+    private fun <T> answer(response: Response, read: (Response) -> T): T {
         return response.use {
             when {
                 it.code == UNAUTHORIZED -> throw TtsServerException(TtsServerFailure.UNAUTHORIZED)
                 it.code == BAD_REQUEST -> throw TtsServerException(TtsServerFailure.UNSUPPORTED)
                 !it.isSuccessful -> throw TtsServerException(TtsServerFailure.UNREACHABLE)
-                else -> read(it)
+                // A body cut off mid-download reads as the server going away, which the queue retries.
+                else -> try {
+                    read(it)
+                } catch (e: IOException) {
+                    throw TtsServerException(TtsServerFailure.UNREACHABLE, e)
+                }
             }
         }
     }
 
     companion object {
         const val CONTRACT = 1
+
+        /** `http://host:port` without a trailing slash, adding the scheme a bare `host:port` lacks; null when blank. */
+        fun normalizedBase(address: String): String? {
+            val base = address.trim().trimEnd('/')
+            if (base.isEmpty()) return null
+            return if (base.startsWith("http://") || base.startsWith("https://")) base else "http://$base"
+        }
+
         private val JSON = "application/json".toMediaType()
         private val TIMEOUT = 5.seconds
         private val READ_TIMEOUT = 60.seconds

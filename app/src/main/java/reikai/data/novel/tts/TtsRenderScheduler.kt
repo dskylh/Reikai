@@ -38,13 +38,17 @@ class TtsRenderScheduler(
         store.dropChapters(plan.evict).forEach { File(it).delete() }
         if (plan.render.isEmpty()) return
         store.enqueue(plan.render, pinned = false, TtsRenderPriority.WINDOW, System.currentTimeMillis())
-        TtsRenderWorker.start(context, source)
+        TtsRenderWorker.start(context, source, preferences.readerTtsServerMobileData().get())
     }
 
     /** Queues [chapterIds] in this order, pinned so the window leaves them alone until they are read past. */
     suspend fun preRender(chapterIds: List<Long>) {
         if (chapterIds.isEmpty()) return
         store.enqueue(chapterIds, pinned = true, TtsRenderPriority.MANUAL, System.currentTimeMillis())
-        TtsRenderWorker.start(context, preferences.readerTtsAudioSource().get())
+        TtsRenderWorker.start(
+            context,
+            preferences.readerTtsAudioSource().get(),
+            preferences.readerTtsServerMobileData().get(),
+        )
     }
 }

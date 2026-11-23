@@ -105,8 +105,12 @@ class TtsRenderWorker(context: Context, params: WorkerParameters) : CoroutineWor
         private const val NOTIFICATION_ID = -802
 
         /** Starts the queue, or leaves a running one to pick up what was just queued. */
-        fun start(context: Context, source: TtsAudioSource) {
-            val network = if (source == TtsAudioSource.PC) NetworkType.UNMETERED else NetworkType.NOT_REQUIRED
+        fun start(context: Context, source: TtsAudioSource, allowMobileData: Boolean) {
+            val network = when {
+                source != TtsAudioSource.PC -> NetworkType.NOT_REQUIRED
+                allowMobileData -> NetworkType.CONNECTED
+                else -> NetworkType.UNMETERED
+            }
             val request = OneTimeWorkRequestBuilder<TtsRenderWorker>()
                 .addTag(TAG)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(network).build())
