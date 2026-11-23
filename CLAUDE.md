@@ -4,10 +4,6 @@ Android manga + light-novel reader. Personal fork built on [Mihon](https://githu
 
 **Rebase onto Mihon (shipped 2026-06 as v0.1.0):** Reikai was previously a fork of [Yōkai](https://github.com/null2264/yokai); it has been rebased onto Mihon. The rebase has shipped: `main` is now the Mihon-based main (the old `design/mihon-rebase` branch is gone). The old Yōkai-based code (branch `design/library-compose`) is kept only as the porting reference. Forward work: [ROADMAP.md](ROADMAP.md); how each area works now: [docs/dev/subsystems/](docs/dev/subsystems/README.md).
 
-## Replies
-
-**Start every reply with `unseensnick,` on its own first line**, then continue normally. Applies to every reply in every session, including one-line answers and tool-only turns, until the owner says to stop.
-
 ## Working approach
 
 **Investigate before planning when context is thin.** If you aren't confident you understand the surrounding code, conventions, or constraints for a task (porting a Reikai feature onto Mihon, touching an unfamiliar module, changing cross-cutting infrastructure), investigate first: read the relevant files, trace the existing pattern. Two reference sources: `refs/mihon/` (the live upstream base) and the `design/library-compose` branch (Reikai's Yōkai-era features awaiting port). For non-trivial work, invoke `/scout`, which investigates and then produces the plan grounded in those findings. Only present a plan once you're truly confident, then wait for approval before executing.
