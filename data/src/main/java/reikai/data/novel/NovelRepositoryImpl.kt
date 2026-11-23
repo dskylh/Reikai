@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import logcat.LogPriority
+import reikai.data.merge.MAX_SQL_IDS_PER_QUERY
 import reikai.domain.novel.FavoritedNovels
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.model.LibraryNovel
@@ -39,11 +40,32 @@ class NovelRepositoryImpl(
     override suspend fun getById(id: Long): Novel? =
         database.novelsQueries.findById(id, ::mapNovel).awaitAsOneOrNull()
 
+    override suspend fun getByIds(ids: List<Long>): List<Novel> =
+        ids.chunked(MAX_SQL_IDS_PER_QUERY).flatMap { database.novelsQueries.findByIds(it, ::mapNovel).awaitAsList() }
+
     override suspend fun getByUrlAndSource(url: String, source: String): Novel? =
         database.novelsQueries.findByUrlAndSource(url, source, ::mapNovel).awaitAsOneOrNull()
 
     override suspend fun getFavorites(): List<Novel> =
         database.novelsQueries.findFavorites(::mapNovel).awaitAsList()
+
+    override suspend fun resetViewerFlags(): Boolean =
+        try {
+            database.novelsQueries.resetViewerFlags()
+            true
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR, e)
+            false
+        }
+
+    override suspend fun setViewerFlags(id: Long, flag: Long, mask: Long): Boolean =
+        try {
+            database.novelsQueries.setViewerFlagBits(mask = mask, flag = flag, id = id)
+            true
+        } catch (e: Exception) {
+            logcat(LogPriority.ERROR, e) { "Failed to set viewer flags of novel id=$id" }
+            false
+        }
 
     override suspend fun getReadNovelsNotInLibrary(): List<Novel> =
         database.novelsQueries.getReadNovelsNotInLibrary(::mapNovel).awaitAsList()
@@ -77,12 +99,14 @@ class NovelRepositoryImpl(
         bookmarked: Boolean?,
         includedCategories: List<Long>,
         excludedCategories: List<Long>,
+        seriesMerging: Boolean,
     ): Flow<List<NovelUpdateWithRelations>> =
         database.novelUpdatesViewQueries.getRecentNovelUpdatesWithFilters(
             after = after,
             read = unread?.let { !it },
             started = started?.let { if (it) 1L else 0L },
             bookmarked = bookmarked,
+            seriesMerging = if (seriesMerging) 1L else 0L,
             includedEmpty = includedCategories.isEmpty(),
             includedCategories = includedCategories,
             excludedEmpty = excludedCategories.isEmpty(),
@@ -100,6 +124,9 @@ class NovelRepositoryImpl(
     override fun getByUrlAndSourceAsFlow(url: String, source: String): Flow<Novel?> =
         database.novelsQueries.findByUrlAndSource(url, source, ::mapNovel).subscribeToOneOrNull()
             .distinctUntilChanged()
+
+    override fun getByIdAsFlow(id: Long): Flow<Novel?> =
+        database.novelsQueries.findById(id, ::mapNovel).subscribeToOneOrNull().distinctUntilChanged()
 
     override suspend fun insertOrGet(novel: Novel): Novel? {
         val listed = novel.copy(thumbnailUrl = keptCover(null, novel.thumbnailUrl))

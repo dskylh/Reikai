@@ -1,10 +1,13 @@
 package eu.kanade.tachiyomi.ui.library
 
+import androidx.compose.runtime.Immutable
 import reikai.domain.entry.EntryId
 import reikai.presentation.library.LibraryQuerySource
 import reikai.presentation.library.SourceBadge
 import tachiyomi.domain.library.model.LibraryManga
 
+// RK: rows are rebuilt on every library emission, so an equal one must compare equal to skip recomposing
+@Immutable
 data class LibraryItem(
     val libraryManga: LibraryManga,
     val downloadCount: Int,
@@ -32,6 +35,12 @@ data class LibraryItem(
     val memberSources: List<LibraryQuerySource> = emptyList(),
     // RK: every member's genres on a merged series, for the Lewd filter. Empty when not merged.
     val memberGenres: List<String> = emptyList(),
+    // RK: every member's non-blank notes on a merged series, since each source keeps its own, for the
+    // notes search terms. Empty when not merged, or when no member has notes.
+    val memberNotes: List<String> = emptyList(),
+    // RK: every member's own title on a merged series, which search reads as the series' other titles
+    // (seriesAltTitles). Empty when not merged.
+    val memberTitles: List<String> = emptyList(),
     // RK: the other members' cover models on a merged series, best ranked first, drawn when the row's
     // own cover is missing or fails to load (libraryCoverModel). Empty when not merged.
     val coverFallbacks: List<Any> = emptyList(),
@@ -40,6 +49,7 @@ data class LibraryItem(
 
     // RK: the EXH tag-search matcher moved to GallerySearchIndex.matches (GallerySearchIndex.kt).
 
+    @Immutable // RK
     data class Badges(
         val downloadCount: Int,
         val unreadCount: Long,

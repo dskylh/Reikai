@@ -37,6 +37,15 @@ Try these solutions:
   * Do not use your device's system folders (such as "**Documents**" or "**Downloads**"), they are restricted by Android and will cause issues when Reikai tries to access them.
   * Refer to the [Storage FAQ](/docs/faq/storage) for more details.
 
+### "Storage location unavailable"
+Before Reikai saves a storage location you pick, it tries writing a chapter download there. This message means that try failed, and your previous storage location is kept. Possible reasons include:
+* Reikai cannot write to the folder, for example on a read-only SD card or in a folder Android restricts.
+* A file, rather than a folder, has the name of one of the folders Reikai keeps there: `autobackup`, `downloads`, `local`, `novel_downloads`, `fonts` or `localnovels`.
+
+Try these solutions:
+* Create a new "Reikai" folder at the top level of your storage and pick that one.
+* If a file has one of those names, rename or move it with a file manager, then pick the folder again.
+
 ### Storage issues with Android 11+
 See the [Scoped Storage](/docs/faq/storage#scoped-storage) portion of the FAQ to learn how it affects **Reikai** in **Android 11+** and how to fix it.
 
@@ -94,37 +103,37 @@ Storage-related error causes:
 * Corrupted or inaccessible writing drive, verify using a file manager.
 
 ## HTTP errors
-Encountering HTTP errors? Here's what they mean and how to address them.
+The app shows these as `HTTP` and the code, followed by "check website in WebView". Here's what they mean and how to address them.
 
-### `HTTP Error: 400, 401` - Bad request / Unauthorized
+### `HTTP 400` or `HTTP 401` - Bad request / Unauthorized
 This error suggests that the request could not be processed:
 * (For Trackers) Go to <nav to="tracking">, unlink and relink the tracking service to refresh the authorization.
 * Use **WebView** to verify if the page or image can be accessed.
 
-### `HTTP Error: 403` - Forbidden
+### `HTTP 403` - Forbidden
 Possible reasons for this error:
 * The selected source has Cloudflare protection. Check the [Cloudflare guide](/docs/guides/troubleshooting/#cloudflare) for solutions.
 * The source might be down, removed the series, or banned your IP.
   > Open WebView to confirm.
 
-### `HTTP Error: 404` - Not Found
+### `HTTP 404` - Not Found
 This error likely indicates a down source or removed series.
 * Use **WebView** to verify if the page or image still exists.
   > Consider switching to a different source for the series.
 
-### `HTTP Error: 429` - Too Many Requests
+### `HTTP 429` - Too Many Requests
 This error suggests the source temporarily banned your IP due to fast downloads/reads.
 * Take a break from reading and pause any ongoing downloads. Wait a few hours, then try accessing the content again.
 
-### `HTTP Error: 5xx`
+### `HTTP 5xx`
 Errors like `500`, `502`, `520`, `521`, etc., indicate server-side issues on the source's end.
 
 [Check the source in WebView](/docs/guides/troubleshooting/#accessing-websites-via-webview) to confirm if it's down.
 
-### `HTTP Error: 1006`
+### `HTTP 1006`
 This error means a temporary IP ban by the source.
 
-### `HTTP Error: 1020`
+### `HTTP 1020`
 This error points to violating a firewall rule set by the site owner.
 The owner might raise Cloudflare protection or block IPs from outside their country.
 

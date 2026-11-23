@@ -14,8 +14,8 @@ or above the migration's gate.
    and take what it needs as constructor parameters. `ChapterNameSuffixMigration` is the model.
 2. Give it its own gate above the shipped `versionCode` (grep `override val version` under
    `mihon/core/migration/migrations/` for the current top); never reuse a gate another migration holds.
-3. Raise `versionCode` in `app/build.gradle.kts` to that gate and add the migration to the comment above
-   it that lists each gate. This is the one mid-cycle `versionCode` bump allowed; `versionName` waits for
+3. Raise `versionCode` in `app/build.gradle.kts` to that gate and update the shipped and next-gate numbers
+   in the comment above it. This is the one mid-cycle `versionCode` bump allowed; `versionName` waits for
    the release cut.
 4. Write a test under `app/src/test/java/mihon/core/migration/migrations/` that runs it through
    `Migrator.initialize(old, BuildConfig.VERSION_CODE, listOf(migration))` from an older version, as
@@ -72,8 +72,8 @@ regenerate or delete `43.db`. Full rules: [.claude/rules/database.md](../../.cla
    `Tracker.supportsContent(isNovel)`, so a tracker that declares `supportsNovels` needs no wiring there.
 5. Add it to the hand-kept `cases()` in `app/src/test/java/reikai/data/track/TrackerMetadataAccessTest.kt`.
 
-Checks: nothing iterates `TrackerManager.trackers` in a test, so the case list and a duplicate id are
-caught only by review.
+Checks: no test checks `TrackerManager.trackers` against the case list or for a duplicate id, so both
+are caught only by review.
 
 ## Add a backup field
 
@@ -99,21 +99,24 @@ Rows are `Preference.PreferenceItem.*` inside a `Preference.PreferenceGroup`, re
 `getPreferences()`. Read preferences off the graph with `remember { context.appGraph.x }` at the top of
 the composable, never inside a row.
 
-1. A new screen is an `object` implementing `SearchableSettings`
-   (`eu/kanade/presentation/more/settings/screen/SearchableSettings.kt`).
-2. Add it to `SettingsMainScreen`'s item list so it can be opened, and to `settingScreens` in
+1. A new screen is a `@Serializable data object` implementing `SearchableSettings`
+   (`eu/kanade/presentation/more/settings/screen/SearchableSettings.kt`), which is a `NavKey`.
+2. Register it as a route, `entry<X> { X.Content() }` in `reikaiEntries()` (`ReikaiNavGraph.kt`), and
+   list it in `ReikaiRoutesTest.routes`. A route registered nowhere crashes when opened.
+3. Add it to `SettingsMainScreen`'s item list so it can be opened, and to `settingScreens` in
    `SettingsSearchScreen.kt` so search can find its rows. A screen missing from that list is invisible to
    search, and so is a row on a sub-screen that is not itself listed there.
-3. A row that is expensive to build can read `LocalSettingsIndexing`, which is true while search builds
+4. A row that is expensive to build can read `LocalSettingsIndexing`, which is true while search builds
    its index, and skip the work.
 
 Search matches a visible row's title or subtitle, skips `InfoPreference` rows and hidden groups, and a
-screen whose `isEnabled()` returns false is left out. Checks: none automated; search for the new row's
+screen whose `isEnabled()` returns false is left out. Checks: `ReikaiRoutesTest` (registration, and
+`RouteListGuardTest` for a `@Serializable` route left off its list); for search, look for the new row's
 title in the app.
 
 ## Add a ViewModel
 
-Every screen is a Voyager `Screen` backed by an AndroidX `ViewModel` from the Metro graph
+Every screen is a route and a screen function backed by an AndroidX `ViewModel` from the Metro graph
 ([.claude/rules/screen-conventions.md](../../.claude/rules/screen-conventions.md)).
 
 - **Graph dependencies only:** annotate the class `@Inject`, `@ViewModelKey` and

@@ -1,12 +1,13 @@
 package eu.kanade.tachiyomi.ui.category
 
-import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.ViewModelStore
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.plus
@@ -15,6 +16,10 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.Arguments
+import org.junit.jupiter.params.provider.MethodSource
+import reikai.domain.category.CategoryContentType
 import reikai.domain.category.CategoryIdPreferences
 import reikai.domain.library.ContentType
 import reikai.domain.library.ReikaiLibraryPreferences
@@ -35,6 +40,8 @@ class CategoryViewModelTest {
     private val b = Category(id = 2L, name = "B", order = 1L, flags = 0L)
     private val c = Category(id = 3L, name = "C", order = 2L, flags = 0L)
 
+    private val novel = Category(id = 4L, name = "N", order = 3L, flags = 0L, contentType = CategoryContentType.NOVEL)
+
     private val table = MutableStateFlow(listOf(a, b, c))
     private val repository = mockk<CategoryRepository>(relaxed = true) {
         every { getUnfilteredAsFlow() } returns table
@@ -46,12 +53,13 @@ class CategoryViewModelTest {
     private val libraryPreferences = LibraryPreferences(store)
     private val reikaiLibraryPreferences = ReikaiLibraryPreferences(store)
     private val upcomingPreferences = UpcomingPreferences(store)
+    private val novelPreferences = NovelPreferences(store)
     private val actions = CategoryActions(
         categoryRepository = repository,
         categoryIdPreferences = CategoryIdPreferences(
             libraryPreferences,
             DownloadPreferences(store),
-            NovelPreferences(store),
+            novelPreferences,
             reikaiLibraryPreferences,
             ReikaiSourcePreferences(store),
             upcomingPreferences,
@@ -65,18 +73,58 @@ class CategoryViewModelTest {
     @RegisterExtension
     val main = MainDispatcherExtension()
 
-    /** A model whose state and events are collected, as the screen collects them. */
-    private fun TestScope.model(events: MutableList<CategoryEvent> = mutableListOf()): CategoryViewModel {
+    /** A model whose state is collected, as the screen collects it. */
+    private fun TestScope.model(): CategoryViewModel {
         // Unconfined, so a committed delete has landed by the time the call returns
         val appScope = backgroundScope + UnconfinedTestDispatcher(testScheduler)
         val model = main.track(CategoryViewModel(appScope, actions, reikaiLibraryPreferences))
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { model.state.collect {} }
-        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { model.events.collect { events += it } }
         return model
     }
 
     private val CategoryViewModel.selection
         get() = (state.value as CategoryScreenState.Success).selection
+
+    /** The chip row hides itself then, so a chip left on Novels must not keep the list on novels. */
+    @Test
+    fun `hiding the chip's type while the screen is open follows the Show setting`() = runTest {
+        table.value += novel
+        val model = model()
+        model.setContentType(ContentType.NOVELS)
+
+        reikaiLibraryPreferences.shownContent.set(ContentType.MANGA)
+
+        (model.state.value as CategoryScreenState.Success).categories shouldBe listOf(a, b, c)
+    }
+
+    @Test
+    fun `the list narrows to the shown type while the other is hidden`() = runTest {
+        table.value += novel
+        reikaiLibraryPreferences.shownContent.set(ContentType.NOVELS)
+
+        val state = model().state.first { it is CategoryScreenState.Success } as CategoryScreenState.Success
+
+        (state.contentType to state.categories) shouldBe (ContentType.NOVELS to listOf(novel))
+    }
+
+    @Test
+    fun `a name only a hidden category holds stays free`() = runTest {
+        table.value += novel
+        reikaiLibraryPreferences.shownContent.set(ContentType.NOVELS)
+
+        val state = model().state.first { it is CategoryScreenState.Success } as CategoryScreenState.Success
+
+        state.allNames shouldBe listOf("N")
+    }
+
+    @Test
+    fun `every name counts while both types show, so a chip cannot let a duplicate through`() = runTest {
+        table.value += novel
+
+        val state = model().state.first { it is CategoryScreenState.Success } as CategoryScreenState.Success
+
+        state.allNames shouldBe listOf("A", "B", "C", "N")
+    }
 
     /** The screen only masks picks the chip hides, so kept ones came back on the next flip. */
     @Test
@@ -104,12 +152,11 @@ class CategoryViewModelTest {
      *  shows left the deleted rows to come back with it. */
     @Test
     fun `a long press after undoing a bulk delete selects only the pressed row`() = runTest {
-        val events = mutableListOf<CategoryEvent>()
-        val model = model(events)
+        val model = model()
         model.toggleSelection(a.id)
         model.toggleRangeSelection(b.id)
         model.deleteSelected()
-        model.undoPendingDelete(events.undoBatches().single())
+        model.undoPendingDelete(model.undoBatches().single())
 
         model.toggleRangeSelection(c.id)
 
@@ -119,11 +166,10 @@ class CategoryViewModelTest {
     /** The screen shows one snackbar per delete, one after another, so each must resolve only its own rows. */
     @Test
     fun `undoing the first delete leaves the second to its own snackbar`() = runTest {
-        val events = mutableListOf<CategoryEvent>()
-        val model = model(events)
+        val model = model()
         model.deleteCategory(a)
         model.deleteCategory(b)
-        val (first, second) = events.undoBatches()
+        val (first, second) = model.undoBatches()
 
         model.undoPendingDelete(first)
         model.commitPendingDelete(second)
@@ -133,11 +179,10 @@ class CategoryViewModelTest {
 
     @Test
     fun `committing the first delete leaves the second undoable`() = runTest {
-        val events = mutableListOf<CategoryEvent>()
-        val model = model(events)
+        val model = model()
         model.deleteCategory(a)
         model.deleteCategory(b)
-        val (first, second) = events.undoBatches()
+        val (first, second) = model.undoBatches()
 
         model.commitPendingDelete(first)
         model.undoPendingDelete(second)
@@ -147,39 +192,144 @@ class CategoryViewModelTest {
 
     @Test
     fun `committing a delete drops the category from the collapsed ones`() = runTest {
-        val events = mutableListOf<CategoryEvent>()
-        val model = model(events)
+        val model = model()
         reikaiLibraryPreferences.collapsedCategories.set(setOf(a.id.toString(), b.id.toString()))
         model.deleteCategory(a)
 
-        model.commitPendingDelete(events.undoBatches().single())
+        model.commitPendingDelete(model.undoBatches().single())
 
         reikaiLibraryPreferences.collapsedCategories.get() shouldBe setOf(b.id.toString())
     }
 
     @Test
     fun `committing a delete drops the category from the Upcoming filter`() = runTest {
-        val events = mutableListOf<CategoryEvent>()
-        val model = model(events)
+        val model = model()
         upcomingPreferences.filterIncludedCategories.set(listOf(a.id, b.id))
         model.deleteCategory(a)
 
-        model.commitPendingDelete(events.undoBatches().single())
+        model.commitPendingDelete(model.undoBatches().single())
 
         upcomingPreferences.filterIncludedCategories.get() shouldBe listOf(b.id)
     }
 
-    /** Voyager clears the popped screen's model before its exit animation ends and onDispose commits. */
+    /** Leaving the screen pops and clears its model, after the model's own scope is gone. */
     @Test
-    fun `leaving the screen commits a delete after the model's scope is gone`() = runTest {
+    fun `clearing the model commits its pending delete`() = runTest {
         val model = model()
         model.deleteCategory(a)
-        model.viewModelScope.cancel()
 
-        model.commitAllPendingDeletes()
+        ViewModelStore().apply { put("categories", model) }.clear()
 
         table.value shouldBe listOf(b, c)
     }
 
-    private fun List<CategoryEvent>.undoBatches() = filterIsInstance<CategoryEvent.ShowUndoSnackbar>().map { it.batch }
+    /** The snackbar is drawn from the undoable deletes, so this is what takes it off screen. */
+    @Test
+    fun `a delete a drag has started committing is no longer offered for undo`() = runTest {
+        coEvery { repository.delete(any()) } coAnswers { awaitCancellation() }
+        val model = model()
+        model.deleteCategory(a)
+
+        model.changeOrder(b, 0)
+
+        model.undoBatches() shouldBe emptyList()
+    }
+
+    @ParameterizedTest
+    @MethodSource("ownTypePreferences")
+    fun `committing a delete scrubs the id from its own type's preferences only`(
+        contentType: Long,
+        kept: Set<String>,
+    ) = runTest {
+        val row = novel.copy(contentType = contentType)
+        table.value += row
+        referenceEverywhere(row.id)
+        val model = model()
+        model.deleteCategory(row)
+
+        model.commitPendingDelete(model.undoBatches().single())
+
+        preferencesHolding(row.id) shouldBe kept
+    }
+
+    private fun referenceEverywhere(id: Long) {
+        libraryPreferences.updateCategories.set(setOf(id.toString()))
+        libraryPreferences.defaultCategory.set(id.toInt())
+        novelPreferences.novelUpdateCategories().set(setOf(id.toString()))
+        novelPreferences.defaultNovelCategory().set(id.toInt())
+    }
+
+    private fun preferencesHolding(id: Long) = mapOf(
+        MANGA_SET to (id.toString() in libraryPreferences.updateCategories.get()),
+        MANGA_DEFAULT to (libraryPreferences.defaultCategory.get() == id.toInt()),
+        NOVEL_SET to (id.toString() in novelPreferences.novelUpdateCategories().get()),
+        NOVEL_DEFAULT to (novelPreferences.defaultNovelCategory().get() == id.toInt()),
+    ).filterValues { it }.keys
+
+    private val universal =
+        Category(id = 5L, name = "U", order = 1L, flags = 0L, contentType = CategoryContentType.UNIVERSAL)
+
+    /** A table of [a, universal, novel, b] whose stored order follows every write, as the database's does. */
+    private fun mixedTable() {
+        table.value = listOf(a, universal, novel.copy(order = 2L), b.copy(order = 3L))
+        coEvery { repository.updateAllOrders(any()) } answers {
+            val ids = firstArg<List<Long>>()
+            table.update { rows -> rows.map { it.copy(order = ids.indexOf(it.id).toLong()) }.sortedBy { it.order } }
+        }
+    }
+
+    private fun storedIds() = table.value.sortedBy { it.order }.map { it.id }
+
+    /** The drop index is a slot in the narrowed list on screen, which also hides the row pending delete. */
+    @Test
+    fun `a drag under a chip with an undo-delete pending lands where it was dropped`() = runTest {
+        mixedTable()
+        val model = model()
+        model.setContentType(ContentType.MANGA)
+        model.deleteCategory(universal)
+
+        model.changeOrder(b, 0)
+
+        storedIds() shouldBe listOf(b.id, novel.id, a.id)
+    }
+
+    @Test
+    fun `a drag while Show hides novels moves among the manga rows`() = runTest {
+        mixedTable()
+        reikaiLibraryPreferences.shownContent.set(ContentType.MANGA)
+        val model = model()
+
+        model.changeOrder(b, 0)
+
+        storedIds() shouldBe listOf(b.id, a.id, novel.id, universal.id)
+    }
+
+    /** The move menu means the ends of every category, not of the ones the chip shows. */
+    @Test
+    fun `move to top under a chip puts the category first in the whole table`() = runTest {
+        mixedTable()
+        val model = model()
+        model.setContentType(ContentType.NOVELS)
+
+        model.moveToEnd(novel, 0)
+
+        storedIds().first() shouldBe novel.id
+    }
+
+    private fun CategoryViewModel.undoBatches() =
+        (state.value as CategoryScreenState.Success).undoableDeletes.map { it.batch }
+
+    private companion object {
+        const val MANGA_SET = "manga update categories"
+        const val MANGA_DEFAULT = "manga default category"
+        const val NOVEL_SET = "novel update categories"
+        const val NOVEL_DEFAULT = "novel default category"
+
+        /** A deleted row's type to the preferences that must still name its id: the other type's. */
+        @JvmStatic
+        fun ownTypePreferences() = listOf(
+            Arguments.of(CategoryContentType.MANGA, setOf(NOVEL_SET, NOVEL_DEFAULT)),
+            Arguments.of(CategoryContentType.NOVEL, setOf(MANGA_SET, MANGA_DEFAULT)),
+        )
+    }
 }

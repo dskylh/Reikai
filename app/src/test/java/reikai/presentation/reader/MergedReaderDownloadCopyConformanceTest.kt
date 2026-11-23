@@ -5,17 +5,10 @@ import eu.kanade.tachiyomi.ui.reader.loader.DownloadPageLoader
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.mockk
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.params.ParameterizedTest
@@ -24,6 +17,8 @@ import reikai.domain.manga.MergedChapterProvider
 import reikai.domain.merge.ChapterUnit
 import reikai.domain.merge.renderStoredStitch
 import reikai.domain.novel.model.NovelChapter
+import reikai.util.resetVirtualDispatchers
+import reikai.util.virtualDispatchers
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -36,10 +31,12 @@ import java.util.concurrent.ConcurrentHashMap
 class MergedReaderDownloadCopyConformanceTest {
 
     @BeforeEach
-    fun setUp() = Dispatchers.setMain(StandardTestDispatcher())
+    fun setUp() {
+        virtualDispatchers()
+    }
 
     @AfterEach
-    fun tearDown() = Dispatchers.resetMain()
+    fun tearDown() = resetVirtualDispatchers()
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("probes")
@@ -165,13 +162,17 @@ class MangaDownloadProbe : ReaderDownloadProbe {
             group,
             queued,
         ->
-        model.handleChapterDownload(
-            group.pooledChapters.first {
-                it.id == ids.getValue(row)
-            },
-            ChapterDownloadAction.START,
-        )
-        settle(queued)
+        settle(model) {
+            model.handleChapterDownload(
+                listOf(
+                    group.pooledChapters.first {
+                        it.id == ids.getValue(row)
+                    },
+                ),
+                ChapterDownloadAction.START,
+            )
+        }
+        rolesOf(queued)
     }
 
     override suspend fun downloadAhead(scope: TestScope): Set<ReaderCopy> = open(downloadAhead = 3) {
@@ -184,8 +185,8 @@ class MangaDownloadProbe : ReaderDownloadProbe {
         val pages = loadedPages(current, 2)
         // Download-ahead only runs while the chapter being read is itself read from disk.
         current.pageLoader = mockk<DownloadPageLoader>(relaxed = true)
-        model.onPageSelected(pages[1])
-        settle(queued) - ReaderCopy.A2
+        settle(model) { model.onPageSelected(pages[1]) }
+        rolesOf(queued) - ReaderCopy.A2
     }
 
     override suspend fun sheetOffersDownload(scope: TestScope, row: ReaderCopy): Boolean = open { model, _, _, _ ->
@@ -193,18 +194,13 @@ class MangaDownloadProbe : ReaderDownloadProbe {
         sheetRows(model).single { it.id in chapter }.offersDownload
     }
 
-    private suspend fun settle(queued: Set<Long>): Set<ReaderCopy> = withContext(Dispatchers.Default) {
-        withTimeoutOrNull(3_000) { while (queued.isEmpty()) delay(20) }
-        // Anything else a wrong rule would queue lands in the same pass.
-        delay(300)
-        queued.mapTo(HashSet()) { roleOf.getValue(it) }
-    }
+    private fun rolesOf(queued: Set<Long>): Set<ReaderCopy> = queued.mapTo(HashSet()) { roleOf.getValue(it) }
 
     private suspend fun <T> open(
         downloadAhead: Int = 0,
         chapter: ReaderCopy = ReaderCopy.A1,
         alsoOnDisk: ReaderCopy? = null,
-        probe: suspend (
+        probe: suspend MangaReaderViewModelHarness.(
             eu.kanade.tachiyomi.ui.reader.ReaderViewModel,
             eu.kanade.tachiyomi.ui.reader.ReaderViewModel.State,
             MergedChapterProvider.Group,
@@ -245,7 +241,7 @@ class MangaDownloadProbe : ReaderDownloadProbe {
             onDisk = setOf(21L, 22L) + listOfNotNull(alsoOnDisk?.let(ids::getValue)),
             missingSources = setOf(M_SOURCE),
             onDownload = { chapters -> chapters.forEach { queued += it.id } },
-        ) { model, state -> probe(model, state, group, queued) }
+        ) { model, state -> harness.probe(model, state, group, queued) }
     }
 
     private companion object {
@@ -282,7 +278,7 @@ class NovelDownloadProbe : ReaderDownloadProbe {
         ->
         val model = harness.open(ids.getValue(ReaderCopy.A1).novel, ids.getValue(ReaderCopy.A1).id)
         scope.advanceUntilIdle()
-        model.downloadChapter(ids.getValue(row).id, ChapterDownloadAction.START)
+        model.downloadChapter(listOf(ids.getValue(row).id), ChapterDownloadAction.START)
         scope.advanceUntilIdle()
         queued
     }

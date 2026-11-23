@@ -1,0 +1,49 @@
+package reikai.presentation.reader
+
+import io.kotest.matchers.shouldBe
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import reikai.novel.local.LocalNovelSource
+import reikai.util.resetVirtualDispatchers
+import reikai.util.virtualDispatchers
+
+/** A local novel's chapters are its own files, so the seam marks them on the device, as manga's transition does. */
+class NovelReaderLocalSeamTest {
+
+    @BeforeEach
+    fun setUp() {
+        virtualDispatchers()
+    }
+
+    @AfterEach
+    fun tearDown() = resetVirtualDispatchers()
+
+    @Test
+    fun `a local novel's chapter reads as downloaded with nothing downloaded`() = runTest {
+        NovelReaderViewModelHarness.create(testScheduler).use { harness ->
+            val novel = harness.novel(harness.source(LocalNovelSource.ID))
+            val first = harness.chapter(novel, 1.0)
+            val model = harness.open(novel, first.id)
+            advanceUntilIdle()
+
+            model.window.value.chapters.single { it.chapterId == first.id }.downloaded shouldBe true
+        }
+    }
+
+    // LocalNovelSource answers a blank address so the web actions hide; the reader hides them on null.
+    @Test
+    fun `a chapter whose source answers a blank address has no web page`() = runTest {
+        NovelReaderViewModelHarness.create(testScheduler).use { harness ->
+            val source = harness.source(LocalNovelSource.ID).apply { resolve = { "" } }
+            val novel = harness.novel(source)
+            val first = harness.chapter(novel, 1.0)
+            val model = harness.open(novel, first.id)
+            advanceUntilIdle()
+
+            model.webUrlOf(first.id) shouldBe null
+        }
+    }
+}

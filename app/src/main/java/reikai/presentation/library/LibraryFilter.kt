@@ -11,7 +11,11 @@ import kotlinx.coroutines.flow.map
 import reikai.domain.category.categoryFilterActive
 import reikai.domain.category.matchesCategoryFilter
 import reikai.domain.library.ReikaiLibraryPreferences
+import reikai.domain.library.TagAliases
+import reikai.domain.library.TagFilter
 import reikai.domain.library.effectiveIntervalFilter
+import reikai.domain.library.tagAliasesFlow
+import reikai.domain.library.tagFilterFlow
 import reikai.presentation.category.toLongIdSet
 import tachiyomi.core.common.preference.TriState
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -26,6 +30,7 @@ import tachiyomi.domain.manga.model.applyFilter
 data class LibraryFilterSettings(
     val downloadedOnly: Boolean,
     val downloaded: TriState,
+    val local: TriState,
     val unread: TriState,
     val started: TriState,
     val bookmarked: TriState,
@@ -37,6 +42,8 @@ data class LibraryFilterSettings(
     val categoriesEnabled: Boolean,
     val categoriesInclude: Set<Long>,
     val categoriesExclude: Set<Long>,
+    val tags: TagFilter = TagFilter(),
+    val tagAliases: TagAliases = TagAliases.NONE,
 ) {
     private val effectiveInterval get() = effectiveIntervalFilter(skipsOutsideReleasePeriod, intervalCustom)
 
@@ -44,13 +51,14 @@ data class LibraryFilterSettings(
 
     /** Whether the filter icon lights. Downloaded-only mode is left out: it is a global mode, not a filter. */
     val isActive: Boolean
-        get() = categoriesActive ||
-            listOf(downloaded, unread, started, bookmarked, completed, effectiveInterval, lewd)
+        get() = categoriesActive || tags.isActive ||
+            listOf(downloaded, local, unread, started, bookmarked, completed, effectiveInterval, lewd)
                 .plus(trackers.values)
                 .any { it != TriState.DISABLED }
 
     fun resolve(): LibraryFilterPrefs = LibraryFilterPrefs(
         downloaded = if (downloadedOnly) TriState.ENABLED_IS else downloaded,
+        local = local,
         unread = unread,
         started = started,
         bookmarked = bookmarked,
@@ -62,6 +70,12 @@ data class LibraryFilterSettings(
         categoriesActive = categoriesActive,
         categoriesInclude = categoriesInclude,
         categoriesExclude = categoriesExclude,
+        // A tag chosen before it became an alias still means the tag it now reads as.
+        tags = tags.copy(
+            include = tags.include.mapTo(HashSet(), tagAliases::resolveKey),
+            exclude = tags.exclude.mapTo(HashSet(), tagAliases::resolveKey),
+        ),
+        tagAliases = tagAliases,
     )
 }
 
@@ -95,31 +109,49 @@ fun libraryFilterSettingsFlow(
         reikaiLibraryPreferences.filterCategoriesExclude.changes(),
         ::Triple,
     ),
-    combine(reikaiLibraryPreferences.filterLewd.changes(), basePreferences.downloadedOnly.changes(), ::Pair),
+    combine(
+        reikaiLibraryPreferences.filterLewd.changes(),
+        reikaiLibraryPreferences.filterLocal.changes(),
+        basePreferences.downloadedOnly.changes(),
+        reikaiLibraryPreferences.tagFilterFlow(),
+        reikaiLibraryPreferences.tagAliasesFlow(),
+        ::SourceAxesAndTags,
+    ),
     trackerFiltersFlow(libraryPreferences, trackerManager),
 ) {
         progress,
         (interval, skipsOutsideReleasePeriod),
         (categoriesEnabled, include, exclude),
-        (lewd, downloadedOnly),
+        sourceAxes,
         trackers,
     ->
     LibraryFilterSettings(
-        downloadedOnly = downloadedOnly,
+        downloadedOnly = sourceAxes.downloadedOnly,
         downloaded = progress.downloaded,
+        local = sourceAxes.local,
         unread = progress.unread,
         started = progress.started,
         bookmarked = progress.bookmarked,
         completed = progress.completed,
         intervalCustom = interval,
         skipsOutsideReleasePeriod = skipsOutsideReleasePeriod,
-        lewd = lewd,
+        lewd = sourceAxes.lewd,
         trackers = trackers,
         categoriesEnabled = categoriesEnabled,
         categoriesInclude = include.toLongIdSet(),
         categoriesExclude = exclude.toLongIdSet(),
+        tags = sourceAxes.tags,
+        tagAliases = sourceAxes.aliases,
     )
 }
+
+private class SourceAxesAndTags(
+    val lewd: TriState,
+    val local: TriState,
+    val downloadedOnly: Boolean,
+    val tags: TagFilter,
+    val aliases: TagAliases,
+)
 
 private class ProgressAxes(
     val downloaded: TriState,
@@ -154,6 +186,7 @@ private fun trackerFiltersFlow(
  */
 data class LibraryFilterPrefs(
     val downloaded: TriState,
+    val local: TriState,
     val unread: TriState,
     val started: TriState,
     val bookmarked: TriState,
@@ -165,17 +198,20 @@ data class LibraryFilterPrefs(
     val categoriesActive: Boolean,
     val categoriesInclude: Set<Long>,
     val categoriesExclude: Set<Long>,
+    val tags: TagFilter = TagFilter(),
+    val tagAliases: TagAliases = TagAliases.NONE,
 )
 
 /**
  * Per-entry accessors [libraryFilterMatches] reads, so the filter never depends on the concrete row type.
  * Both libraries bind them over the shared `LibraryItem` row, through [libraryItemFilterFields].
- * The per-type seams live here: [isDownloaded] folds in manga's local-source concept (novels have none),
+ * The per-type seams live here: [isDownloaded] counts a local series of either type as downloaded,
  * [isLewd] folds in each side's adult-source set and manga's source-name check, and [trackerIds] is each side's
  * merge-group union.
  */
 class LibraryFilterFields<T>(
     val isDownloaded: (T) -> Boolean,
+    val isLocal: (T) -> Boolean,
     val isUnread: (T) -> Boolean,
     val hasStarted: (T) -> Boolean,
     val hasBookmarks: (T) -> Boolean,
@@ -184,6 +220,7 @@ class LibraryFilterFields<T>(
     val isLewd: (T) -> Boolean,
     val trackerIds: (T) -> List<Long>,
     val categoryIds: (T) -> Collection<Long>,
+    val tags: (T) -> Collection<String>,
 )
 
 /** Whether [row] passes every active axis of [prefs]. Pure over the [fields] accessors. */
@@ -193,6 +230,7 @@ fun <T> libraryFilterMatches(
     fields: LibraryFilterFields<T>,
 ): Boolean =
     applyFilter(prefs.downloaded) { fields.isDownloaded(row) } &&
+        applyFilter(prefs.local) { fields.isLocal(row) } &&
         applyFilter(prefs.unread) { fields.isUnread(row) } &&
         applyFilter(prefs.started) { fields.hasStarted(row) } &&
         applyFilter(prefs.bookmarked) { fields.hasBookmarks(row) } &&
@@ -203,7 +241,8 @@ fun <T> libraryFilterMatches(
         (
             !prefs.categoriesActive ||
                 matchesCategoryFilter(fields.categoryIds(row), prefs.categoriesInclude, prefs.categoriesExclude)
-            )
+            ) &&
+        (!prefs.tags.isActive || prefs.tags.matches(prefs.tagAliases.resolveAll(fields.tags(row).toList())))
 
 /**
  * The include/exclude tri-state over a group's unioned tracker ids, shared by both libraries. An entry

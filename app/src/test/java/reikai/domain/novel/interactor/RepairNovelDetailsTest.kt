@@ -13,8 +13,11 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import reikai.data.novel.NovelChapterRepositoryImpl
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.NovelRepositoryImpl
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstones
 import reikai.domain.merge.ReconcileMergedChapters
 import reikai.domain.novel.model.Novel
 import reikai.novel.host.ChapterItem
@@ -176,14 +179,23 @@ class RepairNovelDetailsTest {
             novelRepository = novels,
             novelChapterRepository = NovelChapterRepositoryImpl(database),
             sourceManager = mockk<NovelSourceManager>().also { coEvery { it.get("src") } returns source },
-            downloadManager = { mockk(relaxed = true) },
+            // A title change is stored through the download manager, together with the folder move.
+            downloadManager = {
+                mockk(relaxed = true) {
+                    coEvery { renameNovel(any(), any(), any()) } coAnswers { thirdArg<suspend () -> Boolean>()() }
+                }
+            },
             libraryPreferences = LibraryPreferences(InMemoryPreferenceStore()),
             coverCache = CoverCache(idleAppScope(), context),
             reconcileMergedChapters = ReconcileMergedChapters(
                 repository = mockk(relaxed = true),
                 stitchers = emptySet(),
             ),
-            chapterNumberOverrides = NoChapterNumberOverrides,
+            syncRules = NovelChapterSyncRules(
+                NoChapterNumberOverrides,
+                InMemoryChapterCopyMarks(),
+                NoChapterTombstones,
+            ),
         )
 
         repair.await()

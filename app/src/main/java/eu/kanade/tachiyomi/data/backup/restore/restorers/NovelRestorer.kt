@@ -15,12 +15,17 @@ import eu.kanade.tachiyomi.data.backup.models.BackupNovelMergeGroup
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelSourceRef
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelTracking
 import eu.kanade.tachiyomi.data.backup.models.customInfo
+import eu.kanade.tachiyomi.data.backup.models.legacyEdits
 import eu.kanade.tachiyomi.data.backup.models.toUrlReadingSession
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import mihon.core.common.extensions.toInstantOrNull
+import reikai.data.backup.BackedUpManualBase
+import reikai.data.backup.backupCategoryIds
+import reikai.data.backup.restoreBases
+import reikai.data.backup.restoreLocalVolumes
+import reikai.data.backup.restoredManualOrder
 import reikai.data.novel.novelFetchInterval
-import reikai.domain.backup.RestoredChapterHistory
 import reikai.domain.backup.RestoredChapterState
 import reikai.domain.backup.backupChapterReadAhead
 import reikai.domain.backup.backupDetailsWin
@@ -30,10 +35,18 @@ import reikai.domain.backup.foldHistoryCopies
 import reikai.domain.backup.restoredFavoriteAt
 import reikai.domain.backup.restoredNextUpdate
 import reikai.domain.category.CategoryContentType
-import reikai.domain.category.byNamePreferring
+import reikai.domain.chapter.ChapterCopyMark
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.ChapterTombstoneRepository
+import reikai.domain.chapter.LocalVolumeRepository
+import reikai.domain.chapter.VolumePickRepository
+import reikai.domain.chapter.backedUpCopyMarks
 import reikai.domain.chapter.backedUpOverrides
+import reikai.domain.entry.toCustomNovelInfo
 import reikai.domain.library.ContentType
+import reikai.domain.library.LibraryManualOrderRepository
+import reikai.domain.library.ManualOrderPosition
 import reikai.domain.library.ReleaseInterval
 import reikai.domain.merge.PrefEraGrouping
 import reikai.domain.merge.RestoreMergeGroups
@@ -42,10 +55,12 @@ import reikai.domain.novel.NovelHistoryRepository
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.NovelTrackRepository
 import reikai.domain.novel.interactor.SetCustomNovelInfo
-import reikai.domain.novel.model.CustomNovelInfo
+import reikai.domain.novel.local.LocalNovelLanguageRepository
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.readinglog.ReadingLogRepository
+import reikai.domain.readinglog.ReadingPaceRepository
+import reikai.novel.local.LocalNovelSource
 import tachiyomi.domain.category.model.NewCategory
 import tachiyomi.domain.category.repository.CategoryRepository
 import kotlin.time.Clock
@@ -54,13 +69,20 @@ import kotlin.time.Clock
 class NovelRestorer(
     private val novelRepository: NovelRepository,
     private val novelChapterRepository: NovelChapterRepository,
+    private val manualOrder: LibraryManualOrderRepository,
     private val categoryRepository: CategoryRepository,
     private val novelTrackRepository: NovelTrackRepository,
     private val restoreMergeGroups: RestoreMergeGroups,
     private val setCustomNovelInfo: SetCustomNovelInfo,
     private val novelHistoryRepository: NovelHistoryRepository,
     private val chapterNumberOverrides: ChapterNumberOverrideRepository,
+    private val copyMarks: ChapterCopyMarkRepository,
+    private val localVolumes: LocalVolumeRepository,
+    private val volumePicks: VolumePickRepository,
     private val readingLog: ReadingLogRepository,
+    private val readingPace: ReadingPaceRepository,
+    private val localNovelLanguages: LocalNovelLanguageRepository,
+    private val tombstones: ChapterTombstoneRepository,
 ) {
 
     private val timeZone = TimeZone.currentSystemDefault()
@@ -71,13 +93,16 @@ class NovelRestorer(
     suspend fun restoreCategories(backupCategories: List<BackupNovelCategory>) {
         if (backupCategories.isEmpty()) return
         val dbCategoryNames = categoryRepository.getAll(CategoryContentType.NOVEL).mapTo(HashSet()) { it.name }
+        val created = backupCategories.filter { it.name !in dbCategoryNames }.sortedBy { it.order }
         // The database places each after every row of either library, and all of them or none land.
         categoryRepository.insertAll(
-            backupCategories
-                .filter { it.name !in dbCategoryNames }
-                .sortedBy { it.order }
-                .map { NewCategory(name = it.name, flags = it.flags, contentType = CategoryContentType.NOVEL) },
+            created.map { NewCategory(name = it.name, flags = it.flags, contentType = CategoryContentType.NOVEL) },
         )
+        manualOrder.restoreBases(
+            created.mapNotNull { backup ->
+                backup.manualBase?.let { BackedUpManualBase(backup.name, CategoryContentType.NOVEL, it) }
+            },
+        ) { categoryRepository.getAll(CategoryContentType.NOVEL) }
     }
 
     suspend fun restore(backupNovel: BackupNovel, backupCategories: List<BackupNovelCategory>) {
@@ -94,22 +119,36 @@ class NovelRestorer(
         val novelId = restored.id
 
         val chapters = restoreChapters(novelId, backupNovel.chapters)
+        restoreWords(chapters, backupNovel.chapters)
         chapterNumberOverrides.restore(
             ContentType.NOVELS,
             novelId,
             backedUpOverrides(backupNovel.chapters, { it.url }, { it.chapterNumber }, { it.sourceChapterNumber }),
+        )
+        backupNovel.restoreLocalVolumes(ContentType.NOVELS, localVolumes, volumePicks, backupNovel.url)
+        copyMarks.set(
+            ContentType.NOVELS,
+            backedUpCopyMarks(backupNovel.chapters, { it.url }, { it.copyMark })
+                .map { (url, mark) -> ChapterCopyMark(novelId, url, mark) },
         )
         // Predicted from the restored chapters, keeping a next update still ahead, as manga's restore does.
         novelRepository.getById(novelId)?.let { stored ->
             val update = novelFetchInterval(stored, { chapters }, currentFetchWindow, timeZone, now).apply {
                 nextUpdate = restoredNextUpdate(restored.nextUpdate, nextUpdate, currentFetchWindow)
             }
-            novelRepository.update(update)
+            check(novelRepository.update(update)) { "Failed to update novel ${novel.url}" }
         }
-        restoreCategoryMembership(novelId, backupNovel.categories, backupCategories)
+        restoreCategoryPlaces(novelId, backupNovel, backupCategories)
         restoreTracks(novelId, backupNovel.tracking)
         restoreHistory(chapters, backupNovel.history)
         readingLog.restore(ContentType.NOVELS, novelId, backupNovel.readingSessions.map { it.toUrlReadingSession() })
+        // After the chapters and their history, so a tombstone meets the row it belongs to, as manga's does.
+        tombstones.restore(
+            ContentType.NOVELS,
+            novelId,
+            backupNovel.chapterTombstones.map { it.toChapterTombstone() },
+            backupNovel.chapters.map { it.url },
+        )
         // An old backup carries the Last read stamp without history; after the history above, so a
         // backup that has history keeps it as is.
         backupNovel.lastReadAt?.toInstantOrNull()?.let { lastRead ->
@@ -117,7 +156,12 @@ class NovelRestorer(
         }
         // An entry without custom info leaves the device's own alone, as manga does, pinned by
         // BackupCustomInfoConformanceTest.
-        backupNovel.customInfo?.let { restoreCustomInfo(novelId, it) }
+        (backupNovel.customInfo ?: backupNovel.legacyEdits())?.let { restoreCustomInfo(novelId, it) }
+        // Only where the device has read none: its files name the language now, as a local manga's memo
+        // keeps the device's. A backup made before the language was carried leaves it alone too.
+        if (LocalNovelSource.isLocal(backupNovel.source) && localNovelLanguages.get(backupNovel.url) == null) {
+            backupNovel.language?.let { localNovelLanguages.set(backupNovel.url, it) }
+        }
     }
 
     /**
@@ -136,6 +180,7 @@ class NovelRestorer(
             status = details.status,
             thumbnailUrl = details.thumbnailUrl,
             updateStrategy = details.updateStrategy,
+            totalPages = details.totalPages,
             initialized = dbNovel.initialized || novel.initialized,
             nextUpdate = dbNovel.nextUpdate ?: novel.nextUpdate,
         )
@@ -185,21 +230,38 @@ class NovelRestorer(
         return dbChapters + inserted
     }
 
-    private suspend fun restoreCategoryMembership(
+    /** Each chapter's word count, so a restored history teaches a pace as manga's page counts do. */
+    private suspend fun restoreWords(chapters: List<NovelChapter>, backupChapters: List<BackupNovelChapter>) {
+        val chapterIdsByUrl = chapters.associate { it.url to it.id }
+        backupChapters.filter { it.words > 0 }.forEach { backupChapter ->
+            val chapterId = chapterIdsByUrl[backupChapter.url] ?: return@forEach
+            readingPace.keepLength(chapterId, backupChapter.words)
+        }
+    }
+
+    /** The novel's categories and its places in their Manual orders, both naming categories by backup order. */
+    private suspend fun restoreCategoryPlaces(
         novelId: Long,
-        categoryOrders: List<Long>,
+        backupNovel: BackupNovel,
         backupCategories: List<BackupNovelCategory>,
     ) {
-        if (categoryOrders.isEmpty()) return
-        // Prefer the novel-typed row when a universal one shares its name, as manga's restore does.
-        val dbCategoriesByName = categoryRepository.getAll(CategoryContentType.NOVEL)
-            .byNamePreferring(CategoryContentType.NOVEL)
-        val backupCategoriesByOrder = backupCategories.associateBy { it.order }
-        val categoryIds = categoryOrders.mapNotNull { order ->
-            backupCategoriesByOrder[order]?.let { dbCategoriesByName[it.name]?.id }
-        }
+        if (backupNovel.categories.isEmpty() && backupNovel.manualOrder.isEmpty()) return
+        val categoryIdOf = backupCategoryIds(
+            backupCategories.associate { it.order to it.name },
+            categoryRepository.getAll(CategoryContentType.NOVEL),
+            CategoryContentType.NOVEL,
+        )
+        val categoryIds = backupNovel.categories.mapNotNull(categoryIdOf)
         if (categoryIds.isNotEmpty()) {
             novelRepository.setCategories(novelId, categoryIds)
+        }
+        val places = backupNovel.restoredManualOrder(categoryIdOf)
+        if (places.isNotEmpty()) {
+            manualOrder.upsert(
+                places.map { (categoryId, position) ->
+                    ManualOrderPosition(ContentType.NOVELS, novelId, categoryId, position)
+                },
+            )
         }
     }
 
@@ -230,12 +292,18 @@ class NovelRestorer(
     ) {
         val chapterIdsByUrl = chapters.associate { it.url to it.id }
         backupHistory
-            .map { RestoredChapterHistory(it.url, it.lastRead.toInstantOrNull(), it.readDuration) }
+            .map { it.toRestoredHistory() }
             .foldHistoryCopies()
             .forEach { history ->
                 val chapterId = chapterIdsByUrl[history.chapterUrl] ?: return@forEach
                 novelHistoryRepository.restoreHistory(chapterId, history.readAt, history.readDuration)
             }
+        // Copies of one chapter are one chapter's listening, as their read time is.
+        backupHistory.groupBy { it.url }.forEach { (url, copies) ->
+            val listened = copies.sumOf { it.listenedMs }
+            val chapterId = chapterIdsByUrl[url] ?: return@forEach
+            if (listened > 0) readingPace.keepListenedTime(chapterId, listened)
+        }
     }
 
     /**
@@ -252,24 +320,15 @@ class NovelRestorer(
         }
     }
 
+    /** The restored row a backup ref names, for the steps that run once every entry is back. */
+    suspend fun restoredId(source: String, url: String): Long? = novelRepository.getByUrlAndSource(url, source)?.id
+
     /** An older root-list row for a novel the backup does not list, applied when the device has it. */
     suspend fun restoreCustomInfo(source: String, url: String, info: BackupCustomInfo) {
         novelRepository.getByUrlAndSource(url, source)?.let { restoreCustomInfo(it.id, info) }
     }
 
-    /** The manga twin is MangaRestorer.restoreCustomInfo; both read BackupCustomInfoFields.customInfo. */
     private suspend fun restoreCustomInfo(novelId: Long, info: BackupCustomInfo) {
-        setCustomNovelInfo.set(
-            CustomNovelInfo(
-                novelId = novelId,
-                title = info.title,
-                author = info.author,
-                artist = info.artist,
-                description = info.description,
-                genre = info.genre,
-                status = info.status,
-                thumbnailUrl = info.thumbnailUrl,
-            ),
-        )
+        setCustomNovelInfo.restore(info.toCustomNovelInfo(novelId))
     }
 }

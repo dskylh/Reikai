@@ -19,38 +19,33 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.compose.LifecycleEventEffect
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.result.ResultEffect
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import dev.zacsweers.metrox.viewmodel.metroViewModel
 import eu.kanade.presentation.components.AppBar
-import eu.kanade.presentation.util.AssistContentScreen
-import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.source.online.all.MangaDex
-import eu.kanade.tachiyomi.ui.browse.extension.details.SourcePreferencesScreen
 import eu.kanade.tachiyomi.ui.browse.source.browse.BrowseSourceViewModel
 import eu.kanade.tachiyomi.ui.browse.source.browse.SourceFilterDialog
 import eu.kanade.tachiyomi.util.system.toast
-import exh.md.follows.MangaDexFollowsScreen
+import exh.md.follows.MangaDexFollowsRoute
 import exh.source.getMainSource
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.receiveAsFlow
-import mihon.app.di.appGraph
+import kotlinx.serialization.Serializable
+import mihon.core.navigation.LocalAssistUrl
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.Favorite
 import mihon.icons.materialsymbols.rounded.FilterList
@@ -58,9 +53,9 @@ import mihon.icons.materialsymbols.rounded.Refresh
 import mihon.icons.materialsymbols.rounded.Verified
 import mihon.icons.materialsymbols.roundedfilled.Bookmark
 import mihon.presentation.core.util.collectAsLazyPagingItems
-import reikai.domain.entry.EntryId
 import reikai.domain.source.SourceKey
 import reikai.domain.source.model.SavedSearch
+import reikai.novel.local.LocalNovelSource
 import reikai.novel.source.NovelFilterState
 import reikai.novel.source.NovelFilters
 import reikai.novel.source.NovelSettings
@@ -69,13 +64,18 @@ import reikai.presentation.browse.EntryAddDialogs
 import reikai.presentation.browse.EntryBulkFavoriteViewModel
 import reikai.presentation.browse.PendingBulkCategoryDialog
 import reikai.presentation.browse.components.BulkSelectionToolbar
-import reikai.presentation.browse.detailsScreen
 import reikai.presentation.browse.rememberEntryGestures
+import reikai.presentation.browse.source.preferencesRoute
+import reikai.presentation.details.rememberDetailsOpener
+import reikai.presentation.local.LocalImportRoute
+import reikai.presentation.migrate.flow.MigrationPickFor
+import reikai.presentation.migrate.flow.rememberMigrationPickReport
+import reikai.presentation.novel.browse.NovelBrowseState
 import reikai.presentation.novel.browse.NovelBrowseViewModel
 import reikai.presentation.novel.browse.NovelBulkFavoriteViewModel
 import reikai.presentation.novel.browse.NovelSourceFilterSheet
 import reikai.presentation.novel.browse.NovelSourceSettingsSheet
-import reikai.presentation.webview.toWebViewScreen
+import reikai.presentation.webview.webViewRoute
 import tachiyomi.core.common.Constants
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.Scaffold
@@ -117,482 +117,493 @@ internal fun savedSearchToOpen(
  * The per-type branches below resolve their own models and supply the leaves nothing neutral can
  * cover: the filter sheet, the source settings, and where a tap goes.
  */
-class EntryCatalogueScreen(
+@Serializable
+data class EntryCatalogueRoute(
     val sourceKey: SourceKey,
-    private val initialQuery: String? = null,
+    val initialQuery: String? = null,
     /** Open on the source's Latest listing rather than Popular, for the Sources row's button. */
-    private val startLatest: Boolean = false,
+    val startLatest: Boolean = false,
     /** Set when the screen was opened to choose what an entry migrates to. */
-    private val migrateForId: Long? = null,
+    val migrateFor: MigrationPickFor? = null,
     /** Open showing this saved search, for a feed row built on one. */
-    private val savedSearchId: Long? = null,
-) : Screen(), AssistContentScreen {
+    val savedSearchId: Long? = null,
+) : NavKey
 
-    private var assistUrl: String? = null
+@Composable
+fun EntryCatalogueScreen(
+    sourceKey: SourceKey,
+    initialQuery: String?,
+    startLatest: Boolean,
+    migrateFor: MigrationPickFor?,
+    savedSearchId: Long?,
+) {
+    when (sourceKey) {
+        is SourceKey.Manga -> MangaCatalogue(sourceKey, initialQuery, startLatest, migrateFor, savedSearchId)
+        is SourceKey.Novel -> NovelCatalogue(sourceKey, initialQuery, startLatest, migrateFor, savedSearchId)
+    }
+}
 
-    override fun onProvideAssistUrl() = assistUrl
+@Composable
+private fun MangaCatalogue(
+    sourceKey: SourceKey.Manga,
+    initialQuery: String?,
+    startLatest: Boolean,
+    migrateFor: MigrationPickFor?,
+    savedSearchId: Long?,
+) {
+    val sourceId = sourceKey.id
+    val navigator = LocalNavigator.current
+    val viewModel = assistedMetroViewModel<BrowseSourceViewModel, BrowseSourceViewModel.Factory> {
+        create(sourceId = sourceId, listingQuery = mangaListingQuery(startLatest, initialQuery))
+    }
+    val bulk = metroViewModel<BulkFavoriteViewModel>()
+    val reportPick = rememberMigrationPickReport(migrateFor)
+    val adapterScope = rememberCoroutineScope()
+    val adapter = remember(viewModel, bulk) {
+        MangaBrowseAdapter(viewModel, bulk, adapterScope, migrateFor?.entry?.rawId, reportPick)
+    }
+    val modelState by viewModel.state.collectAsState()
+    val source = modelState.source
+    if (source == null) {
+        LoadingScreen()
+        return
+    }
+    val isLocal = source is LocalSource
+    val isMangaDex = remember(source) { source.getMainSource<MangaDex>() != null }
 
-    @Composable
-    override fun Content() {
-        when (sourceKey) {
-            is SourceKey.Manga -> MangaCatalogue(sourceKey.id)
-            is SourceKey.Novel -> NovelCatalogue(sourceKey.id)
-        }
+    // The Random button only kicks off the fetch; the id arrives later, and opening it is a new
+    // catalogue on the same source with an "id:<uuid>" search.
+    LaunchedEffect(modelState.randomMangaTarget) {
+        val target = modelState.randomMangaTarget ?: return@LaunchedEffect
+        viewModel.consumeRandomTarget()
+        navigator.push(EntryCatalogueRoute(sourceKey, target, migrateFor = migrateFor))
     }
 
-    @Composable
-    private fun MangaCatalogue(sourceId: Long) {
-        val navigator = LocalNavigator.currentOrThrow
-        val uriHandler = LocalUriHandler.current
-        val context = LocalContext.current
-        val viewModel = assistedMetroViewModel<BrowseSourceViewModel, BrowseSourceViewModel.Factory> {
-            create(sourceId = sourceId, listingQuery = mangaListingQuery(startLatest, initialQuery))
-        }
-        val bulk = metroViewModel<BulkFavoriteViewModel>()
-        // The graph's app-scoped binding, so the pick lands in the same handoff the models read.
-        val pickHandoff = remember { context.appGraph.migrationPickHandoff }
-        val adapter = remember(viewModel, bulk) {
-            MangaBrowseAdapter(viewModel, bulk, migrateForId) { targetId ->
-                migrateForId?.let { pickHandoff.offer(EntryId.Manga(it), targetId) }
-                navigator.pop()
-            }
-        }
-        val modelState by viewModel.state.collectAsState()
-        val source = modelState.source
-        if (source == null) {
-            LoadingScreen()
-            return
-        }
-        val isLocal = source is LocalSource
-        val isMangaDex = remember(source) { source.getMainSource<MangaDex>() != null }
-
-        // The Random button only kicks off the fetch; the id arrives later, and opening it is a new
-        // catalogue on the same source with an "id:<uuid>" search.
-        LaunchedEffect(modelState.randomMangaTarget) {
-            val target = modelState.randomMangaTarget ?: return@LaunchedEffect
-            viewModel.consumeRandomTarget()
-            navigator.push(EntryCatalogueScreen(sourceKey, target))
-        }
-
-        Catalogue(
-            behavior = adapter,
-            bulk = bulk,
-            onOpenSettings = { navigator.push(SourcePreferencesScreen(sourceId)) },
-            onHelpClick = {
-                uriHandler.openUri(if (isLocal) LocalSource.HELP_URL else Constants.URL_HELP)
-            },
-            localSourceHelp = { uriHandler.openUri(LocalSource.HELP_URL) }.takeIf { isLocal },
-        ) { onDismiss ->
-            SourceFilterDialog(
-                onDismissRequest = onDismiss,
-                filters = modelState.filters,
-                onReset = viewModel::resetFilters,
-                onFilter = { viewModel.search(filters = modelState.filters) },
-                onUpdate = viewModel::setFilters,
-                onMangaDexFollowsClicked = { navigator.push(MangaDexFollowsScreen(sourceId)) }
-                    .takeIf { isMangaDex },
-                onMangaDexRandomClicked = {
-                    viewModel.onMangaDexRandom()
-                    onDismiss()
-                }.takeIf { isMangaDex },
-            )
-        }
-    }
-
-    @Composable
-    private fun NovelCatalogue(sourceId: String) {
-        val navigator = LocalNavigator.currentOrThrow
-        val context = LocalContext.current
-        val uriHandler = LocalUriHandler.current
-        val viewModel = assistedMetroViewModel<NovelBrowseViewModel, NovelBrowseViewModel.Factory> {
-            create(sourceId = sourceId, initialQuery = initialQuery.orEmpty(), startLatest = startLatest)
-        }
-        val bulk = metroViewModel<NovelBulkFavoriteViewModel>()
-        val adapter = remember(viewModel, bulk) {
-            NovelBrowseAdapter(
-                viewModel,
-                bulk,
-                sourceId,
-                migrateForId,
-                onPickUnavailable = { context.toast(MR.strings.migrationFlow_pickUnavailable) },
-            ) { navigator.pop() }
-        }
-        val modelState by viewModel.state.collectAsState()
-        val source = modelState.source
-
-        Catalogue(
-            behavior = adapter,
-            bulk = bulk,
-            // A preference screen is a screen of its own; the LNReader schema is a sheet over this one.
-            onOpenSettings = {
-                when (source?.settings) {
-                    is NovelSettings.PreferenceScreen -> navigator.push(SourcePreferencesScreen.forNovel(sourceId))
-                    else -> viewModel.openSettingsSheet()
-                }
-            },
-            onHelpClick = { uriHandler.openUri(Constants.URL_HELP) },
-            extraSheets = {
-                val settings = source?.settings as? NovelSettings.LnSchema
-                if (modelState.settingsSheetOpen && settings != null) {
-                    NovelSourceSettingsSheet(settings, onDismiss = viewModel::closeSettingsSheet)
-                }
-            },
-        ) { onDismiss ->
-            // The sheet follows the source's filter format, never which kind of source it is.
-            when (val draft = modelState.filterDraft) {
-                is NovelFilterState.LnValues -> NovelSourceFilterSheet(
-                    filters = (source?.filters as? NovelFilters.LnSchema)?.schema,
-                    values = draft.values,
-                    onValueChange = viewModel::setFilterValue,
-                    onApply = viewModel::applyFilters,
-                    onReset = viewModel::resetFilters,
-                    onDismiss = onDismiss,
-                )
-                is NovelFilterState.Filters -> SourceFilterDialog(
-                    onDismissRequest = onDismiss,
-                    filters = draft.list,
-                    onReset = viewModel::resetFilters,
-                    onFilter = viewModel::applyFilters,
-                    onUpdate = viewModel::setFilters,
-                )
-                null -> {}
-            }
-        }
-    }
-
-    /**
-     * The chrome both catalogues share: the toolbar, the listing chips, the body and every dialog the
-     * neutral state can describe. What is left to the caller is the per-type filter sheet and settings,
-     * the two things no neutral state can hold.
-     */
-    @Composable
-    private fun Catalogue(
-        behavior: EntryBrowseBehavior,
-        bulk: EntryBulkFavoriteViewModel<*>,
-        onOpenSettings: () -> Unit,
-        onHelpClick: () -> Unit,
-        localSourceHelp: (() -> Unit)? = null,
-        extraSheets: @Composable () -> Unit = {},
-        filterSheet: @Composable (onDismiss: () -> Unit) -> Unit,
-    ) {
-        val navigator = LocalNavigator.currentOrThrow
-        val state by behavior.state.collectAsState()
-        val rows = behavior.rows.collectAsLazyPagingItems()
-        val snackbarHostState = remember { SnackbarHostState() }
-
-        // Saved searches are the same feature on both content types, so they are held here rather than
-        // in either model: the source is a key, and what a search holds is a string this never reads.
-        val savedSearchModel = assistedMetroViewModel<SavedSearchViewModel, SavedSearchViewModel.Factory> {
-            create(sourceKey = sourceKey)
-        }
-        val savedSearches by savedSearchModel.state.collectAsState()
-        var savedSearchDialog by remember { mutableStateOf<SavedSearchDialog?>(null) }
-        // Which chip reads as applied. Cleared by anything that replaces what it put on screen.
-        var appliedSavedSearchId by remember { mutableStateOf<Long?>(null) }
-
-        // Whether the screen's own saved search has been put on once. Separate from the chip state
-        // above, which the reader clears by tapping anything else: keyed on that, re-applying became
-        // a matter of the list re-emitting, which saving a new search on this very screen does.
-        var openedWithSearch by rememberSaveable { mutableStateOf(false) }
-
-        // Applied once the screen is up rather than before the model is built, which costs one
-        // discarded page of the default listing and keeps the models free of a saved-search read.
-        val isLoaded = state is EntryBrowseScreenState.Loaded
-        LaunchedEffect(savedSearches, isLoaded) {
-            val search = savedSearchToOpen(state, savedSearchId, savedSearches, openedWithSearch)
-                ?: return@LaunchedEffect
-            openedWithSearch = true
-            appliedSavedSearchId = search.id
-            behavior.applySearch(search.query, search.filtersJson)
-        }
-
-        LaunchedEffect(Unit) {
-            queryEvent.receiveAsFlow().collectLatest {
-                when (it) {
-                    is SearchType.Text -> behavior.search(it.txt)
-                    is SearchType.Genre -> behavior.searchGenre(it.txt)
-                }
-            }
-        }
-
-        val loaded = state as? EntryBrowseScreenState.Loaded
-        if (loaded == null) {
-            SourceUnavailable(state, navigator::pop)
-            return
-        }
-
-        LaunchedEffect(loaded.webUrl) { assistUrl = loaded.webUrl }
-
-        // Coming back from the WebView re-runs the listing, so clearing a Cloudflare challenge there
-        // does not leave the reader staring at the error they left. Survives the activity stop.
-        var pendingWebViewRetry by rememberSaveable { mutableStateOf(false) }
-        LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-            if (pendingWebViewRetry) {
-                pendingWebViewRetry = false
-                rows.refresh()
-            }
-        }
-        val onWebViewClick: (String?) -> Unit = f@{ challengeUrl ->
-            val url = challengeUrl ?: loaded.webUrl ?: return@f
-            pendingWebViewRetry = true
-            navigator.push(sourceKey.toWebViewScreen(url, loaded.sourceName))
-        }
-
-        BackHandler(enabled = loaded.selectionMode) { behavior.setSelectionMode(false) }
-
-        val gestures = rememberEntryGestures(
-            // A migration pick outranks a selection.
-            choose = loaded.capabilities.migrationPick?.let { pick -> { row: EntryBrowseRow -> pick.pick(row) {} } }
-                ?: behavior::toggleSelection.takeIf { loaded.selectionMode },
-            open = { row: EntryBrowseRow -> navigator.push(row.detailsScreen(sourceKey)) },
-            add = behavior::onRowLongClick,
+    Catalogue(
+        sourceKey = sourceKey,
+        savedSearchId = savedSearchId,
+        behavior = adapter,
+        bulk = bulk,
+        onOpenSettings = { navigator.push(sourceKey.preferencesRoute()) },
+        isLocal = isLocal,
+    ) { onDismiss ->
+        SourceFilterDialog(
+            onDismissRequest = onDismiss,
+            filters = modelState.filters,
+            onReset = viewModel::resetFilters,
+            onFilter = adapter::applyFilters,
+            onUpdate = viewModel::setFilters,
+            // Follows has no pick mode, so a migration pick leaves it out rather than open details.
+            onMangaDexFollowsClicked = { navigator.push(MangaDexFollowsRoute(sourceId)) }
+                .takeIf { isMangaDex && migrateFor == null },
+            onMangaDexRandomClicked = {
+                viewModel.onMangaDexRandom()
+                onDismiss()
+            }.takeIf { isMangaDex },
         )
+    }
+}
 
-        val navigateUp = {
-            if (!loaded.isUserQuery && loaded.query != null) {
-                behavior.setQuery(null)
-            } else {
-                navigator.pop()
-            }
-            Unit
+@Composable
+private fun NovelCatalogue(
+    sourceKey: SourceKey.Novel,
+    initialQuery: String?,
+    startLatest: Boolean,
+    migrateFor: MigrationPickFor?,
+    savedSearchId: Long?,
+) {
+    val sourceId = sourceKey.id
+    val navigator = LocalNavigator.current
+    val context = LocalContext.current
+    val viewModel = assistedMetroViewModel<NovelBrowseViewModel, NovelBrowseViewModel.Factory> {
+        create(sourceId = sourceId, initialQuery = initialQuery.orEmpty(), startLatest = startLatest)
+    }
+    val bulk = metroViewModel<NovelBulkFavoriteViewModel>()
+    val reportPick = rememberMigrationPickReport(migrateFor)
+    val adapterScope = rememberCoroutineScope()
+    val adapter = remember(viewModel, bulk) {
+        NovelBrowseAdapter(viewModel, bulk, sourceId, adapterScope, migrateFor?.entry?.rawId)
+    }
+    val modelState by viewModel.state.collectAsState()
+    val source = modelState.source
+
+    // Reported from here rather than by the model, so the pop goes through this composition's navigator.
+    LaunchedEffect(modelState.migrationPick) {
+        val pick = modelState.migrationPick ?: return@LaunchedEffect
+        viewModel.consumeMigrationPick()
+        when (pick) {
+            is NovelBrowseState.MigrationPick.Stored -> reportPick(pick.targetId)
+            NovelBrowseState.MigrationPick.Unavailable -> context.toast(MR.strings.migrationFlow_pickUnavailable)
         }
-
-        Scaffold(
-            topBar = { scrollBehavior ->
-                Column(
-                    modifier = Modifier
-                        .background(MaterialTheme.colorScheme.surface)
-                        // The grid scrolls under this bar, so without a pointer consumer here a
-                        // drag starting on the toolbar or the chips grabs the list behind them.
-                        .pointerInput(Unit) {},
-                ) {
-                    if (loaded.selectionMode) {
-                        BulkSelectionToolbar(
-                            selectedCount = loaded.selectedKeys.size,
-                            onClickClearSelection = { behavior.setSelectionMode(false) },
-                            onChangeCategoryClick = behavior::addSelectionToLibrary,
-                            onSelectAll = { behavior.selectAll(rows.itemSnapshotList.items) },
-                            onReverseSelection = { behavior.invertSelection(rows.itemSnapshotList.items) },
-                        )
-                    } else {
-                        EntryCatalogueToolbar(
-                            title = loaded.sourceName,
-                            searchQuery = loaded.query,
-                            onSearchQueryChange = behavior::setQuery,
-                            displayMode = (loaded.rowStyle as? EntryBrowseRowStyle.Standard)?.displayMode,
-                            onDisplayModeChange = behavior::setDisplayMode,
-                            hasWebView = loaded.webUrl != null,
-                            hasSettings = loaded.hasSettings,
-                            navigateUp = navigateUp,
-                            onWebViewClick = { onWebViewClick(null) },
-                            onHelpClick = onHelpClick,
-                            onSettingsClick = onOpenSettings,
-                            onSearch = {
-                                appliedSavedSearchId = null
-                                behavior.search(it)
-                            },
-                            onCloseSearch = {
-                                appliedSavedSearchId = null
-                                behavior.search(null)
-                            },
-                            scrollBehavior = scrollBehavior,
-                            onToggleSelectionMode = { behavior.setSelectionMode(true) },
-                            // Only offered when there is something to save: a committed search, or
-                            // filters the reader has changed from the source's own defaults.
-                            onSaveSearchClick = { savedSearchDialog = SavedSearchDialog.Create }
-                                .takeIf {
-                                    loaded.filtersActive || loaded.listing is EntryBrowseListing.Search
-                                },
-                        )
-                    }
-                    ListingChips(
-                        loaded = loaded,
-                        behavior = behavior,
-                        savedSearches = savedSearches,
-                        appliedSavedSearchId = appliedSavedSearchId,
-                        onApplySavedSearch = { search ->
-                            appliedSavedSearchId = search.id
-                            behavior.applySearch(search.query, search.filtersJson)
-                        },
-                        onLongClickSavedSearch = { search ->
-                            savedSearchDialog = SavedSearchDialog.Delete(search.id, search.name)
-                        },
-                        onClearSavedSearch = { appliedSavedSearchId = null },
-                    )
-                    HorizontalDivider()
-                }
-            },
-            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
-        ) { contentPadding ->
-            EntryBrowseCatalogue(
-                rows = rows,
-                rowStyle = loaded.rowStyle,
-                selectedKeys = loaded.selectedKeys,
-                snackbarHostState = snackbarHostState,
-                contentPadding = contentPadding,
-                onWebViewClick = onWebViewClick,
-                onHelpClick = onHelpClick,
-                onLocalSourceHelpClick = localSourceHelp,
-                gestures = gestures,
-            )
-        }
-
-        // The filter sheet is this surface's alone; the add flow's questions and the bulk category
-        // prompt are drawn the way every other surface draws them.
-        when (loaded.dialog) {
-            EntryBrowseDialog.Filter -> filterSheet(behavior::dismissDialog)
-            null -> Unit
-        }
-        EntryAddDialogs(behavior.addFlow)
-        PendingBulkCategoryDialog(bulk)
-
-        when (val dialog = savedSearchDialog) {
-            null -> Unit
-            SavedSearchDialog.Create -> SavedSearchCreateDialog(
-                onDismissRequest = { savedSearchDialog = null },
-                onCreate = { name -> savedSearchModel.save(name, behavior.captureSearch()) },
-                existingNames = savedSearches.map { it.name },
-            )
-            is SavedSearchDialog.Delete -> SavedSearchDeleteDialog(
-                name = dialog.name,
-                onDismissRequest = { savedSearchDialog = null },
-                onDelete = { savedSearchModel.delete(dialog.id) },
-            )
-        }
-
-        extraSheets()
     }
 
-    @Composable
-    private fun ListingChips(
-        loaded: EntryBrowseScreenState.Loaded,
-        behavior: EntryBrowseBehavior,
-        savedSearches: List<SavedSearch>,
-        appliedSavedSearchId: Long?,
-        onApplySavedSearch: (SavedSearch) -> Unit,
-        onLongClickSavedSearch: (SavedSearch) -> Unit,
-        onClearSavedSearch: () -> Unit,
+    Catalogue(
+        sourceKey = sourceKey,
+        savedSearchId = savedSearchId,
+        behavior = adapter,
+        bulk = bulk,
+        // A preference screen is a screen of its own; the LNReader schema is a sheet over this one.
+        onOpenSettings = {
+            when (source?.settings) {
+                is NovelSettings.PreferenceScreen -> navigator.push(sourceKey.preferencesRoute())
+                else -> viewModel.openSettingsSheet()
+            }
+        },
+        isLocal = LocalNovelSource.isLocal(sourceId),
+        extraSheets = {
+            val settings = source?.settings as? NovelSettings.LnSchema
+            if (modelState.settingsSheetOpen && settings != null) {
+                NovelSourceSettingsSheet(settings, onDismiss = viewModel::closeSettingsSheet)
+            }
+        },
+    ) { onDismiss ->
+        // The sheet follows the source's filter format, never which kind of source it is.
+        when (val draft = modelState.filterDraft) {
+            is NovelFilterState.LnValues -> NovelSourceFilterSheet(
+                filters = (source?.filters as? NovelFilters.LnSchema)?.schema,
+                values = draft.values,
+                onValueChange = viewModel::setFilterValue,
+                onApply = adapter::applyFilters,
+                onReset = viewModel::resetFilters,
+                onDismiss = onDismiss,
+            )
+            is NovelFilterState.Filters -> SourceFilterDialog(
+                onDismissRequest = onDismiss,
+                filters = draft.list,
+                onReset = viewModel::resetFilters,
+                onFilter = adapter::applyFilters,
+                onUpdate = viewModel::setFilters,
+            )
+            null -> {}
+        }
+    }
+}
+
+/**
+ * The chrome both catalogues share: the toolbar, the listing chips, the body and every dialog the
+ * neutral state can describe. What is left to the caller is the per-type filter sheet and settings,
+ * the two things no neutral state can hold.
+ */
+@Composable
+private fun Catalogue(
+    sourceKey: SourceKey,
+    savedSearchId: Long?,
+    behavior: EntryBrowseBehavior,
+    bulk: EntryBulkFavoriteViewModel<*>,
+    onOpenSettings: () -> Unit,
+    isLocal: Boolean,
+    extraSheets: @Composable () -> Unit = {},
+    filterSheet: @Composable (onDismiss: () -> Unit) -> Unit,
+) {
+    val navigator = LocalNavigator.current
+    val setAssistUrl = LocalAssistUrl.current
+    val opener = rememberDetailsOpener()
+    val state by behavior.state.collectAsState()
+    val rows = behavior.rows.collectAsLazyPagingItems()
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Saved searches are the same feature on both content types, so they are held here rather than
+    // in either model: the source is a key, and what a search holds is a string this never reads.
+    val savedSearchModel = assistedMetroViewModel<SavedSearchViewModel, SavedSearchViewModel.Factory> {
+        create(sourceKey = sourceKey)
+    }
+    val savedSearches by savedSearchModel.state.collectAsState()
+    var savedSearchDialog by remember { mutableStateOf<SavedSearchDialog?>(null) }
+    // Which chip reads as applied. Cleared by anything that replaces what it put on screen.
+    val appliedSavedSearchId by savedSearchModel.appliedId.collectAsState()
+
+    // Applied once the screen is up rather than before the model is built, which costs one
+    // discarded page of the default listing and keeps the models free of a saved-search read.
+    // Once per model, not per chip state: the reader clears that by tapping anything else, and
+    // saving a new search on this very screen re-emits the list.
+    val isLoaded = state is EntryBrowseScreenState.Loaded
+    LaunchedEffect(savedSearches, isLoaded) {
+        val search = savedSearchModel.routeSearchToOpen(state, savedSearchId) ?: return@LaunchedEffect
+        behavior.applySearch(search.query, search.filtersJson)
+    }
+
+    ResultEffect<BrowseSearchEvent> { behavior.searchFromDetails(it, savedSearchModel) }
+
+    val loaded = state as? EntryBrowseScreenState.Loaded
+    if (loaded == null) {
+        SourceUnavailable(state, navigator::pop)
+        return
+    }
+
+    LaunchedEffect(loaded.webUrl) { setAssistUrl(loaded.webUrl) }
+
+    // Coming back from the WebView re-runs the listing, so clearing a Cloudflare challenge there
+    // does not leave the reader staring at the error they left; coming back from the import does
+    // too, or the files just added stay out of the cached pages.
+    val refreshOnReturn = rememberRefreshOnReturn(rows::refresh)
+    val onWebViewClick: (String?) -> Unit = f@{ challengeUrl ->
+        val url = challengeUrl ?: loaded.webUrl ?: return@f
+        refreshOnReturn()
+        navigator.push(sourceKey.webViewRoute(url, loaded.sourceName))
+    }
+    val uriHandler = LocalUriHandler.current
+    val onHelpClick = { uriHandler.openUri(if (isLocal) LocalSource.HELP_URL else Constants.URL_HELP) }
+    val localSource = LocalSourceActions(
+        onImport = {
+            refreshOnReturn()
+            navigator.push(LocalImportRoute())
+        },
+        onGuide = { uriHandler.openUri(LocalSource.HELP_URL) },
+    ).takeIf { isLocal }
+
+    BackHandler(enabled = loaded.selectionMode) { behavior.setSelectionMode(false) }
+
+    val gestures = rememberEntryGestures(
+        // A migration pick outranks a selection.
+        choose = loaded.capabilities.migrationPick?.pick
+            ?: behavior::toggleSelection.takeIf { loaded.selectionMode },
+        open = { row: EntryBrowseRow -> opener.open(row, sourceKey) },
+        add = behavior::onRowLongClick,
+    )
+
+    val navigateUp = {
+        if (!loaded.isUserQuery && loaded.query != null) {
+            behavior.setQuery(null)
+        } else {
+            navigator.pop()
+        }
+        Unit
+    }
+
+    Scaffold(
+        topBar = { scrollBehavior ->
+            Column(
+                modifier = Modifier
+                    .background(MaterialTheme.colorScheme.surface)
+                    // The grid scrolls under this bar, so without a pointer consumer here a
+                    // drag starting on the toolbar or the chips grabs the list behind them.
+                    .pointerInput(Unit) {},
+            ) {
+                if (loaded.selectionMode) {
+                    BulkSelectionToolbar(
+                        selectedCount = loaded.selectedKeys.size,
+                        onClickClearSelection = { behavior.setSelectionMode(false) },
+                        onChangeCategoryClick = behavior::addSelectionToLibrary,
+                        onSelectAll = { behavior.selectAll(rows.itemSnapshotList.items) },
+                        onReverseSelection = { behavior.invertSelection(rows.itemSnapshotList.items) },
+                    )
+                } else {
+                    EntryCatalogueToolbar(
+                        title = loaded.sourceName,
+                        searchQuery = loaded.query,
+                        onSearchQueryChange = behavior::setQuery,
+                        displayMode = (loaded.rowStyle as? EntryBrowseRowStyle.Standard)?.displayMode,
+                        onDisplayModeChange = behavior::setDisplayMode,
+                        hasWebView = loaded.webUrl != null,
+                        hasSettings = loaded.hasSettings,
+                        navigateUp = navigateUp,
+                        onWebViewClick = { onWebViewClick(rows.challengeUrl()) },
+                        onHelpClick = onHelpClick,
+                        onSettingsClick = onOpenSettings,
+                        onSearch = {
+                            savedSearchModel.setApplied(null)
+                            behavior.search(it)
+                        },
+                        onCloseSearch = {
+                            savedSearchModel.setApplied(null)
+                            behavior.search(null)
+                        },
+                        scrollBehavior = scrollBehavior,
+                        onToggleSelectionMode = { behavior.setSelectionMode(true) },
+                        onImportClick = localSource?.onImport,
+                        // Only offered when there is something to save: a committed search, or
+                        // filters the reader has changed from the source's own defaults.
+                        onSaveSearchClick = { savedSearchDialog = SavedSearchDialog.Create }
+                            .takeIf {
+                                loaded.filtersActive || loaded.listing is EntryBrowseListing.Search
+                            },
+                    )
+                }
+                ListingChips(
+                    loaded = loaded,
+                    behavior = behavior,
+                    savedSearches = savedSearches,
+                    appliedSavedSearchId = appliedSavedSearchId,
+                    onApplySavedSearch = { search ->
+                        savedSearchModel.setApplied(search.id)
+                        behavior.applySearch(search.query, search.filtersJson)
+                    },
+                    onLongClickSavedSearch = { search ->
+                        savedSearchDialog = SavedSearchDialog.Delete(search.id, search.name)
+                    },
+                    onClearSavedSearch = { savedSearchModel.setApplied(null) },
+                )
+                HorizontalDivider()
+            }
+        },
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+    ) { contentPadding ->
+        EntryBrowseCatalogue(
+            rows = rows,
+            rowStyle = loaded.rowStyle,
+            selectedKeys = loaded.selectedKeys,
+            snackbarHostState = snackbarHostState,
+            contentPadding = contentPadding,
+            onWebViewClick = onWebViewClick,
+            onHelpClick = onHelpClick,
+            localSource = localSource,
+            gestures = gestures,
+        )
+    }
+
+    // The filter sheet is this surface's alone; the add flow's questions and the bulk category
+    // prompt are drawn the way every other surface draws them.
+    when (loaded.dialog) {
+        EntryBrowseDialog.Filter -> filterSheet(behavior::dismissDialog)
+        null -> Unit
+    }
+    EntryAddDialogs(behavior.addFlow)
+    PendingBulkCategoryDialog(bulk)
+
+    when (val dialog = savedSearchDialog) {
+        null -> Unit
+        SavedSearchDialog.Create -> SavedSearchCreateDialog(
+            onDismissRequest = { savedSearchDialog = null },
+            onCreate = { name -> savedSearchModel.save(name, behavior.captureSearch()) },
+            existingNames = savedSearches.map { it.name },
+        )
+        is SavedSearchDialog.Delete -> SavedSearchDeleteDialog(
+            name = dialog.name,
+            onDismissRequest = { savedSearchDialog = null },
+            onDelete = { savedSearchModel.delete(dialog.id) },
+        )
+    }
+
+    extraSheets()
+}
+
+@Composable
+private fun ListingChips(
+    loaded: EntryBrowseScreenState.Loaded,
+    behavior: EntryBrowseBehavior,
+    savedSearches: List<SavedSearch>,
+    appliedSavedSearchId: Long?,
+    onApplySavedSearch: (SavedSearch) -> Unit,
+    onLongClickSavedSearch: (SavedSearch) -> Unit,
+    onClearSavedSearch: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = MaterialTheme.padding.small),
+        horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
     ) {
-        Row(
-            modifier = Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = MaterialTheme.padding.small),
-            horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
-        ) {
+        ListingChip(
+            selected = loaded.listing == EntryBrowseListing.Popular,
+            icon = MaterialSymbols.Rounded.Favorite,
+            label = stringResource(MR.strings.popular),
+            onClick = {
+                onClearSavedSearch()
+                behavior.setListing(EntryBrowseListing.Popular)
+            },
+        )
+        if (loaded.supportsLatest) {
             ListingChip(
-                selected = loaded.listing == EntryBrowseListing.Popular,
-                icon = MaterialSymbols.Rounded.Favorite,
-                label = stringResource(MR.strings.popular),
+                selected = loaded.listing == EntryBrowseListing.Latest,
+                icon = MaterialSymbols.Rounded.Verified,
+                label = stringResource(MR.strings.latest),
                 onClick = {
                     onClearSavedSearch()
-                    behavior.setListing(EntryBrowseListing.Popular)
+                    behavior.setListing(EntryBrowseListing.Latest)
                 },
             )
-            if (loaded.supportsLatest) {
-                ListingChip(
-                    selected = loaded.listing == EntryBrowseListing.Latest,
-                    icon = MaterialSymbols.Rounded.Verified,
-                    label = stringResource(MR.strings.latest),
-                    onClick = {
-                        onClearSavedSearch()
-                        behavior.setListing(EntryBrowseListing.Latest)
-                    },
-                )
-            }
-            if (loaded.hasFilters) {
-                ListingChip(
-                    selected = loaded.filtersActive,
-                    icon = MaterialSymbols.Rounded.FilterList,
-                    label = stringResource(MR.strings.action_filter),
-                    onClick = {
-                        // Opening the sheet, not only applying from it: whatever the reader does next
-                        // is theirs, and a chip still lit would claim results that are no longer its.
-                        onClearSavedSearch()
-                        behavior.openFilterSheet()
-                    },
-                )
-            }
-            savedSearches.forEach { search ->
-                SavedSearchChip(
-                    // Lit only until something replaces what it put on screen. Not derived from the
-                    // listing: a filter-only search leaves a novel source on Popular, showing its
-                    // own results, where the manga twin lands on a search.
-                    selected = search.id == appliedSavedSearchId,
-                    label = search.name,
-                    onClick = { onApplySavedSearch(search) },
-                    onLongClick = { onLongClickSavedSearch(search) },
-                )
-            }
+        }
+        if (loaded.hasFilters) {
+            ListingChip(
+                selected = loaded.filtersActive,
+                icon = MaterialSymbols.Rounded.FilterList,
+                label = stringResource(MR.strings.action_filter),
+                onClick = {
+                    // Opening the sheet, not only applying from it: whatever the reader does next
+                    // is theirs, and a chip still lit would claim results that are no longer its.
+                    onClearSavedSearch()
+                    behavior.openFilterSheet()
+                },
+            )
+        }
+        savedSearches.forEach { search ->
+            SavedSearchChip(
+                // Lit only until something replaces what it put on screen. Not derived from the
+                // listing: a filter-only search leaves a novel source on Popular, showing its
+                // own results, where the manga twin lands on a search.
+                selected = search.id == appliedSavedSearchId,
+                label = search.name,
+                onClick = { onApplySavedSearch(search) },
+                onLongClick = { onLongClickSavedSearch(search) },
+            )
         }
     }
+}
 
-    @Composable
-    private fun ListingChip(
-        selected: Boolean,
-        icon: ImageVector,
-        label: String,
-        onClick: () -> Unit,
-    ) {
-        FilterChip(
-            selected = selected,
-            onClick = onClick,
-            leadingIcon = { Icon(icon, null, Modifier.size(FilterChipDefaults.IconSize)) },
-            label = { Text(text = label) },
-        )
+@Composable
+private fun ListingChip(
+    selected: Boolean,
+    icon: ImageVector,
+    label: String,
+    onClick: () -> Unit,
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        leadingIcon = { Icon(icon, null, Modifier.size(FilterChipDefaults.IconSize)) },
+        label = { Text(text = label) },
+    )
+}
+
+/** Loading, or a source that cannot serve a catalogue: a missing extension has no retry, a plugin
+ *  that threw while loading does. */
+@Composable
+internal fun SourceUnavailable(state: EntryBrowseScreenState, navigateUp: () -> Unit) {
+    if (state is EntryBrowseScreenState.Loading) {
+        LoadingScreen()
+        return
     }
-
-    /** Loading, or a source that cannot serve a catalogue: a missing extension has no retry, a plugin
-     *  that threw while loading does. */
-    @Composable
-    private fun SourceUnavailable(state: EntryBrowseScreenState, navigateUp: () -> Unit) {
-        if (state is EntryBrowseScreenState.Loading) {
-            LoadingScreen()
-            return
+    Scaffold(
+        topBar = { scrollBehavior ->
+            AppBar(
+                // Named even when it cannot load, so the reader can tell which source this was.
+                title = when (state) {
+                    is EntryBrowseScreenState.SourceMissing -> state.label
+                    is EntryBrowseScreenState.SourceLoadFailed -> state.label
+                    else -> null
+                },
+                navigateUp = navigateUp,
+                scrollBehavior = scrollBehavior,
+            )
+        },
+    ) { contentPadding ->
+        when (state) {
+            is EntryBrowseScreenState.SourceMissing -> EmptyScreen(
+                message = stringResource(MR.strings.source_not_installed, state.label),
+                modifier = Modifier.padding(contentPadding),
+            )
+            is EntryBrowseScreenState.SourceLoadFailed -> EmptyScreen(
+                message = listOfNotNull(stringResource(state.description), state.message).joinToString("\n\n"),
+                modifier = Modifier.padding(contentPadding),
+                actions = listOf(
+                    EmptyScreenAction(MR.strings.action_retry, MaterialSymbols.Rounded.Refresh, state.retry.run),
+                ),
+            )
+            else -> Unit
         }
-        Scaffold(
-            topBar = { scrollBehavior ->
-                AppBar(
-                    // Named even when it cannot load, so the reader can tell which source this was.
-                    title = when (state) {
-                        is EntryBrowseScreenState.SourceMissing -> state.label
-                        is EntryBrowseScreenState.SourceLoadFailed -> state.label
-                        else -> null
-                    },
-                    navigateUp = navigateUp,
-                    scrollBehavior = scrollBehavior,
-                )
-            },
-        ) { contentPadding ->
-            when (state) {
-                is EntryBrowseScreenState.SourceMissing -> EmptyScreen(
-                    message = stringResource(MR.strings.source_not_installed, state.label),
-                    modifier = Modifier.padding(contentPadding),
-                )
-                is EntryBrowseScreenState.SourceLoadFailed -> EmptyScreen(
-                    message = listOfNotNull(stringResource(state.description), state.message).joinToString("\n\n"),
-                    modifier = Modifier.padding(contentPadding),
-                    actions = listOf(
-                        EmptyScreenAction(MR.strings.action_retry, MaterialSymbols.Rounded.Refresh, state.retry.run),
-                    ),
-                )
-                else -> Unit
-            }
-        }
     }
+}
 
-    /** Search the catalogue this screen sits under, from the details page it opened. */
-    suspend fun search(query: String) = queryEvent.send(SearchType.Text(query))
+/** Search the catalogue as text, or as a genre matched to its filters when [genre]. Upstream's shape. */
+data class BrowseSearchEvent(val query: String, val genre: Boolean = false)
 
-    suspend fun searchGenre(name: String) = queryEvent.send(SearchType.Genre(name))
-
-    companion object {
-        private val queryEvent = Channel<SearchType>()
-    }
-
-    private sealed class SearchType(val txt: String) {
-        class Text(txt: String) : SearchType(txt)
-        class Genre(txt: String) : SearchType(txt)
-    }
+/**
+ * Runs a search sent from a details page this screen sits under (see searchGenreFromDetails). It
+ * replaces what a saved search put on screen, so that chip goes out, as it does for every other search.
+ */
+internal fun EntryBrowseBehavior.searchFromDetails(event: BrowseSearchEvent, savedSearches: SavedSearchViewModel) {
+    savedSearches.setApplied(null)
+    if (event.genre) searchGenre(event.query) else search(event.query)
 }
 
 /** The two saved-search dialogs the catalogue raises itself, neither of which any model owns. */

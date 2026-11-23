@@ -21,6 +21,9 @@
     past it. -Reconciled is how a pass says it did the hand-merge, so it can stamp and commit; it is an
     assertion by the operator, so use it only after actually walking each reported path.
 
+    It also lists the Mihon files in docs/dev/live-twins.md that changed in the range, whose fix may belong
+    on the novel twin too. That list is a prompt and never fails the check.
+
 .EXAMPLE
     pwsh scripts/off-path-check.ps1 -MihonBase 03229a380
 
@@ -37,6 +40,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'mihon-ownership.ps1')
+. (Join-Path $PSScriptRoot 'live-twins.ps1')
 $repoRoot = Split-Path $PSScriptRoot -Parent
 if (-not $RefsRoot) { $RefsRoot = Get-DefaultRefsRoot $repoRoot }
 $mihon = Join-Path $RefsRoot 'mihon'
@@ -46,14 +50,9 @@ $manifestPath = Join-Path $repoRoot 'docs/dev/off-path-manifest.md'
 if (-not (Test-Path $manifestPath)) { throw "manifest not found: $manifestPath" }
 
 # Parse the manifest table: data rows look like `| <path> | <upstream> | <replacement> |`.
-$entries = Get-Content $manifestPath |
-    Where-Object { $_ -match '^\|\s*[a-z0-9-]+/' } |
-    ForEach-Object {
-        $cols = ($_ -split '\|') | ForEach-Object { $_.Trim() }
-        [pscustomobject]@{ Path = $cols[1]; Upstream = $cols[2]; Replacement = $cols[3] }
-    }
-
-if (-not $entries) { Write-Host 'off-path check: manifest has no entries.'; exit 0 }
+$entries = Get-PathTableRows $manifestPath | ForEach-Object {
+    [pscustomobject]@{ Path = $_[1]; Upstream = $_[2]; Replacement = $_[3] }
+}
 
 $bases = @{ mihon = $MihonBase; tsundoku = $TsundokuBase }
 $throughs = @{ mihon = $MihonThrough; tsundoku = 'HEAD' }
@@ -86,6 +85,22 @@ foreach ($group in $entries | Group-Object Upstream) {
             $changed += "  CHANGED  $($e.Path)`n           -> $action"
         }
     }
+}
+
+# A live twin never fails the check: the Mihon file still takes the change, and only a person can say
+# whether the novel side needs it too.
+$twins = @(Get-LiveTwins (Join-Path $repoRoot 'docs/dev/live-twins.md'))
+$twinChanges = @(Get-LiveTwinChanges $mihon $MihonBase $MihonThrough $twins)
+if ($twinChanges.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'Mihon files with a live novel twin changed in this range. Check whether each fix belongs on both:'
+    $twinChanges | ForEach-Object { Write-Host $_ }
+}
+$staleTwins = @(Get-StaleLiveTwins $repoRoot $twins)
+if ($staleTwins.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'docs/dev/live-twins.md names files that are gone, so those rows no longer alarm:'
+    $staleTwins | ForEach-Object { Write-Host "  $_" }
 }
 
 if ($changed.Count -gt 0) {

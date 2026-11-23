@@ -3,6 +3,7 @@ package eu.kanade.domain.chapter.model
 import eu.kanade.domain.manga.model.downloadedFilter
 import eu.kanade.tachiyomi.ui.manga.ChapterList
 import reikai.domain.merge.GroupChapterFlags
+import reikai.domain.reader.readerChapterFilters
 import tachiyomi.domain.chapter.model.Chapter
 import tachiyomi.domain.chapter.service.getChapterSort
 import tachiyomi.domain.manga.model.Manga
@@ -18,16 +19,15 @@ import tachiyomi.source.local.isLocal
 // another source's is downloaded, since that is the copy the reader opens.
 fun List<Chapter>.applyFilters(
     manga: Manga,
+    downloadedOnly: Boolean,
     flags: GroupChapterFlags<Chapter>, // RK
 ): List<Chapter> {
-    val unreadFilter = manga.unreadFilter
-    val downloadedFilter = manga.downloadedFilter
-    val bookmarkedFilter = manga.bookmarkedFilter
-
     // RK -->
-    return filter { chapter -> applyFilter(unreadFilter) { !flags.isRead(chapter) } }
-        .filter { chapter -> applyFilter(bookmarkedFilter) { flags.isBookmarked(chapter) } }
-        .filter { chapter -> applyFilter(downloadedFilter) { flags.isDownloaded(chapter) } }
+    // By the one filter rule the readers' skip-filtered step and the novel list read too
+    val filters = manga.readerChapterFilters(downloadedOnly)
+    return filter { chapter ->
+        filters.keeps({ flags.isRead(chapter) }, { flags.isBookmarked(chapter) }, { flags.isDownloaded(chapter) })
+    }
         // RK <--
         .sortedWith(getChapterSort(manga))
 }
@@ -36,10 +36,10 @@ fun List<Chapter>.applyFilters(
  * Applies the view filters to the list of chapters obtained from the database.
  * @return an observable of the list of chapters filtered and sorted.
  */
-fun List<ChapterList.Item>.applyFilters(manga: Manga): Sequence<ChapterList.Item> {
+fun List<ChapterList.Item>.applyFilters(manga: Manga, downloadedOnly: Boolean): Sequence<ChapterList.Item> {
     val isLocalManga = manga.isLocal()
     val unreadFilter = manga.unreadFilter
-    val downloadedFilter = manga.downloadedFilter
+    val downloadedFilter = manga.downloadedFilter(downloadedOnly)
     val bookmarkedFilter = manga.bookmarkedFilter
     return asSequence()
         // RK: the item's any-source flags, so this agrees with the details list it filters.

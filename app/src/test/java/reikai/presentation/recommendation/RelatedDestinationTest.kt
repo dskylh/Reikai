@@ -1,14 +1,14 @@
 package reikai.presentation.recommendation
 
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.ui.manga.MangaScreen
 import io.kotest.matchers.shouldBe
+import mihon.core.navigation.MangaRoute
 import org.junit.jupiter.api.Test
 import reikai.domain.library.ContentType
 import reikai.domain.recommendation.RECOMMENDS_SOURCE
 import reikai.domain.recommendation.RecommendationOrigin
 import reikai.domain.recommendation.RelatedMangaCandidate
-import reikai.presentation.browse.globalsearch.EntryGlobalSearchScreen
+import reikai.presentation.browse.globalsearch.EntryGlobalSearchRoute
 
 class RelatedDestinationTest {
 
@@ -23,12 +23,12 @@ class RelatedDestinationTest {
 
     @Test
     fun `a card resolved to a stored manga opens that manga`() {
-        (relatedDestination(candidate, localId = 7L) as? MangaScreen)?.mangaId shouldBe 7L
+        (relatedDestination(candidate, localId = 7L) as? MangaRoute)?.mangaId shouldBe 7L
     }
 
     @Test
     fun `a card with nothing to open searches manga for its title`() {
-        (relatedDestination(candidate, localId = null) as? EntryGlobalSearchScreen)
+        (relatedDestination(candidate, localId = null) as? EntryGlobalSearchRoute)
             ?.let { it.searchQuery to it.scopedContentType } shouldBe ("A title" to ContentType.MANGA)
     }
 }

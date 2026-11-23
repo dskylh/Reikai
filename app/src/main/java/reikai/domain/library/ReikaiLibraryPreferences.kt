@@ -3,6 +3,7 @@ package reikai.domain.library
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
+import kotlinx.serialization.json.Json
 import reikai.util.getStringList
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
@@ -22,6 +23,8 @@ import tachiyomi.core.common.preference.getLongArray
 class ReikaiLibraryPreferences(
     private val preferenceStore: PreferenceStore,
 ) {
+
+    val shownContent: Preference<ContentType> = preferenceStore.shownContent()
 
     // region Grouping
 
@@ -55,7 +58,7 @@ class ReikaiLibraryPreferences(
     /** Sticky All/Manga/Novels chip on the Library tab. Its own key, distinct from the Browse
      *  and download-queue content-type filters, so each surface remembers its last type. */
     val libraryContentType: Preference<ContentType> =
-        preferenceStore.getEnum("library_content_type", ContentType.MANGA)
+        ShownContentPreference(preferenceStore.getEnum("library_content_type", ContentType.MANGA), shownContent)
 
     // endregion
 
@@ -71,6 +74,9 @@ class ReikaiLibraryPreferences(
     /** Opt-out: record manga library update failures and expose them in the Update errors screen.
      *  Off falls back to the dump file a failed-update notification opens instead. */
     val trackUpdateErrors: Preference<Boolean> = preferenceStore.getBoolean("track_update_errors", true)
+
+    /** Marks, on the details screen, the chapters "Skip duplicate chapters" folds together, to see what it skips. */
+    val showSkippedDuplicates: Preference<Boolean> = preferenceStore.getBoolean("show_skipped_duplicates", false)
 
     /** Opt-out: the novel half of [trackUpdateErrors], same fallback. */
     val trackNovelUpdateErrors: Preference<Boolean> = preferenceStore.getBoolean("track_novel_update_errors", true)
@@ -120,6 +126,9 @@ class ReikaiLibraryPreferences(
     /** Adult-content filter. Komikku's `filterLewd`; lewdness by reikai.util.isAdultEntry. */
     val filterLewd: Preference<TriState> = preferenceStore.getEnum("pref_filter_library_lewd", TriState.DISABLED)
 
+    /** Local-series filter: a merged series passes when any of its sources is the local one. */
+    val filterLocal: Preference<TriState> = preferenceStore.getEnum("pref_filter_library_local", TriState.DISABLED)
+
     /** Master switch for the include/exclude category filter. */
     val filterCategories: Preference<Boolean> = preferenceStore.getBoolean("pref_filter_library_categories", false)
 
@@ -130,6 +139,40 @@ class ReikaiLibraryPreferences(
     /** Category ids (as strings) a manga must not belong to any of. */
     val filterCategoriesExclude: Preference<Set<String>> =
         preferenceStore.getStringSet("pref_filter_library_categories_exclude", emptySet())
+
+    /** Tag keys ([reikai.domain.library.tagKey]) a series must carry, any of them or, with [filterTagsIncludeAll], all. */
+    val filterTagsInclude: Preference<Set<String>> =
+        preferenceStore.getStringSet("pref_filter_library_tags_include", emptySet())
+
+    /** Tag keys a series must not carry: any of them or, with [filterTagsExcludeAll], all of them together. */
+    val filterTagsExclude: Preference<Set<String>> =
+        preferenceStore.getStringSet("pref_filter_library_tags_exclude", emptySet())
+
+    val filterTagsIncludeAll: Preference<Boolean> =
+        preferenceStore.getBoolean("pref_filter_library_tags_include_all", false)
+
+    val filterTagsExcludeAll: Preference<Boolean> =
+        preferenceStore.getBoolean("pref_filter_library_tags_exclude_all", false)
+
+    /** Series with no tag at all: shown only, hidden, or not filtered. */
+    val filterNoTags: Preference<TriState> =
+        preferenceStore.getEnum("pref_filter_library_no_tags", TriState.DISABLED)
+
+    /** Tag filters saved under a name, in the order they were saved. */
+    val savedTagFilters: Preference<List<SavedTagFilter>> = preferenceStore.getObjectFromString(
+        key = "pref_filter_library_saved_tags",
+        defaultValue = emptyList(),
+        serializer = { encodeJsonList(it) },
+        deserializer = { decodeJsonList(it) },
+    )
+
+    /** Tags read as another wherever the library compares tags; see [TagAliases]. */
+    val tagAliases: Preference<List<TagAlias>> = preferenceStore.getObjectFromString(
+        key = "pref_library_tag_aliases",
+        defaultValue = emptyList(),
+        serializer = { encodeJsonList(it) },
+        deserializer = { decodeJsonList(it) },
+    )
 
     // endregion
 
@@ -241,3 +284,11 @@ class ReikaiLibraryPreferences(
         const val DEAD_LAST_USED_ALL_PAGE_KEY = "reikai_last_used_all_category"
     }
 }
+
+internal val listJson = Json { ignoreUnknownKeys = true }
+
+internal inline fun <reified T> encodeJsonList(list: List<T>): String = listJson.encodeToString(list)
+
+// A value that no longer reads leaves the list empty rather than failing the library.
+internal inline fun <reified T> decodeJsonList(json: String): List<T> =
+    runCatching { listJson.decodeFromString<List<T>>(json) }.getOrDefault(emptyList())

@@ -2,7 +2,6 @@ package reikai.presentation.recents
 
 import android.content.Context
 import android.content.Intent
-import cafe.adriel.voyager.core.screen.Screen
 import dev.zacsweers.metro.Assisted
 import dev.zacsweers.metro.AssistedFactory
 import dev.zacsweers.metro.AssistedInject
@@ -10,7 +9,6 @@ import eu.kanade.tachiyomi.data.download.DownloadCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.library.LibraryUpdateWorker
 import eu.kanade.tachiyomi.ui.history.HistoryViewModel
-import eu.kanade.tachiyomi.ui.manga.MangaScreen
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.updates.UpdatesItem
 import eu.kanade.tachiyomi.ui.updates.UpdatesViewModel
@@ -31,6 +29,7 @@ import reikai.domain.manga.MangaPreferences
 import reikai.domain.manga.MergedChapterProvider
 import reikai.domain.manga.chapterSettingsOf
 import reikai.domain.manga.inReadingOrder
+import reikai.domain.manga.isOnDevice
 import reikai.domain.merge.ChapterCopyRow
 import reikai.domain.merge.MergeGroupRepository
 import reikai.domain.merge.MergedChapterUnitRepository
@@ -42,9 +41,11 @@ import reikai.domain.source.ReikaiSourcePreferences
 import reikai.domain.source.isInstalled
 import reikai.presentation.browse.AddDecision
 import reikai.presentation.browse.AddFavoriteResult
+import reikai.presentation.browse.AddOutcome
 import reikai.presentation.browse.MangaLibraryAdder
 import reikai.presentation.browse.components.toDuplicateCard
 import reikai.presentation.browse.decideAdd
+import reikai.presentation.components.DownloadProgress
 import tachiyomi.domain.chapter.interactor.GetChaptersByMangaId
 import tachiyomi.domain.chapter.model.Chapter
 import tachiyomi.domain.history.model.HistoryWithRelations
@@ -55,6 +56,7 @@ import tachiyomi.domain.manga.model.CustomMangaInfo
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.manga.model.MangaCover
 import tachiyomi.domain.source.service.SourceManager
+import tachiyomi.source.local.LocalSource
 import kotlin.time.Instant
 
 /**
@@ -291,13 +293,13 @@ class MangaRecentsAdapter(
         return mangaLibraryAdder.resolveAddFavorite(manga)
     }
 
-    override suspend fun applyAddCategories(entry: EntryId, categoryIds: List<Long>) {
-        val manga = mangaOf(entry) ?: return
-        mangaLibraryAdder.confirmAddCategories(manga.id, categoryIds)
+    override suspend fun applyAddCategories(entry: EntryId, categoryIds: List<Long>): AddOutcome {
+        val manga = mangaOf(entry) ?: return AddOutcome.Failed
+        return mangaLibraryAdder.confirmAddCategories(manga.id, categoryIds)
     }
 
-    override suspend fun addToGroup(entry: EntryId, duplicates: List<EntryId>): AddFavoriteResult {
-        val manga = mangaOf(entry) ?: return AddFavoriteResult.Failed
+    override suspend fun addToGroup(entry: EntryId, duplicates: List<EntryId>): AddOutcome {
+        val manga = mangaOf(entry) ?: return AddOutcome.Failed
         return mangaLibraryAdder.addToExistingGroup(manga, duplicates.map { it.rawId })
     }
 
@@ -306,9 +308,6 @@ class MangaRecentsAdapter(
     // Straight to the job rather than through the updates model, which only wraps this same call in a
     // snackbar event the shell now owns. It also lets a surface with no updated lane still refresh.
     override suspend fun refresh(): Boolean = LibraryUpdateWorker.startNow(application.workManager)
-
-    override suspend fun detailsScreen(entry: EntryId): Screen? =
-        (entry as? EntryId.Manga)?.let { MangaScreen(it.rawId) }
 
     override fun open(item: RecentsItem, chapter: ChapterRef): Intent = ReaderActivity.newIntent(
         application,
@@ -330,12 +329,15 @@ class MangaRecentsAdapter(
      * the row, because combining the whole feed with the download queue would re-map every row of it
      * on each download tick. The Downloaded filter asks this same state.
      */
-    private fun historyDownloadUi(payload: HistoryWithRelations) =
+    private fun historyDownloadUi(
+        payload: HistoryWithRelations,
+    ) = recentsDownloadUi(payload.sourceId == LocalSource.ID) {
         copiesDownloadUi(payload.chapterId, copies = {
             with(payload) {
                 readCopies.copiesOf(chapterId, storedTitle, sourceId.toString(), chapterName, scanlator, chapterUrl)
             }
         }, isInstalled = readCopies::isInstalled)
+    }
 
     private fun copiesDownloadUi(
         chapterId: Long,
@@ -348,7 +350,7 @@ class MangaRecentsAdapter(
         progress = { id -> downloadManager.getQueuedDownloadOrNull(id)?.progress },
         isInstalled = isInstalled,
     ) { copy ->
-        downloadManager.isChapterDownloaded(
+        downloadManager.isOnDevice(
             copy.chapterName,
             copy.scanlator,
             copy.chapterUrl,
@@ -360,10 +362,12 @@ class MangaRecentsAdapter(
 
 /** The updates model already builds both providers per row, so this only hands them over. */
 internal fun mangaDownloadUi(item: RecentsItem): RecentsDownloadUi? = when (val payload = item.payload) {
-    is UpdatesItem -> RecentsDownloadUi(
-        state = payload.downloadStateProvider,
-        progress = RecentsDownloadProgress.Live(payload.downloadProgressProvider),
-    )
+    is UpdatesItem -> recentsDownloadUi(payload.update.sourceId == LocalSource.ID) {
+        RecentsDownloadUi(
+            state = payload.downloadStateProvider,
+            progress = DownloadProgress.Live(payload.downloadProgressProvider),
+        )
+    }
     else -> null
 }
 

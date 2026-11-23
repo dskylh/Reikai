@@ -29,8 +29,6 @@
         <item name="android:textColor">?attr/colorOnBackground</item>
     </style>
 
-    <style name="TextAppearance.Tachiyomi.Preference.Secondary" parent="TextAppearance.Material3.BodySmall" />
-
 
     <!--=======================-->
     <!--Widgets.MaterialDivider-->
@@ -39,29 +37,5 @@
         <item name="dividerColor">@color/divider_default</item>
     </style>
 
-
-    <!--==============-->
-    <!--Widgets.Switch-->
-    <!--==============-->
-    <style name="Widget.Tachiyomi.Switch" parent="Widget.Material3.CompoundButton.Switch">
-        <item name="materialThemeOverlay">@style/ThemeOverlay.Tachiyomi.Switch</item>
-    </style>
-
-    <style name="ThemeOverlay.Tachiyomi.Switch" parent="">
-        <item name="elevationOverlayEnabled">@bool/elevationOverlayEnabled</item>
-    </style>
-
-
-    <!--===========-->
-    <!--Preferences-->
-    <!--===========-->
-    <style name="PreferenceThemeOverlay.Tachiyomi">
-        <item name="preferenceCategoryTitleTextAppearance">?attr/textAppearanceBodyMedium</item>
-        <item name="switchPreferenceCompatStyle">@style/PreferenceThemeOverlay.Tachiyomi.SwitchPreferenceCompat</item>
-    </style>
-
-    <style name="PreferenceThemeOverlay.Tachiyomi.SwitchPreferenceCompat" parent="Preference.SwitchPreferenceCompat.Material">
-        <item name="android:widgetLayout">@layout/pref_widget_switch_material</item>
-    </style>
 
 </resources>

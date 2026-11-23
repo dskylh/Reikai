@@ -91,6 +91,27 @@ class NovelSourceConformanceTest {
         source(kind).search("query", page = 1, filters = null).items.single().name shouldBe DECODED
     }
 
+    // Each adapter decodes its own details: the shared mapper no longer does, since the local source's are clean.
+    @ParameterizedTest
+    @EnumSource(Kind::class)
+    fun `a novel's details are decoded`(kind: Kind) = runTest {
+        source(kind).parseNovel("novel").summary shouldBe DECODED
+    }
+
+    // As with the details: the shared mapper leaves chapter names alone, since a local book's are clean.
+    @ParameterizedTest
+    @EnumSource(Kind::class)
+    fun `a chapter's name is decoded`(kind: Kind) = runTest {
+        source(kind).parseNovel("novel").chapters.orEmpty().first().name shouldBe DECODED
+    }
+
+    @Test
+    fun `a plugin's page of chapters is decoded`() = runTest {
+        val chapter = source(Kind.PLUGIN).parsePage("novel", "2")!!.chapters.orEmpty().single()
+
+        (chapter.name to chapter.scanlator) shouldBe (DECODED to "Group & Co")
+    }
+
     // A down site answers with an error page, which a plugin or an IReader extension parses into nothing.
     // A manga source's awaitSuccess reports the status instead, and every novel kind owes the same.
     @ParameterizedTest
@@ -118,6 +139,12 @@ class NovelSourceConformanceTest {
         shouldThrow<HttpException> { failing(kind).parseChapter("c1") }.code shouldBe 521
     }
 
+    // Only a plugin has pages of chapters.
+    @Test
+    fun `a page whose request failed reports the failure, not an empty chapter list`() = runTest {
+        shouldThrow<HttpException> { failing(Kind.PLUGIN).parsePage("novel", "2") }.code shouldBe 521
+    }
+
     // Unsupported for an app catalogue: its awaitSuccess fails the call on any failed request, as manga's does.
     @ParameterizedTest
     @EnumSource(Kind::class, names = ["PLUGIN", "IREADER"])
@@ -134,8 +161,8 @@ class NovelSourceConformanceTest {
 
     @ParameterizedTest
     @EnumSource(Kind::class, names = ["APP", "IREADER"])
-    fun `a chapter's group is kept`(kind: Kind) = runTest {
-        source(kind).parseNovel("novel").chapters.orEmpty().first().scanlator shouldBe "Group"
+    fun `a chapter's group is kept, decoded`(kind: Kind) = runTest {
+        source(kind).parseNovel("novel").chapters.orEmpty().first().scanlator shouldBe "Group & Co"
     }
 
     @ParameterizedTest
@@ -343,6 +370,7 @@ class NovelSourceConformanceTest {
                     coEvery { searchNovels("p", any(), any()) } coAnswers { failed { emptyList() } }
                     coEvery { parseNovel("p", any()) } coAnswers { failed { SourceNovel(path = "novel") } }
                     coEvery { parseChapter("p", any()) } coAnswers { failed { "" } }
+                    coEvery { parsePage("p", any(), any()) } coAnswers { failed { SourceNovel(path = "novel") } }
                 },
                 LnPluginInfo(id = "p", name = "P", lang = "English"),
             )
@@ -384,10 +412,11 @@ class NovelSourceConformanceTest {
         every { lang } returns "en"
         every { getFilters() } returns emptyList()
         every { getListings() } returns listOf(listing)
-        coEvery { getMangaDetails(any(), any()) } returns MangaInfo(key = "novel", title = "Novel")
+        coEvery { getMangaDetails(any(), any()) } returns
+            MangaInfo(key = "novel", title = "Novel", description = ENCODED)
         coEvery { getChapterList(any(), any()) } returns
             listOf(
-                ChapterInfo(key = "c1", name = "1", dateUpload = UPLOADED, scanlator = "Group"),
+                ChapterInfo(key = "c1", name = ENCODED, dateUpload = UPLOADED, scanlator = "Group &amp; Co"),
                 ChapterInfo(key = "c2", name = "2"),
             )
         coEvery { getPageList(any(), any()) } returns listOf(Text("a\u0000b"))
@@ -402,7 +431,12 @@ class NovelSourceConformanceTest {
     private fun pluginHost() = mockk<LnPluginHost> {
         coEvery { parseNovel("p", "novel") } returns SourceNovel(
             path = "novel",
-            chapters = listOf(ChapterItem(name = "1", path = "c1"), ChapterItem(name = "2", path = "c2")),
+            summary = ENCODED,
+            chapters = listOf(ChapterItem(name = ENCODED, path = "c1"), ChapterItem(name = "2", path = "c2")),
+        )
+        coEvery { parsePage("p", "novel", "2") } returns SourceNovel(
+            path = "novel",
+            chapters = listOf(ChapterItem(name = ENCODED, path = "c3", scanlator = "Group &amp; Co")),
         )
         coEvery { parseChapter("p", "c1") } returns "<p>a\u0000b</p>"
         // A plugin says it has run out by answering with nothing.
@@ -419,12 +453,13 @@ class NovelSourceConformanceTest {
         every { getFilterList() } returns FilterList()
         coEvery { getMangaUpdate(any(), any(), any(), any()) } answers {
             SMangaUpdate(
-                firstArg(),
+                firstArg<SManga>().apply { description = ENCODED },
                 listOf(
                     chapter("c2"),
                     chapter("c1").apply {
+                        name = ENCODED
                         date_upload = UPLOADED
-                        scanlator = "Group"
+                        scanlator = "Group &amp; Co"
                     },
                 ),
             )

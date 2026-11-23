@@ -8,9 +8,15 @@ import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.ui.reader.viewer.webgpu.WebGpuShader
 import eu.kanade.tachiyomi.ui.reader.viewer.webgpu.WebGpuShaders
+import reikai.domain.reader.AUTO_SCROLL_INTERVAL_DEFAULT_SECONDS
+import reikai.domain.reader.AUTO_SCROLL_SPEED_DEFAULT
 import reikai.domain.reader.BOTTOM_ZONE_DEFAULT_PERCENT
+import reikai.domain.reader.CONTRAST_DEFAULT_PERCENT
 import reikai.domain.reader.ChapterTitleFormat
+import reikai.domain.reader.FLASH_PAGE_INTERVAL_DEFAULT
+import reikai.domain.reader.ReaderProgressSize
 import reikai.domain.reader.VOLUME_KEY_SCROLL_DEFAULT_FRACTION
+import reikai.util.floored
 import reikai.util.getStringList
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
@@ -37,13 +43,26 @@ class ReaderPreferences(
 
     val flashDurationMillis: Preference<Int> = preferenceStore.getInt("pref_reader_flash_duration", MILLI_CONVERSION)
 
-    val flashPageInterval: Preference<Int> = preferenceStore.getInt("pref_reader_flash_interval", 1)
+    val flashPageInterval: Preference<Int> = preferenceStore.getInt(
+        "pref_reader_flash_interval",
+        FLASH_PAGE_INTERVAL_DEFAULT,
+    ) // RK
 
     val flashColor: Preference<FlashColor> = preferenceStore.getEnum("pref_reader_flash_mode", FlashColor.BLACK)
 
     val doubleTapAnimSpeed: Preference<Int> = preferenceStore.getInt("pref_double_tap_anim_speed", 500)
 
     val showPageNumber: Preference<Boolean> = preferenceStore.getBoolean("pref_show_page_number_key", true)
+
+    // RK: the open chapter's time left at the reader's learned pace, beside the page number
+    val showTimeLeft: Preference<Boolean> = preferenceStore.getBoolean("pref_show_time_left", false)
+
+    // RK -->
+    val progressSize: Preference<ReaderProgressSize> =
+        preferenceStore.getEnum("pref_progress_size", ReaderProgressSize.DEFAULT)
+
+    val progressBacked: Preference<Boolean> = preferenceStore.getBoolean("pref_progress_backed", false)
+    // RK <--
 
     // RK: off hides the progress navigator in every reading mode, moving the chapter buttons into the bar
     val showNavigator: Preference<Boolean> = preferenceStore.getBoolean("reader_show_navigator", true)
@@ -133,6 +152,10 @@ class ReaderPreferences(
     /** The order of [readerBottomButtons], as codes; empty draws them in declaration order. */
     val readerBottomButtonOrder: Preference<List<String>> = preferenceStore.getStringList("reader_bottom_button_order")
 
+    /** Off marks a bar toggle that is on by its tint alone; on also fills it, for black-and-white screens. */
+    val readerBottomButtonsFilled: Preference<Boolean> =
+        preferenceStore.getBoolean("reader_bottom_buttons_filled", false)
+
     val preserveReadingPosition: Preference<Boolean> = preferenceStore.getBoolean("preserve_reading_position", false)
 
     val preloadSize: Preference<Int> = preferenceStore.getInt("reader_preload_size", 4)
@@ -140,10 +163,16 @@ class ReaderPreferences(
     val autoScrollOnOpen: Preference<Boolean> = preferenceStore.getBoolean("reader_auto_scroll_on_open", false)
 
     /** Seconds a page shows before a paged reader turns it. */
-    val autoScrollInterval: Preference<Int> = preferenceStore.getInt("reader_auto_scroll_interval", 5)
+    val autoScrollInterval: Preference<Int> = preferenceStore.getInt(
+        "reader_auto_scroll_interval",
+        AUTO_SCROLL_INTERVAL_DEFAULT_SECONDS,
+    )
 
     /** A long strip's speed, in the novel reader's unit: CSS pixels a frame at 60Hz. */
-    val autoScrollSpeed: Preference<Float> = preferenceStore.getFloat("reader_auto_scroll_speed", 1.0f)
+    val autoScrollSpeed: Preference<Float> = preferenceStore.getFloat(
+        "reader_auto_scroll_speed",
+        AUTO_SCROLL_SPEED_DEFAULT,
+    )
 
     /** Its own key rather than the novel reader's, since each reader keeps its own settings. */
     val chapterTitleFormat: Preference<ChapterTitleFormat> =
@@ -186,6 +215,9 @@ class ReaderPreferences(
         DualPageView.NEVER,
     )
 
+    // RK: the space between a spread's two pages, in percent of a page's width
+    val spreadGap: Preference<Int> = preferenceStore.getInt("pref_reader_spread_gap", 0)
+
     // endregion
 
     // region Color filter
@@ -203,6 +235,9 @@ class ReaderPreferences(
     val grayscale: Preference<Boolean> = preferenceStore.getBoolean("pref_grayscale", false)
 
     val invertedColors: Preference<Boolean> = preferenceStore.getBoolean("pref_inverted_colors", false)
+
+    // RK: the page's contrast in percent, applied with grayscale and invert by PageColorAdjust
+    val contrast: Preference<Int> = preferenceStore.getInt("pref_reader_contrast", CONTRAST_DEFAULT_PERCENT)
 
     // endregion
 
@@ -266,9 +301,17 @@ class ReaderPreferences(
 
     val cutoutModeDual: Preference<CutoutMode> = preferenceStore.getEnum("webgpu_dual_cutout_mode", CutoutMode.IGNORE)
 
+    // RK: never read below the floor, see CONTINUOUS_MIN_WIDTH_MIN
     val continuousMinWidth: Preference<Int> = preferenceStore.getInt("webgpu_continuous_minwidth", 100)
+        .floored(CONTINUOUS_MIN_WIDTH_MIN)
 
     val continuousGap: Preference<Int> = preferenceStore.getInt("webgpu_continuous_gap", 10)
+
+    val fastRenderingOnly: Preference<Boolean> = preferenceStore.getBoolean("webgpu_fast_rendering_only", false)
+
+    val holdUntilFinal: Preference<Boolean> = preferenceStore.getBoolean("webgpu_hold_until_final", false)
+
+    val cropInsteadOfZoom: Preference<Boolean> = preferenceStore.getBoolean("webgpu_crop_instead_of_zoom", false)
 
     val disableDoubleTapGestures: Preference<Boolean> =
         preferenceStore.getBoolean("webgpu_disable_double_tap_gestures", false)
@@ -284,6 +327,22 @@ class ReaderPreferences(
     /** In run order. */
     val tileFilters: Preference<List<WebGpuShader>> = preferenceStore.getObjectFromString(
         "webgpu_tile_filters",
+        emptyList(),
+        WebGpuShaders::serialize,
+        WebGpuShaders::deserialize,
+    )
+
+    /** At most one; none for the default. */
+    val upscaler: Preference<List<WebGpuShader>> = preferenceStore.getObjectFromString(
+        "webgpu_upscaler",
+        emptyList(),
+        WebGpuShaders::serialize,
+        WebGpuShaders::deserialize,
+    )
+
+    /** At most one; none for the default. */
+    val downscaler: Preference<List<WebGpuShader>> = preferenceStore.getObjectFromString(
+        "webgpu_downscaler",
         emptyList(),
         WebGpuShaders::serialize,
         WebGpuShaders::deserialize,
@@ -313,6 +372,55 @@ class ReaderPreferences(
         ),
         BOTH(MR.strings.tapping_inverted_both, shouldInvertHorizontal = true, shouldInvertVertical = true),
     }
+
+    /**
+     * The [readerTheme] preference, stored as its [value].
+     */
+    enum class ReaderTheme(val value: Int) {
+        WHITE(0),
+        BLACK(1),
+        GRAY(2),
+        AUTOMATIC(3),
+        ;
+
+        companion object {
+            fun fromValue(value: Int) = entries.find { it.value == value } ?: BLACK
+        }
+    }
+
+    /**
+     * The [imageScaleType] preference, stored as its [value], which is also the scale type the image view takes.
+     */
+    enum class ScaleType(val value: Int) {
+        FIT_SCREEN(1),
+        STRETCH(2),
+        FIT_WIDTH(3),
+        FIT_HEIGHT(4),
+        ORIGINAL_SIZE(5),
+        SMART_FIT(6),
+        ;
+
+        companion object {
+            fun fromValue(value: Int) = entries.find { it.value == value } ?: FIT_SCREEN
+        }
+    }
+
+    /**
+     * The [zoomStart] preference, stored as its [value].
+     */
+    enum class ZoomStartType(val value: Int) {
+        AUTOMATIC(1),
+        LEFT(2),
+        RIGHT(3),
+        CENTER(4),
+        ;
+
+        companion object {
+            fun fromValue(value: Int) = entries.find { it.value == value } ?: CENTER
+        }
+    }
+
+    // RK: no NavigationMode enum, see NavigationSettings
 
     enum class ReaderHideThreshold(val threshold: Int) {
         HIGHEST(5),
@@ -362,6 +470,9 @@ class ReaderPreferences(
         const val WEBTOON_PADDING_MIN = 0
         const val WEBTOON_PADDING_MAX = 25
 
+        // RK: the long strip's zoom-out floor, so Min width never sits below what a touch snaps back to
+        const val CONTINUOUS_MIN_WIDTH_MIN = 10
+
         const val MILLI_CONVERSION = 100
 
         val TapZones = listOf(
@@ -382,12 +493,8 @@ class ReaderPreferences(
             MR.strings.scale_type_smart_fit,
         )
 
-        val ImageScaleTypeWebGpuViewer = listOf(
-            MR.strings.scale_type_fit_screen,
-            MR.strings.scale_type_fit_width,
-            MR.strings.scale_type_fit_height,
-            MR.strings.scale_type_original_size,
-        )
+        // RK: ImageScaleTypeWebGpuViewer removed; fitHomeScale honours every scale type, so the sheet's
+        // ImageScaleTypeRow (MangaReaderSettingsPages.kt) offers ImageScaleType to every viewer.
 
         val ZoomStart = listOf(
             MR.strings.zoom_start_automatic,

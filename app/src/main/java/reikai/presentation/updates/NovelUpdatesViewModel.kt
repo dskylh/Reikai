@@ -31,8 +31,10 @@ import reikai.domain.category.recentsCategoryFilterFlow
 import reikai.domain.download.downloadStateOf
 import reikai.domain.entry.overlayCustomInfo
 import reikai.domain.entry.withCustomInfo
+import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.interactor.GetCustomNovelInfo
+import reikai.domain.novel.isOnDevice
 import reikai.domain.novel.model.NovelUpdateWithRelations
 import reikai.domain.recents.RECENTS_FEED_LIMIT
 import reikai.domain.recents.recentsFeedCutoff
@@ -67,6 +69,8 @@ class NovelUpdatesViewModel(
     private val updatesPreferences: UpdatesPreferences,
     // Per-entry custom title/cover overrides, overlaid on the displayed rows (display-only).
     private val getCustomNovelInfo: GetCustomNovelInfo,
+    // The merging switch, which decides whether a hidden member hides its whole merged series here too.
+    private val reikaiLibraryPreferences: ReikaiLibraryPreferences,
 ) : ViewModel() {
 
     private val subscriberGate = SubscriberGate()
@@ -86,7 +90,10 @@ class NovelUpdatesViewModel(
         updatesPreferences.filterStarted.changes(),
         updatesPreferences.filterBookmarked.changes(),
         sourcePreferences.recentsCategoryFilterFlow(surface),
-    ) { unread, started, bookmarked, categories -> SqlFilters(unread, started, bookmarked, categories) }
+        reikaiLibraryPreferences.seriesMergingEnabled.changes(),
+    ) { unread, started, bookmarked, categories, seriesMerging ->
+        SqlFilters(unread, started, bookmarked, categories, seriesMerging)
+    }
         .distinctUntilChanged()
         .flatMapLatest { f ->
             novelRepo.getFilteredNovelUpdatesAsFlow(
@@ -98,6 +105,7 @@ class NovelUpdatesViewModel(
                 bookmarked = f.bookmarked.toBooleanOrNull(),
                 includedCategories = f.categories.include,
                 excludedCategories = f.categories.exclude,
+                seriesMerging = f.seriesMerging,
             )
         }
 
@@ -122,7 +130,7 @@ class NovelUpdatesViewModel(
                 NovelUpdatesItem(
                     update = update,
                     downloadState = downloadStateOf(queueById[update.chapterId]) {
-                        novelDownloadCache.isChapterDownloaded(
+                        novelDownloadCache.isOnDevice(
                             update.source,
                             update.novelTitle,
                             update.chapterName,
@@ -151,6 +159,7 @@ class NovelUpdatesViewModel(
         val started: TriState,
         val bookmarked: TriState,
         val categories: RecentsCategoryFilter,
+        val seriesMerging: Boolean,
     )
 
     @Immutable

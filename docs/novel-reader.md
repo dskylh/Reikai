@@ -35,17 +35,17 @@ Tap the middle of the screen to show the menu, and the gear icon in it to change
 
 ## Choose how chapters are drawn
 
-**Rendering mode**, in <nav to="novel-reader"> under **Reading**, has two choices.
+**Chapter display**, in <nav to="novel-reader"> under **Reading**, has two choices.
 
 * **Native text** <Badge type="info" text="Default" /> lays the text out in the app.
 * **WebView** shows the chapter as a web page. It keeps more of the chapter's own formatting, and it is the only mode where the chapter's own styling, scripts and fonts, and your own CSS and JavaScript snippets, can apply.
 
 If a chapter looks wrong in one mode, try the other.
-Switching from the reader's settings sheet rebuilds the reader at the same place in the chapter.
+A novel can keep its own mode from the reader's settings sheet, under **For this series**, where **Default** follows the setting above. Switching there rebuilds the reader at the same place in the chapter.
 
 ## Read a page at a time
 
-**Reading mode**, beside **Rendering mode**, turns a chapter into pages, as an e-book reader does.
+**Reading mode**, beside **Chapter display**, turns a chapter into pages, as an e-book reader does. A novel can keep its own mode from the reader's settings sheet, under **For this series**, where **Default** follows the setting. Switching there rebuilds the reader at the same place in the chapter.
 
 <img
   src="/docs/novel-reader/paged.webp"
@@ -62,13 +62,17 @@ Switching from the reader's settings sheet rebuilds the reader at the same place
 
 A page never cuts a line in half, and both rendering modes break pages in the same places. The marker between two chapters is a page of its own. Your place is the first line on the page, so after rotating or changing the text size you land on the page that holds it.
 
+A picture is kept whole on one page: one that does not fit what is left of a page starts the next, and one taller than a page is shrunk to fit, unless that would make it narrower than half its size, in which case it keeps its width and continues across pages. Long-press a picture to open it full screen (in scrolling mode a tap does it), where you can zoom, turn it with **Rotate**, share it or save it. A saved picture goes into a folder named after the novel when **Save pages into separate folders** is on in the manga reader settings.
+
+**Dual page view**, on the same tab while reading a page at a time, shows two pages side by side like an open book: **Always**, or **When wide** while the screen is wider than it is tall, as in the manga reader. A turn moves both pages, the slider shows the right one, and the marker between two chapters takes the whole width on its own. **Space between pages** sets the gap between the two. Reading right to left, the first page of the two is on the right. Text cannot be selected while two pages show.
+
 Paged reading has its own tap zones, under **Paged** in <nav to="novel-reader">, and the volume keys turn pages too once **Volume keys** is on. It suits e-ink screens: turn off **Animate page transitions** for instant turns, and **Flash on page change**, which only appears while reading a page at a time, flashes the screen after each turn to clear ghosting. Auto-scroll turns a page every few seconds instead of scrolling.
 
 ## Read straight on to the next chapter
 
 With **Continuous chapters** on, which it is by default, the next chapter appears below the one you are reading, so you can keep scrolling.
 A marker names each boundary between chapters.
-**Add the next chapter at** sets how far into a chapter you have to be before the next one is added, 95% by default.
+**Load the next chapter after reading** sets how far into a chapter you have to be before the next one is added, 95% by default.
 
 Turn it off to read one chapter at a time.
 While scrolling, **Swipe between chapters** lets you swipe sideways to move to the previous or next chapter. Reading a page at a time, a swipe always turns the page, and turning past a chapter's last page moves on to the next one.
@@ -90,6 +94,9 @@ While it runs, the notification shows how long is left.
 
 The voice, speed, pitch and highlighting are set in <nav to="novel-reader"> under **Read aloud**.
 To keep going into the next chapter when one ends, turn on **Continue to the next chapter**.
+
+Your place moves with the voice, so reopening a chapter takes you to the paragraph being read, and a chapter read aloud to its end is marked read.
+Brackets, quote marks, tildes, emoji and decorative symbols such as ♪ and ☆ are not read out; the words around them are. A line with no words in it, such as a scene break, is skipped.
 
 ## Fonts
 
@@ -120,7 +127,7 @@ The **Chapter text** section of <nav to="novel-reader"> can clean that up before
 * **Split walls of text** adds paragraph breaks to a chapter that arrives as one block.
 * **Force lowercase** shows the whole chapter in lowercase.
 
-**Remove extra spacing**, under **Accessibility**, strips blank space some sources leave between paragraphs.
+**Remove blank lines between paragraphs**, under **Chapter text**, strips blank space some sources leave between paragraphs.
 
 ## Find and replace
 
@@ -137,12 +144,12 @@ It works in both rendering modes.
 
 Tap the circle beside a rule to switch it off without deleting it, or the bin icon to delete it.
 
-## Search downloaded chapters
+## Search chapter text
 
 You can search the text of a novel's downloaded chapters, for example to find where a character first appeared.
 
 1. Open the novel's page.
-1. Open <nav to="overflow"> and tap **Search downloaded chapters**. It only appears while the novel has downloaded chapters and its source is installed.
+1. Open <nav to="overflow"> and tap **Search chapter text**. It appears for a local novel, and for any other novel while it has downloaded chapters and its source is installed.
 1. Type what to find and search.
 
 Each result shows the chapter, how many matches it has and a snippet around them.

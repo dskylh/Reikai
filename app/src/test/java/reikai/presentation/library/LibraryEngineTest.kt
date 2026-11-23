@@ -1,6 +1,8 @@
 package reikai.presentation.library
 
 import android.content.Context
+import eu.kanade.domain.ui.UiPreferences
+import eu.kanade.presentation.manga.DownloadAction
 import eu.kanade.tachiyomi.ui.library.LibraryItem
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldContainExactly
@@ -33,9 +35,15 @@ import reikai.domain.category.CATEGORY_HIDDEN_MASK
 import reikai.domain.category.CategoryContentType
 import reikai.domain.entry.EntryId
 import reikai.domain.library.ContentType
+import reikai.domain.library.FakeLibraryHiddenRepository
+import reikai.domain.library.FakeLibraryManualOrderRepository
+import reikai.domain.library.HideSeries
+import reikai.domain.library.ManualOrderPosition
 import reikai.domain.library.ReikaiLibraryPreferences
+import reikai.domain.merge.EntryMergeManager
 import reikai.presentation.MainDispatcherExtension
 import reikai.presentation.recents.EmittingPreferenceStore
+import reikai.util.testAppScope
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.domain.category.model.Category
@@ -73,17 +81,46 @@ class LibraryEngineTest {
      * assembly combines several of them, so on the cheaper store it would never emit at all and every
      * assertion about what it assembled would pass without one having run.
      */
+    @Test
+    fun `a search for a hidden type lands on the shown type`() {
+        val manga = provider(ContentType.MANGA)
+        val engine = engineOver(listOf(manga, provider(ContentType.NOVELS)), shown = ContentType.MANGA)
+
+        engine.searchFrom(ContentType.NOVELS, "q")
+
+        verify { manga.search("q") }
+    }
+
+    @Test
+    fun `a search lands on its own type while both show`() {
+        val novels = provider(ContentType.NOVELS)
+        val engine = engineOver(listOf(provider(ContentType.MANGA), novels))
+
+        engine.searchFrom(ContentType.NOVELS, "q")
+
+        verify { novels.search("q") }
+    }
+
     private fun engineOver(
         providers: List<LibraryProvider>,
         categories: List<Category> = emptyList(),
         sort: LibrarySort = LibrarySort.default,
         groupBy: Int = LibraryGroup.BY_DEFAULT,
+        shown: ContentType = ContentType.ALL,
+        manualOrder: FakeLibraryManualOrderRepository = FakeLibraryManualOrderRepository(),
+        hides: FakeLibraryHiddenRepository = FakeLibraryHiddenRepository(),
+        mergingEnabled: Boolean = true,
+        store: EmittingPreferenceStore = EmittingPreferenceStore(),
     ): LibraryEngine {
-        val store = EmittingPreferenceStore()
+        val uiPreferences = UiPreferences(store)
         val repository = mockk<CategoryRepository>(relaxed = true)
         every { repository.getUnfilteredAsFlow() } returns flowOf(categories)
         val libraryPreferences = LibraryPreferences(store).also { it.sortingMode.set(sort) }
-        val reikaiLibraryPreferences = ReikaiLibraryPreferences(store).also { it.groupLibraryBy.set(groupBy) }
+        val reikaiLibraryPreferences = ReikaiLibraryPreferences(store).also {
+            it.groupLibraryBy.set(groupBy)
+            it.shownContent.set(shown)
+            it.seriesMergingEnabled.set(mergingEnabled)
+        }
         return main.track(
             LibraryEngine(
                 providers = providers,
@@ -91,11 +128,104 @@ class LibraryEngineTest {
                 libraryPreferences = libraryPreferences,
                 categoryRepository = repository,
                 setSortModeForCategory = mockk(relaxed = true),
+                uiPreferences = uiPreferences,
                 // Only the dynamic-grouping assembly reaches these, which no case here exercises.
                 context = mockk(relaxed = true),
                 trackerManager = mockk(relaxed = true),
+                manualOrderRepository = manualOrder,
+                appScope = testAppScope(),
+                combineLocalVolumes = mockk(relaxed = true),
+                hideSeries = HideSeries(hides, soloGroups(), soloGroups()),
             ),
         )
+    }
+
+    /** A merge manager whose every entry is its own group, so a hide writes the entry alone. */
+    private inline fun <reified M : EntryMergeManager> soloGroups(): M = mockk {
+        coEvery { groupLibraryMembers(any()) } answers { listOf(firstArg()) }
+    }
+
+    /** Manga 1 hidden; manga 2 not; novel 1, sharing manga 1's row id, not; novel 5 hidden through member 9. */
+    private fun engineWithHides(): LibraryEngine {
+        val reading = Category(id = 11, name = "Reading", order = 0, flags = 0)
+        val manga = provider(ContentType.MANGA, rows = listOf(row(1, listOf(11)), row(2, listOf(11))))
+        val novels = provider(
+            ContentType.NOVELS,
+            rows = listOf(
+                row(1, listOf(11)).copy(entryId = n1),
+                row(5, listOf(11)).copy(entryId = EntryId.Novel(5), relatedMangaIds = listOf(5L, 9L)),
+            ),
+        )
+        val hides = FakeLibraryHiddenRepository(setOf(m1, EntryId.Novel(9)))
+        return engineOver(listOf(manga, novels), categories = listOf(reading), hides = hides)
+            .also { it.setContentType(ContentType.ALL) }
+    }
+
+    @Test
+    fun `a hidden series leaves the assembly, either type, a merged one through any member`() = runTest {
+        engineWithHides().assembled.first { it?.chip == ContentType.ALL }!!.presentIds shouldContainExactlyInAnyOrder
+            listOf(m2, n1)
+    }
+
+    @Test
+    fun `a view whose every series is hidden reads as all hidden, either type`() = runTest {
+        val manga = provider(ContentType.MANGA, rows = listOf(row(1, listOf(11))))
+        val novels = provider(ContentType.NOVELS, rows = listOf(row(1, listOf(11)).copy(entryId = n1)))
+        val engine = engineOver(
+            listOf(manga, novels),
+            categories = listOf(Category(id = 11, name = "Reading", order = 0, flags = 0)),
+            hides = FakeLibraryHiddenRepository(setOf(m1, n1)),
+        ).also { it.setContentType(ContentType.ALL) }
+
+        engine.assembled.first { it?.chip == ContentType.ALL }!!.isAllHidden shouldBe true
+    }
+
+    @Test
+    fun `a view whose shown series sit in hidden categories is not all hidden`() = runTest {
+        val hiddenCategory = Category(id = 12, name = "Later", order = 1, flags = CATEGORY_HIDDEN_MASK)
+        val manga = provider(ContentType.MANGA, rows = listOf(row(1, listOf(11)), row(2, listOf(12))))
+        val novels = provider(ContentType.NOVELS, rows = listOf(row(1, listOf(12)).copy(entryId = n1)))
+        val engine = engineOver(
+            listOf(manga, novels),
+            categories = listOf(Category(id = 11, name = "Reading", order = 0, flags = 0), hiddenCategory),
+            hides = FakeLibraryHiddenRepository(setOf(m1)),
+        ).also { it.setContentType(ContentType.ALL) }
+
+        engine.assembled.first { it?.chip == ContentType.ALL }!!.isAllHidden shouldBe false
+    }
+
+    @Test
+    fun `a hidden series' tags are not offered, either type`() {
+        val mangaRows = listOf(
+            SeriesTagRow(row(5, emptyList()).copy(relatedMangaIds = listOf(5L, 6L)), listOf("Action")),
+            SeriesTagRow(row(7, emptyList()), listOf("Drama")),
+        )
+        val novelRows = listOf(
+            SeriesTagRow(
+                row(5, emptyList()).copy(relatedMangaIds = listOf(5L, 9L), entryId = EntryId.Novel(5)),
+                listOf("Romance"),
+            ),
+            SeriesTagRow(row(6, emptyList()).copy(entryId = EntryId.Novel(6)), listOf("Mystery")),
+        )
+        val manga = provider(ContentType.MANGA).also { every { it.seriesTagRows() } returns mangaRows }
+        val novels = provider(ContentType.NOVELS).also { every { it.seriesTagRows() } returns novelRows }
+        val hides = FakeLibraryHiddenRepository(setOf(EntryId.Manga(6), EntryId.Novel(9)))
+        val engine = engineOver(listOf(manga, novels), hides = hides)
+
+        engine.settingsFor(ContentType.ALL).tagFilter.seriesTags() shouldBe listOf(listOf("Drama"), listOf("Mystery"))
+    }
+
+    @Test
+    fun `hiding the selection hides each selected series, either type`() = runTest {
+        val hides = FakeLibraryHiddenRepository()
+        val engine = engineOver(listOf(provider(ContentType.MANGA), provider(ContentType.NOVELS)), hides = hides)
+        engine.toggleSelection(bucket, m2)
+        engine.toggleSelection(bucket, n1)
+
+        engine.hideSelection()
+
+        // The write runs on the app scope, one series at a time, so wait for the last of the two.
+        hides.rows.first { it.size == 2 } shouldContainExactlyInAnyOrder listOf(m2, n1)
     }
 
     private val screenState = LibraryScreenState(
@@ -133,6 +263,54 @@ class LibraryEngineTest {
         badges = LibraryItem.Badges(downloadCount = 0, unreadCount = 0, isLocal = false, sourceLanguage = ""),
         entryId = EntryId.Manga(id),
     )
+
+    private val defaultCategory = Category(id = 0, name = "", order = -1, flags = 0)
+
+    /** A merged tile's lead can change after a restitch, so every member keeps the tile's place. */
+    @Test
+    fun `a drop stores each merged member at its tile's place`() = runTest {
+        val manualOrder = FakeLibraryManualOrderRepository()
+        val engine = engineOver(listOf(provider(ContentType.MANGA)), manualOrder = manualOrder)
+        val merged = row(5, emptyList()).copy(relatedMangaIds = listOf(5L, 6L))
+
+        engine.moveInCategory(defaultCategory, listOf(row(1, emptyList()), merged))
+
+        manualOrder.positions.first { it.isNotEmpty() }.map { it.entryId to it.position }.toSet() shouldBe
+            setOf(1L to 0L, 5L to 1L, 6L to 1L)
+    }
+
+    @Test
+    fun `undo puts back the order a drop replaced`() = runTest {
+        val manualOrder = FakeLibraryManualOrderRepository()
+        val before =
+            listOf(ManualOrderPosition(ContentType.MANGA, 2, 0, 0), ManualOrderPosition(ContentType.MANGA, 1, 0, 1))
+        manualOrder.positions.value = before
+        val engine = engineOver(listOf(provider(ContentType.MANGA)), manualOrder = manualOrder)
+        engine.moveInCategory(defaultCategory, listOf(row(1, emptyList()), row(2, emptyList())))
+        manualOrder.positions.first { it != before }
+
+        engine.undoManualMove()
+
+        manualOrder.positions.first { it.toSet() == before.toSet() }.toSet() shouldBe before.toSet()
+    }
+
+    /** A tap can land before the drop's write has, so Undo waits on the drop it undoes. */
+    @Test
+    fun `an undo tapped straight after a drop still puts the order back`() = runTest {
+        val manualOrder = FakeLibraryManualOrderRepository()
+        val before =
+            listOf(ManualOrderPosition(ContentType.MANGA, 2, 0, 0), ManualOrderPosition(ContentType.MANGA, 1, 0, 1))
+        manualOrder.positions.value = before
+        val engine = engineOver(listOf(provider(ContentType.MANGA)), manualOrder = manualOrder)
+
+        engine.moveInCategory(defaultCategory, listOf(row(1, emptyList()), row(2, emptyList())))
+        engine.undoManualMove()
+
+        // Waits on the two writes: the restored order equals the first one, which a collector would not see again.
+        manualOrder.replacements.first { it == 2 }
+
+        manualOrder.positions.value.toSet() shouldBe before.toSet()
+    }
 
     /**
      * The prune runs on what the assembly kept, not on the rows it was built from. A hidden category
@@ -304,6 +482,24 @@ class LibraryEngineTest {
         assembled.itemsFor(bucket) shouldBeSameInstanceAs assembled.itemsFor(bucket)
     }
 
+    /** The tab reads every bucket's size on Main, so an overlay run at the read ran over the library there. */
+    @Test
+    fun `the overlay runs with the assembly, off the thread that reads the list`() = runTest {
+        val overlaidOn = mutableListOf<String>()
+        val provider = provider(ContentType.MANGA, rows = listOf(row(1, listOf(11)), row(2, listOf(11))))
+        every { provider.overlaid(any()) } answers {
+            // Coroutine debug mode appends " @coroutine#N" to the thread name.
+            synchronized(overlaidOn) { overlaidOn += Thread.currentThread().name.substringBefore(" @") }
+            firstArg()
+        }
+        val assembled = engineOver(listOf(provider), categories = listOf(reading)).assembled.filterNotNull().first()
+        val reader = Thread.currentThread().name.substringBefore(" @")
+
+        assembled.itemsFor(assembled.buckets.single())
+
+        (overlaidOn.isNotEmpty() to overlaidOn.none { it == reader }) shouldBe (true to true)
+    }
+
     /** The memo must never outlive its assembly: a custom title edit has to repaint the row. */
     @Test
     fun `a custom-info edit alone re-emits the assembly with the overlaid title`() = runTest {
@@ -451,33 +647,16 @@ class LibraryEngineTest {
         shouldThrow<IllegalStateException> { engine.behaviorFor(ContentType.ALL) }
     }
 
-    @Test
-    fun `flipping the chip drops the selection`() {
-        engine.setContentType(ContentType.MANGA)
-        engine.toggleSelection(bucket, m1)
-
-        engine.setContentType(ContentType.NOVELS)
-
-        engine.selection.value.isEmpty() shouldBe true
-    }
-
     /** The tab row fires again on the chip already shown, which is not a flip. */
     @Test
-    fun `re-selecting the chip shown keeps the selection`() {
+    fun `flipping the chip drops the selection, re-selecting the chip shown keeps it`() {
         engine.setContentType(ContentType.MANGA)
         engine.toggleSelection(bucket, m1)
 
         engine.setContentType(ContentType.MANGA)
-
-        engine.selection.value shouldContainExactly setOf(m1)
-    }
-
-    @Test
-    fun `toggling adds then removes an entry`() {
-        engine.toggleSelection(bucket, m1)
         engine.selection.value shouldContainExactly setOf(m1)
 
-        engine.toggleSelection(bucket, m1)
+        engine.setContentType(ContentType.NOVELS)
         engine.selection.value.isEmpty() shouldBe true
     }
 
@@ -488,21 +667,17 @@ class LibraryEngineTest {
         engine.selection.value shouldContainExactlyInAnyOrder listOf(m1, n1)
     }
 
+    // The engine's one long-press wiring: a range across both types, then a drop on a selected entry,
+    // which only rangeOrToggle answers both ways.
     @Test
-    fun `a range select spans both content types`() {
+    fun `a long press ranges across both content types and drops an entry already selected`() {
         val ordered = listOf(m1, n1, m2)
         engine.toggleSelection(bucket, m1)
         engine.toggleRangeSelection(bucket, m2, ordered)
         engine.selection.value shouldContainExactlyInAnyOrder ordered
-    }
 
-    @Test
-    fun `a long press on an already-selected entry drops it, as it does everywhere else`() {
-        val ordered = listOf(m1, m2)
-        engine.toggleSelection(bucket, m1)
         engine.toggleRangeSelection(bucket, m2, ordered)
-        engine.toggleRangeSelection(bucket, m2, ordered)
-        engine.selection.value shouldContainExactlyInAnyOrder listOf(m1)
+        engine.selection.value shouldContainExactlyInAnyOrder listOf(m1, n1)
     }
 
     @Test
@@ -538,6 +713,113 @@ class LibraryEngineTest {
         io.mockk.verify { novel.markReadSelection(setOf(m1), true) }
         engine.selection.value.isEmpty() shouldBe true
     }
+
+    /** A local entry has nothing to download, whichever type it is, so its selection offers no Download. */
+    @ParameterizedTest
+    @EnumSource(value = ContentType::class, names = ["MANGA", "NOVELS"])
+    fun `a selection of one local entry hides bulk Download`(type: ContentType) {
+        val local = if (type == ContentType.MANGA) m1 else n1
+        every { providerOf(type).containsLocal(setOf(local)) } returns true
+        engine.toggleSelection(bucket, local)
+
+        engine.canDownloadSelection(ContentType.ALL) shouldBe false
+    }
+
+    @Test
+    fun `a local manga selected beside a novel keeps bulk Download`() {
+        every { manga.containsLocal(setOf(m1, n1)) } returns true
+        engine.toggleSelection(bucket, m1)
+        engine.toggleSelection(bucket, n1)
+
+        engine.canDownloadSelection(ContentType.ALL) shouldBe true
+    }
+
+    @Test
+    fun `bulk Download skips the provider whose part is local`() {
+        every { manga.containsLocal(setOf(m1, n1)) } returns true
+        engine.toggleSelection(bucket, m1)
+        engine.toggleSelection(bucket, n1)
+
+        engine.performDownloadAction(ContentType.ALL, DownloadAction.NEXT_1_CHAPTER)
+
+        verify(exactly = 0) { manga.performDownloadAction(any(), any()) }
+    }
+
+    @Test
+    fun `two entries of one type can merge`() {
+        engine.toggleSelection(bucket, m1)
+        engine.toggleSelection(bucket, m2)
+
+        engine.canMergeSelection() shouldBe true
+    }
+
+    @Test
+    fun `one entry alone cannot merge`() {
+        engine.toggleSelection(bucket, m1)
+
+        engine.canMergeSelection() shouldBe false
+    }
+
+    /** A merge group is per content type, so a mixed gesture would write two groups. */
+    @Test
+    fun `a manga and a novel cannot merge`() {
+        engine.toggleSelection(bucket, m1)
+        engine.toggleSelection(bucket, n1)
+
+        engine.canMergeSelection() shouldBe false
+    }
+
+    @Test
+    fun `nothing merges with series merging off`() {
+        val engine = engineOver(listOf(manga, novel), mergingEnabled = false)
+        engine.toggleSelection(bucket, m1)
+        engine.toggleSelection(bucket, m2)
+
+        engine.canMergeSelection() shouldBe false
+    }
+
+    @Test
+    fun `a merge the gate refuses reaches no provider`() {
+        engine.toggleSelection(bucket, m1)
+
+        engine.mergeSelection(ContentType.ALL)
+
+        verify(exactly = 0) { manga.mergeSelection(any()) }
+    }
+
+    @Test
+    fun `the hopper's gravity is written library-wide`() {
+        val store = EmittingPreferenceStore()
+
+        engineOver(listOf(manga, novel), store = store).setHopperGravity(2)
+
+        ReikaiLibraryPreferences(store).hopperGravity.get() shouldBe 2
+    }
+
+    @Test
+    fun `selected novels can be exported`() {
+        engine.toggleSelection(bucket, n1)
+
+        engine.canExportSelection(ContentType.ALL) shouldBe true
+    }
+
+    @Test
+    fun `a selection holding a manga cannot be exported`() {
+        engine.toggleSelection(bucket, m1)
+        engine.toggleSelection(bucket, n1)
+
+        engine.canExportSelection(ContentType.ALL) shouldBe false
+    }
+
+    @Test
+    fun `local novels alone cannot be exported`() {
+        every { novel.containsLocal(setOf(n1)) } returns true
+        engine.toggleSelection(bucket, n1)
+
+        engine.canExportSelection(ContentType.ALL) shouldBe false
+    }
+
+    private fun providerOf(type: ContentType) = if (type == ContentType.MANGA) manga else novel
 
     /** The search field stays on screen across a chip flip, so the view flipped to must filter by it. */
     private fun typeThenSwitch(from: ContentType, typedOn: LibraryProvider, to: ContentType) {

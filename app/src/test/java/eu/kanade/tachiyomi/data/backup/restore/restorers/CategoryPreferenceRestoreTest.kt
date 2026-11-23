@@ -2,6 +2,8 @@ package eu.kanade.tachiyomi.data.backup.restore.restorers
 
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.service.TrackPreferences
+import eu.kanade.tachiyomi.core.security.PrivacyPreferences
+import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.data.backup.create.BackupCreateWorker
 import eu.kanade.tachiyomi.data.backup.models.BackupCategory
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelCategory
@@ -77,6 +79,7 @@ class CategoryPreferenceRestoreTest {
     )
 
     private val restorer = PreferenceRestorer(
+        lnPluginHost = { mockk(relaxed = true) },
         context = mockk(),
         getCategories = mockk<GetCategories> { coEvery { await() } returns deviceCategories },
         preferenceStore = store,
@@ -87,6 +90,9 @@ class CategoryPreferenceRestoreTest {
             SourcePreferences(store),
             NetworkPreferences(store, isDebugBuild = false),
             TrackPreferences(store),
+            mockk(relaxed = true),
+            SecurityPreferences(store),
+            PrivacyPreferences(store),
             mockk(relaxed = true),
         ),
     )

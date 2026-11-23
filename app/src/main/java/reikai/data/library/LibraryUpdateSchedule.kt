@@ -15,10 +15,15 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkQuery
+import eu.kanade.tachiyomi.data.library.LibraryUpdateWorker
 import eu.kanade.tachiyomi.util.system.isConnectedToWifi
 import eu.kanade.tachiyomi.util.system.isRunning
 import eu.kanade.tachiyomi.util.system.workManager
+import exh.eh.EHentaiUpdateWorker
 import kotlinx.coroutines.flow.first
+import reikai.data.novel.update.NovelUpdateWorker
+import reikai.domain.library.ContentType
+import reikai.domain.library.includes
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_CHARGING
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_NETWORK_NOT_METERED
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_ONLY_ON_WIFI
@@ -36,8 +41,50 @@ import java.util.concurrent.TimeUnit
 fun shouldDeferAutoUpdate(sdkInt: Int, restrictions: Set<String>, isOnWifi: () -> Boolean, isManualRunning: Boolean) =
     isManualRunning || (sdkInt < Build.VERSION_CODES.P && DEVICE_ONLY_ON_WIFI in restrictions && !isOnWifi())
 
+/** The jobs that update a library, each with the content type the Show setting judges it by. */
+enum class LibraryUpdateJob(val contentType: ContentType) {
+    MANGA(ContentType.MANGA),
+    NOVEL(ContentType.NOVELS),
+    GALLERY(ContentType.MANGA),
+}
+
+/** The job this update worker runs, so a worker cannot be judged by another's type. */
+val ListenableWorker.libraryUpdateJob: LibraryUpdateJob
+    get() = when (this) {
+        is LibraryUpdateWorker -> LibraryUpdateJob.MANGA
+        is NovelUpdateWorker -> LibraryUpdateJob.NOVEL
+        is EHentaiUpdateWorker -> LibraryUpdateJob.GALLERY
+        else -> error("${this::class} is not a library update")
+    }
+
+/**
+ * How a run ends before it starts, or null when it goes ahead. A hidden type's run finishes as a success,
+ * so its schedule stays in place for when the type shows again; only then is [shouldDefer] asked.
+ */
+suspend fun libraryUpdateGate(
+    job: LibraryUpdateJob,
+    shown: ContentType,
+    shouldDefer: suspend () -> Boolean,
+): ListenableWorker.Result? = when {
+    !shown.includes(job.contentType) -> ListenableWorker.Result.success()
+    shouldDefer() -> ListenableWorker.Result.retry()
+    else -> null
+}
+
+/** [libraryUpdateGate] for this run, whose deferral is [shouldDeferAutoUpdate]. */
+suspend fun ListenableWorker.libraryUpdateGate(
+    shown: ContentType,
+    restrictions: Set<String>,
+    autoTag: String,
+    manualTag: String,
+) = libraryUpdateGate(libraryUpdateJob, shown) { shouldDeferLibraryUpdate(restrictions, autoTag, manualTag) }
+
 /** [shouldDeferAutoUpdate] for this run; a manual run never defers. */
-suspend fun ListenableWorker.shouldDeferLibraryUpdate(restrictions: Set<String>, autoTag: String, manualTag: String) =
+private suspend fun ListenableWorker.shouldDeferLibraryUpdate(
+    restrictions: Set<String>,
+    autoTag: String,
+    manualTag: String,
+) =
     autoTag in tags &&
         shouldDeferAutoUpdate(
             Build.VERSION.SDK_INT,

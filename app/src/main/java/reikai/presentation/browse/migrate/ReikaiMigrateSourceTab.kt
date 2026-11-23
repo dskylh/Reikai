@@ -21,9 +21,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.core.screen.Screen
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import dev.zacsweers.metrox.viewmodel.metroViewModel
 import eu.kanade.domain.source.interactor.SetMigrateSorting
@@ -34,20 +31,21 @@ import eu.kanade.tachiyomi.ui.browse.migration.sources.MigrateSourceViewModel
 import eu.kanade.tachiyomi.util.system.copyToClipboard
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.automirroredrounded.Help
 import mihon.icons.materialsymbols.rounded.ArrowDownward
 import mihon.icons.materialsymbols.rounded.ArrowUpward
 import mihon.icons.materialsymbols.rounded.Numbers
 import mihon.icons.materialsymbols.rounded.SortByAlpha
-import reikai.domain.library.ContentType
 import reikai.domain.source.SourceKey
 import reikai.presentation.browse.ReikaiBrowseViewModel
 import reikai.presentation.browse.components.NovelSourceIcon
 import reikai.presentation.components.ContentTypeBadge
 import reikai.presentation.components.ContentTypeFilterChips
+import reikai.presentation.components.listsBothTypes
 import reikai.presentation.components.rememberChipListState
-import reikai.presentation.migrate.flow.EntryMigrationFavoritesScreen
+import reikai.presentation.migrate.flow.EntryMigrationFavoritesRoute
 import tachiyomi.core.common.Constants
 import tachiyomi.domain.source.model.Source
 import tachiyomi.i18n.MR
@@ -70,9 +68,9 @@ import tachiyomi.presentation.core.util.plus
  * replaced builder and screen are deleted (see the off-path manifest).
  */
 @Composable
-fun Screen.reikaiMigrateSourceTab(browseViewModel: ReikaiBrowseViewModel): TabContent {
+fun reikaiMigrateSourceTab(browseViewModel: ReikaiBrowseViewModel): TabContent {
     val uriHandler = LocalUriHandler.current
-    val navigator = LocalNavigator.currentOrThrow
+    val navigator = LocalNavigator.current
     val mangaModel = metroViewModel<MigrateSourceViewModel>()
     val novelModel = metroViewModel<MigrateNovelSourcesViewModel>()
     val providers = remember(mangaModel, novelModel) {
@@ -106,11 +104,11 @@ fun Screen.reikaiMigrateSourceTab(browseViewModel: ReikaiBrowseViewModel): TabCo
                     )
                     else -> MigrateSourcesList(
                         state = state,
-                        showContentType = state.contentType == ContentType.ALL,
+                        showContentType = state.contentType.listsBothTypes,
                         contentPadding = contentPadding,
                         onClickItem = { row ->
                             navigator.push(
-                                EntryMigrationFavoritesScreen(row.key.contentType, row.key.rawId),
+                                EntryMigrationFavoritesRoute(row.key.contentType, row.key.rawId),
                             )
                         },
                         onToggleSortingMode = engine::toggleSortingMode,

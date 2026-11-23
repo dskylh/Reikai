@@ -6,6 +6,7 @@ import eu.kanade.domain.manga.model.readerOrientation
 import eu.kanade.presentation.manga.components.ChapterDownloadAction
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.model.Download
+import eu.kanade.tachiyomi.network.interceptor.cloudflareBlockedUrl
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.reader.ReaderViewModel
@@ -21,7 +22,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
@@ -34,8 +34,12 @@ import reikai.domain.download.downloadStateOf
 import reikai.domain.download.offersDownload
 import reikai.domain.download.queuedDownloadChanges
 import reikai.domain.entry.EntryId
+import reikai.domain.library.ContentType
 import reikai.domain.merge.DownloadTargets
 import reikai.domain.merge.GroupChapterFlags
+import reikai.domain.reader.ChapterLength
+import reikai.domain.reader.ChapterProgress
+import reikai.domain.reader.ReaderProgressLook
 import reikai.domain.reader.pageIndex
 import reikai.presentation.components.UndatedChapterDate
 import reikai.presentation.components.chapterSubtitle
@@ -75,12 +79,18 @@ class MangaReaderProvider(
     override val bottomButtons: Flow<List<ReaderBottomButton>> =
         ReaderBottomButton.orderedChanges(ReaderBottomButton.BarPreferences.manga(readerPreferences))
 
+    override val bottomButtonsFilled: Flow<Boolean> = readerPreferences.readerBottomButtonsFilled.changes()
+
     override val bottomButtonScope = ReaderBottomButton.Scope.Manga
 
     override fun seedColor(context: Context): Flow<Int?> = viewModel.state
-        .mapNotNull { it.manga }
-        .distinctUntilChangedBy { it.id }
-        .map { manga -> EntryId.Manga(manga.id).seedColor { context.extractCoverColor(manga.asMangaCover()) } }
+        .mapNotNull { it.manga?.asMangaCover() }
+        .distinctUntilChanged()
+        .map { cover ->
+            EntryId.Manga(cover.mangaId).seedColor(cover.url, cover.lastModified, cover.isMangaFavorite) {
+                context.extractCoverColor(cover)
+            }
+        }
 
     override val displayFilters = ReaderDisplayFilters(
         customBrightness = readerPreferences.customBrightness,
@@ -90,6 +100,7 @@ class MangaReaderProvider(
         colorFilterMode = readerPreferences.colorFilterMode,
         grayscale = readerPreferences.grayscale,
         invertedColors = readerPreferences.invertedColors,
+        contrastPercent = readerPreferences.contrast,
     )
 
     override val flash = ReaderFlash.manga(readerPreferences)
@@ -115,7 +126,8 @@ class MangaReaderProvider(
     }
 
     override fun pageBackground(context: Context): Flow<Int> =
-        readerPreferences.readerTheme.changes().map(context::readerBackgroundColor)
+        readerPreferences.readerTheme.changes()
+            .map { context.readerBackgroundColor(ReaderPreferences.ReaderTheme.fromValue(it)) }
 
     override val navigator: Flow<ReaderNavigatorState> = combine(
         viewModel.state,
@@ -141,6 +153,30 @@ class MangaReaderProvider(
 
     override val showProgress: Flow<Boolean> = readerPreferences.showPageNumber.changes()
 
+    override val showTimeLeft: Flow<Boolean> = readerPreferences.showTimeLeft.changes()
+
+    override val progressLook: Flow<ReaderProgressLook> =
+        combine(
+            readerPreferences.progressSize.changes(),
+            readerPreferences.progressBacked.changes(),
+            ::ReaderProgressLook,
+        )
+
+    // The chapter the position is on, as the readout counts it, rather than the active one.
+    override val chapterLength: Flow<ChapterLength?> = viewModel.state.map { state ->
+        val position = state.position ?: return@map null
+        val pages = (position.progress as? ChapterProgress.Pages)?.pageCount?.takeIf { it > 0 } ?: return@map null
+        val mangaId = state.manga?.id ?: return@map null
+        val owner = state.currentChapter?.chapter?.takeIf { it.id == position.chapterId }?.mangaId ?: mangaId
+        ChapterLength(
+            ContentType.MANGA,
+            viewModel.seriesIds ?: setOf(mangaId),
+            position.chapterId,
+            pages.toLong(),
+            recorded = viewModel.isRecorded(owner),
+        )
+    }.distinctUntilChanged()
+
     // A step, a pick or a reload that failed is reported, and stays so until the next one starts. A
     // first open that failed is upstream's initError, reported the same way with nothing to keep
     // reading, as a novel's is, so it gets the chapter's page and Retry rather than closing on a toast.
@@ -150,11 +186,12 @@ class MangaReaderProvider(
         val initError = state.initError
         when {
             initError != null -> ReaderLoadState.Failed(
-                initError.message,
+                viewModel.describeFailure(initError),
                 canKeepReading = false,
                 // No chapter without the series, which is also what resolves the chapter's page.
                 chapterId = viewModel.openingChapterId.takeIf { state.manga != null },
                 attempt = attemptOf(initError),
+                blockedUrl = initError.cloudflareBlockedUrl(),
             )
             state.isLoadingAdjacentChapter -> ReaderLoadState.Loading
             failure != null -> ReaderLoadState.Failed(
@@ -162,6 +199,7 @@ class MangaReaderProvider(
                 canKeepReading = state.currentChapter != null,
                 chapterId = failure.chapterId,
                 attempt = failure.attempt,
+                blockedUrl = failure.blockedUrl,
             )
             else -> ReaderLoadState.Idle
         }
@@ -205,6 +243,8 @@ class MangaReaderProvider(
 
     override fun restartReadTimer() = viewModel.restartReadTimer()
 
+    override fun setMenuOpen(open: Boolean) = viewModel.holdReadTimer(open)
+
     override fun onActivityFinish() = viewModel.onActivityFinish()
 
     override suspend fun previousChapter() = viewModel.loadPreviousChapter()
@@ -229,10 +269,10 @@ class MangaReaderProvider(
                 val flags = viewModel.sheetFlags(chapters.map { it.chapter })
                 val numberOnly = viewModel.chapterSettings?.displayMode == Manga.CHAPTER_DISPLAY_NUMBER
                 val targets = viewModel.downloadTargets
-                val fetchable = viewModel.fetchableChapterIds
                 val build = {
                     chapters.map {
-                        it.toReaderChapterRow(queued, flags, numberOnly, titleWords, targets) { id -> id in fetchable }
+                        it.toReaderChapterRow(queued, flags, numberOnly, titleWords, targets)
+                            .copy(volume = viewModel.chapterVolume(it.chapter))
                     }
                 }
                 if (queued.isEmpty()) {
@@ -246,6 +286,9 @@ class MangaReaderProvider(
         override val currentChapterId: Flow<Long> =
             viewModel.state.map { it.currentChapter?.chapter?.id ?: -1L }
 
+        override val heldChapterIds: Flow<Set<Long>> =
+            viewModel.state.map(viewModel::heldChapterIds).distinctUntilChanged()
+
         override val undatedChapterDate = UndatedChapterDate.NotApplicable
 
         override fun open(chapterId: Long) {
@@ -253,19 +296,21 @@ class MangaReaderProvider(
                 ?.let { viewModel.loadNewChapterFromDialog(it.chapter) }
         }
 
-        override fun setRead(chapterId: Long, read: Boolean) {
-            chapterOf(chapterId)?.let { viewModel.setChapterReadStatus(it, read) }
+        override fun setRead(chapterIds: List<Long>, read: Boolean) {
+            chaptersOf(chapterIds).takeIf { it.isNotEmpty() }?.let { viewModel.setChapterReadStatus(it, read) }
         }
 
-        override fun setBookmark(chapterId: Long, bookmarked: Boolean) =
-            viewModel.toggleBookmark(chapterId, bookmarked)
+        override fun setBookmark(chapterIds: List<Long>, bookmarked: Boolean) =
+            viewModel.toggleBookmark(chapterIds, bookmarked)
 
-        override fun download(chapterId: Long, action: ChapterDownloadAction) {
-            chapterOf(chapterId)?.let { viewModel.handleChapterDownload(it, action) }
+        override fun download(chapterIds: List<Long>, action: ChapterDownloadAction) {
+            chaptersOf(chapterIds).takeIf { it.isNotEmpty() }?.let { viewModel.handleChapterDownload(it, action) }
         }
 
-        private fun chapterOf(chapterId: Long) =
-            viewModel.getChapters().find { it.chapter.id == chapterId }?.chapter
+        private fun chaptersOf(chapterIds: List<Long>): List<Chapter> {
+            val wanted = chapterIds.toSet()
+            return viewModel.getChapters().map { it.chapter }.filter { it.id in wanted }
+        }
     }
 
     // A manga page is an image the source ships, so there is no text for a size or a page colour to
@@ -308,6 +353,14 @@ class MangaReaderProvider(
             interval = readerPreferences.autoScrollInterval,
             speed = readerPreferences.autoScrollSpeed,
             shownPage = shownPage,
+            input = object : MangaViewportInput {
+                override val navigation get() = host.settingsViewModel.navigation.value
+                override val volumeKeysEnabled get() = host.settingsViewModel.general.value.volumeKeysEnabled
+                override val volumeKeysInverted get() = host.settingsViewModel.general.value.volumeKeysInverted
+                override val menuVisible get() = viewModel.state.value.menuVisible
+
+                override fun toggleMenu() = host.toggleMenu()
+            },
         )
 
     /**
@@ -349,7 +402,6 @@ internal fun ReaderChapterItem.toReaderChapterRow(
     numberOnly: Boolean,
     words: ChapterTitleWords,
     targets: DownloadTargets = DownloadTargets.OWN,
-    canFetch: (Long) -> Boolean = { true },
 ): ReaderChapterRow {
     // A row whose download fetches another source's copy follows that copy through the queue.
     val active = targets.queuedFor(chapter.id, queued::get)
@@ -362,10 +414,11 @@ internal fun ReaderChapterItem.toReaderChapterRow(
         // Mihon has no reader chapter sheet; this follows its details list, which shows the page.
         readProgress = pageProgressLabel(chapter.lastPageRead, chapter.pageCount)
             ?.let { (resource, args) -> words.pageProgress(resource, args) },
+        progress = ChapterProgress.Pages(chapter.lastPageRead, chapter.pageCount),
         read = flags.isRead(chapter),
         bookmark = flags.isBookmarked(chapter),
         downloadState = downloadState,
         downloadProgress = active?.progress ?: 0,
-        offersDownload = targets.offersDownload(chapter.id, downloadState, canFetch),
+        offersDownload = targets.offersDownload(chapter.id, downloadState),
     )
 }

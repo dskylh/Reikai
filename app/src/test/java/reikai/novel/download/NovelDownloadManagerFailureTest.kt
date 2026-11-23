@@ -8,6 +8,7 @@ import eu.kanade.tachiyomi.util.system.NetworkState
 import eu.kanade.tachiyomi.util.system.activeNetworkState
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
@@ -16,6 +17,7 @@ import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkObject
 import io.mockk.unmockkStatic
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -28,11 +30,16 @@ import reikai.domain.novel.model.CustomNovelInfo
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.source.ReikaiSourcePreferences
+import reikai.novel.install.LnPluginInstaller
+import reikai.novel.install.LnPluginLoadFailure
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
+import reikai.util.realTimeSourceContacts
 import reikai.util.testAppScope
+import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.download.service.DownloadPreferences
+import tachiyomi.i18n.MR
 import java.io.IOException
 import kotlin.time.Instant
 
@@ -66,10 +73,34 @@ class NovelDownloadManagerFailureTest {
         every { getSystemService(NotificationManager::class.java) } returns mockk<NotificationManager>(relaxed = true)
     }
     private val sameName = chapter.copy(id = 11L, url = "u11")
+    private val queuedLater = chapter.copy(id = 12L, url = "u12")
+    private val uninstalled = novel.copy(id = 2L, source = "gone")
+    private val uninstalledChapter = chapter.copy(id = 20L, novelId = 2L, url = "u20")
+    private val unloaded = novel.copy(id = 3L, source = "broken")
+    private val unloadedChapter = chapter.copy(id = 30L, novelId = 3L, url = "u30")
+    private val alsoUnloaded = unloadedChapter.copy(id = 31L, url = "u31")
     private val chapterRepo = mockk<NovelChapterRepository> {
         coEvery { getById(10L) } returns chapter
         coEvery { getById(11L) } returns sameName
+        coEvery { getById(20L) } returns uninstalledChapter
+        coEvery { getById(30L) } returns unloadedChapter
+        coEvery { getById(31L) } returns alsoUnloaded
+        coEvery { getById(12L) } returns queuedLater
     }
+    private val loadFailures = MutableStateFlow(
+        mapOf(
+            "https://repo/broken.js" to LnPluginLoadFailure(
+                url = "https://repo/broken.js",
+                pluginId = "broken",
+                name = "Broken",
+                iconUrl = null,
+                lang = null,
+                version = null,
+                customCssUrl = null,
+                reason = LnPluginLoadFailure.Reason.Malformed,
+            ),
+        ),
+    )
     private val source = mockk<NovelSource> {
         every { minimumRequestDelayMs } returns 0L
         coEvery { parseChapter("u10") } throws IOException("source down")
@@ -77,27 +108,49 @@ class NovelDownloadManagerFailureTest {
     }
 
     // Stubbed outside a mockk block, where a bare get binds to MockK's own.
-    private val sourceManager = mockk<NovelSourceManager>().also { coEvery { it.get("src") } returns source }
+    private val sourceManager = mockk<NovelSourceManager>().also {
+        coEvery { it.get("src") } returns source
+        coEvery { it.get("gone") } returns null
+        coEvery { it.nameOf("gone") } returns "Gone"
+        coEvery { it.get("broken") } returns null
+        coEvery { it.nameOf("broken") } returns "Broken"
+    }
+
+    private val installer = mockk<LnPluginInstaller> {
+        coEvery { ensureLoaded() } just runs
+        coEvery { retryLoad(any()) } just runs
+        every { failures } returns loadFailures
+    }
 
     private val manager = NovelDownloadManager(
         scope = testAppScope(),
         context = context,
         provider = mockk { every { availableSpace() } returns -1L },
-        cache = mockk { every { downloadedChapterIds(novel, any()) } returns emptySet() },
+        cache = mockk { every { downloadedChapterIds(any(), any()) } returns emptySet() },
         chapterRepo = chapterRepo,
-        novelRepo = mockk<NovelRepository> { coEvery { getById(1L) } returns novel },
+        novelRepo = mockk<NovelRepository> {
+            coEvery { getById(1L) } returns novel
+            coEvery { getById(2L) } returns uninstalled
+            coEvery { getById(3L) } returns unloaded
+        },
         sourceManager = sourceManager,
-        installer = mockk { coEvery { ensureLoaded() } just runs },
+        installer = installer,
         downloadPreferences = DownloadPreferences(InMemoryPreferenceStore()),
         sourcePreferences = ReikaiSourcePreferences(InMemoryPreferenceStore()),
         novelPreferences = NovelPreferences(InMemoryPreferenceStore()),
-        saver = mockk { coEvery { save(any(), any(), any(), any()) } returns NovelChapterSaver.SaveResult.NAME_TAKEN },
+        saver = mockk {
+            coEvery { prepare(any(), any(), any()) } answers { secondArg() }
+            coEvery { write(any(), any(), any()) } returns NovelChapterSaver.SaveResult.NAME_TAKEN
+        },
         securityPreferences = SecurityPreferences(InMemoryPreferenceStore()),
         adultChecker = mockk { coEvery { adultNovelIdsAmong(any()) } returns emptySet() },
         sourceTitles = mockk(),
         getEntryCustomInfo = mockk {
             coEvery { await(EntryId.Novel(1L)) } returns CustomNovelInfo(novelId = 1L, title = "Mine")
+            coEvery { await(EntryId.Novel(2L)) } returns null
+            coEvery { await(EntryId.Novel(3L)) } returns null
         },
+        sourceContacts = realTimeSourceContacts(),
     )
 
     @BeforeEach
@@ -106,12 +159,17 @@ class NovelDownloadManagerFailureTest {
         every { NovelDownloadWorker.start(any()) } just runs
         mockkStatic(Context::activeNetworkState)
         every { any<Context>().activeNetworkState() } returns NetworkState(true, true, true)
+        mockkStatic(LOCALIZE)
+        every { any<Context>().stringResource(MR.strings.source_not_installed, *anyVararg()) } returns
+            "Source not installed"
+        every { any<Context>().stringResource(MR.strings.ext_malformed_message) } returns "Malformed"
     }
 
     @AfterEach
     fun tearDown() {
         unmockkObject(NovelDownloadWorker.Companion)
         unmockkStatic(Context::activeNetworkState)
+        unmockkStatic(LOCALIZE)
     }
 
     @Test
@@ -123,6 +181,18 @@ class NovelDownloadManagerFailureTest {
         NovelDownloadStore(context, chapterRepo).restore().map { it.chapterId } shouldBe listOf(10L)
     }
 
+    /** The live queue keeps a retried chapter in place, so a restart must not move it last. */
+    @Test
+    fun `a failed chapter queued again keeps its place in the saved queue`() = runTest {
+        manager.downloadChapters(listOf(chapter))
+        manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> })
+        manager.downloadChapters(listOf(queuedLater))
+
+        manager.downloadChapters(listOf(chapter))
+
+        NovelDownloadStore(context, chapterRepo).restore().map { it.chapterId } shouldBe listOf(10L, 12L)
+    }
+
     @Test
     fun `a chapter whose name another chapter's download holds leaves the saved queue`() = runTest {
         manager.downloadChapters(listOf(sameName))
@@ -131,7 +201,94 @@ class NovelDownloadManagerFailureTest {
 
         NovelDownloadStore(context, chapterRepo).restore().map { it.chapterId } shouldBe emptyList()
     }
+
+    @Test
+    fun `a chapter whose source is not installed fails with the reason`() = runTest {
+        var reason: String? = null
+        manager.downloadChapters(listOf(uninstalledChapter))
+
+        manager.runQueue(onProgress = {}, onError = { _, _, error, _ -> reason = error })
+
+        reason shouldBe "Source not installed"
+    }
+
+    /** No Resume can fetch it, as a manga row of a removed source is dropped on restore. */
+    @Test
+    fun `a chapter whose source is not installed leaves the saved queue`() = runTest {
+        manager.downloadChapters(listOf(uninstalledChapter))
+
+        manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> })
+
+        NovelDownloadStore(context, chapterRepo).restore().map { it.chapterId } shouldBe emptyList()
+    }
+
+    @Test
+    fun `a chapter whose installed plugin failed to load fails with the load's reason`() = runTest {
+        var reason: String? = null
+        manager.downloadChapters(listOf(unloadedChapter))
+
+        manager.runQueue(onProgress = {}, onError = { _, _, error, _ -> reason = error })
+
+        reason shouldBe "Malformed"
+    }
+
+    /** A run is asked for, as a reader or details Retry is, so it does not wait out the automatic load's pause. */
+    @Test
+    fun `a chapter whose installed plugin failed to load loads the plugin again first`() = runTest {
+        manager.downloadChapters(listOf(unloadedChapter, alsoUnloaded))
+
+        manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> })
+
+        coVerify(exactly = 1) { installer.retryLoad("broken") }
+    }
+
+    @Test
+    fun `a chapter whose plugin loads on the second try downloads`() = runTest {
+        val reloaded = mockk<NovelSource> {
+            every { minimumRequestDelayMs } returns 0L
+            coEvery { parseChapter("u30") } returns "text"
+        }
+        coEvery { installer.retryLoad("broken") } answers { coEvery { sourceManager.get("broken") } returns reloaded }
+        manager.downloadChapters(listOf(unloadedChapter))
+
+        manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> })
+
+        NovelDownloadStore(context, chapterRepo).restore().map { it.chapterId } shouldBe emptyList()
+    }
+
+    /** Only a plugin that failed to load is loaded again; a source that is not installed has nothing to load. */
+    @Test
+    fun `a chapter whose source is not installed loads no plugin again`() = runTest {
+        manager.downloadChapters(listOf(uninstalledChapter))
+
+        manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> })
+
+        coVerify(exactly = 0) { installer.retryLoad(any()) }
+    }
+
+    /** Each run is asked for afresh, so the plugin a run reloaded is reloaded by the next one too. */
+    @Test
+    fun `every run loads a failed plugin again`() = runTest {
+        repeat(2) {
+            manager.downloadChapters(listOf(unloadedChapter))
+            manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> })
+        }
+
+        coVerify(exactly = 2) { installer.retryLoad("broken") }
+    }
+
+    /** The next run's plugin load retries it, so a Resume can still fetch it. */
+    @Test
+    fun `a chapter whose installed plugin failed to load stays in the saved queue`() = runTest {
+        manager.downloadChapters(listOf(unloadedChapter))
+
+        manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> })
+
+        NovelDownloadStore(context, chapterRepo).restore().map { it.chapterId } shouldBe listOf(30L)
+    }
 }
+
+private const val LOCALIZE = "tachiyomi.core.common.i18n.LocalizeKt"
 
 /** An in-memory SharedPreferences, enough for the download store's string entries. */
 internal class FakeSharedPreferences : SharedPreferences {

@@ -1,22 +1,26 @@
 package reikai.domain.source
 
+import kotlinx.serialization.Serializable
 import reikai.domain.library.ContentType
 
 /**
  * Neutral identity for a source of either content type, the browse analogue of
  * [reikai.domain.entry.EntryId]: sealed, so a mismatched (type, id) cannot be constructed. The two id
  * spaces cannot collide (a manga source is a `Long`, a plugin a `String` slug), so this gives them
- * one name: a value naming both types at once, such as the last-used source, needs it. Java-
- * serializable because a catalogue screen takes one and has to survive process death.
+ * one name: a value naming both types at once, such as the last-used source, needs it. Serializable for
+ * a route, which carries one.
  */
-sealed interface SourceKey : java.io.Serializable {
+@Serializable
+sealed interface SourceKey {
 
     val contentType: ContentType
 
+    @Serializable
     data class Manga(val id: Long) : SourceKey {
         override val contentType: ContentType get() = ContentType.MANGA
     }
 
+    @Serializable
     data class Novel(val id: String) : SourceKey {
         override val contentType: ContentType get() = ContentType.NOVELS
     }

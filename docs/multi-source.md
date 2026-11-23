@@ -33,16 +33,16 @@ Merged series work the same way for manga and for light novels.
   decoding="async"
 />
 
-::: info A series is only merged when you ask
-Nothing is merged behind your back.
+::: info When a series is merged
 An entry joins a group when you accept the prompt shown as you add it, when you merge entries yourself, or when you migrate a merged series: the series you migrate to takes the old entry's place in the group, or joins the group beside it if you keep the old one.
+The one automatic case is [restoring a backup from another app](#restoring-a-backup-from-another-app), which groups series with the same title.
 A source you remove with the heart or from the library keeps its place in the group, so adding it back puts it straight back in. **Remove from library** in Manage sources splits it out first, so it comes back on its own.
 :::
 
 ## Grouping series
 
 Grouping is on by default.
-Turn it off or back on with **Group series across sources**, in <nav to="library"> under **Merged series**, or in the library display sheet.
+Turn it off or back on with **Merge series across sources**, in <nav to="library"> under **Merged series**, or in the library display sheet.
 
 With it on, every group renders as one card.
 Turning it off expands each group back into its per-source entries and keeps the groups, so turning it on again collapses them exactly as they were.
@@ -51,7 +51,7 @@ A merged card is filed under the categories its group shares, and shows once in 
 Changing a merged series' categories, from the library or its details screen, changes them for every source in the group.
 A source that joins a group takes the group's categories.
 
-Under **Group by tag**, **Group by source** and **Group by language**, a merged card is listed under every tag, source and language its sources have, so it can appear in several groups.
+When the library is grouped **By tag**, **By source** or **By language** (the **Group** tab of the display sheet), a merged card is listed under every tag, source and language its sources have, so it can appear in several groups.
 
 ### Joining a group as you add a series
 
@@ -62,8 +62,18 @@ Pick the entry it belongs with, and the new copy is added to your library and jo
 Adding from Browse, global search, a series' own details page, History or Updates, or MangaDex Follows.
 :::
 
-The **Add to existing group** option is controlled by **Suggest grouping same-titled series**, in <nav to="library"> under **Merged series**, once for **Manga** and once for **Novels**, and is also hidden while **Group series across sources** is off.
+The **Add to existing group** option is controlled by **Suggest merging same-titled series**, in <nav to="library"> under **Merged series**, once for **Manga** and once for **Novels**, and is also hidden while **Merge series across sources** is off.
 With it off, adding a matching series never offers to group it.
+
+### Restoring a backup from another app
+
+A merged series in a TachiyomiSY or Komikku backup comes back as a merged series, with its sources in the order set there.
+Its categories, tracking, edited details and notes come with it. That app's per-source switches for updates and downloads, and its chapter sorting, do not: every source in a group checks for updates.
+
+Restoring a backup from another app, those two included, also groups the other series in its library that share a title.
+This happens whatever **Suggest merging same-titled series** is set to.
+Titles have to match apart from upper and lower case, so two spellings of one series stay apart until you [merge them yourself](#merging-entries-yourself).
+[Split](#splitting-a-group-up) any group you did not want. A backup made in Reikai restores its groups as they were saved.
 
 ### Reading a merged card
 
@@ -76,7 +86,7 @@ Turn those off with **Show source icons on merged covers** in the library displa
 Open a merged series and a row of chips sits below its details: **All** for the combined list, selected when you open it, then one chip per source.
 
 Tap another chip to read that source's version.
-Read and bookmark marks, and the chapter list's sort, filter and display settings, are shared by the whole group, so switching source does not restart anything and every chip lists chapters the same way.
+Read and bookmark marks, the chapter list's sort, filter and display settings, and the reader's reading mode, rotation and (for novels) chapter display are shared by the whole group, whichever source you open it through, so switching source does not restart anything and every chip lists chapters the same way.
 
 The row keeps up with the group on its own, so a source you add through global search appears without backing out to the library first.
 
@@ -125,7 +135,7 @@ Merge those by hand.
 
 The selection bar draws its actions as icons with no text beside them, so look for the shape rather than the word.
 The merge icon only appears once you have selected two or more entries **of the same type**, since a group is either manga or novels, never a mix.
-It is also hidden while **Group series across sources** is off.
+It is also hidden while **Merge series across sources** is off.
 
 The selected entries become one card and share one chapter list, read and bookmark marks, and chapter settings from then on. Moving the card to another category moves every source in it.
 

@@ -1,26 +1,35 @@
 package eu.kanade.tachiyomi.data.track.mangabaka
 
 import dev.icerock.moko.resources.StringResource
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.database.models.Track
 import eu.kanade.tachiyomi.data.track.BaseTracker
 import eu.kanade.tachiyomi.data.track.DeletableTracker
+import eu.kanade.tachiyomi.data.track.TrackerDependencies
 import eu.kanade.tachiyomi.data.track.mangabaka.dto.MangaBakaOAuth
 import eu.kanade.tachiyomi.data.track.model.TrackMangaMetadata
 import eu.kanade.tachiyomi.data.track.model.TrackSearch
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.serialization.json.Json
+import reikai.data.track.exchangeLoginCode
+import reikai.data.track.isLoginState
 import tachiyomi.i18n.MR
-import uy.kohesive.injekt.injectLazy
 import tachiyomi.domain.track.model.Track as DomainTrack
 
-class MangaBaka(id: Long) : BaseTracker(id, "MangaBaka"), DeletableTracker {
+@Inject
+@SingleIn(AppScope::class)
+class MangaBaka(
+    dependencies: TrackerDependencies,
+    private val json: Json,
+) : BaseTracker(11L, "MangaBaka", dependencies),
+    DeletableTracker {
 
-    private val json: Json by injectLazy()
-
-    private val interceptor by lazy { MangaBakaInterceptor(this) }
-    private val api by lazy { MangaBakaApi(id, client, interceptor) }
+    private val interceptor by lazy { MangaBakaInterceptor(this, json) }
+    private val api by lazy { MangaBakaApi(id, client, interceptor, json) }
 
     override val supportsReadingDates: Boolean = true
     override val supportsPrivateTracking: Boolean = true
@@ -141,8 +150,13 @@ class MangaBaka(id: Long) : BaseTracker(id, "MangaBaka"), DeletableTracker {
     override suspend fun login(username: String, password: String) = login(password)
 
     suspend fun login(code: String) {
+        // RK --> the exchange sends the stored verifier; no pending login sends nothing and keeps the session,
+        // and a cancelled token call rethrows here rather than reaching the catch below, which signs out.
+        // A cancel during the user lookup still signs out: the code is spent by then and cannot be retried.
+        val exchange = trackPreferences.exchangeLoginCode(this) { api.getAccessToken(code, it) } ?: return
+        // RK <--
         try {
-            val oauth = api.getAccessToken(code)
+            val oauth = exchange.getOrThrow() // RK
             interceptor.setAuth(oauth)
             val currentUser = api.getCurrentUser()
             val scoreType = when (currentUser.ratingSteps) {
@@ -187,7 +201,7 @@ class MangaBaka(id: Long) : BaseTracker(id, "MangaBaka"), DeletableTracker {
         }
     }
 
-    fun verifyOAuthState(state: String): Boolean = api.verifyOAuthState(state)
+    fun verifyOAuthState(state: String): Boolean = trackPreferences.isLoginState(this, state) // RK: stored state
 
     override fun logout() {
         super.logout()

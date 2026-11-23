@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.CircularProgressIndicator
@@ -16,7 +17,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -25,27 +36,43 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.navigation3.runtime.result.LocalResultEventBus
 import eu.kanade.presentation.manga.components.ChapterHeader
 import eu.kanade.presentation.manga.components.GalleryInfoBox
 import eu.kanade.presentation.manga.components.MangaBottomActionMenu
 import eu.kanade.presentation.manga.components.MangaChapterListItem
 import eu.kanade.presentation.manga.components.MissingChapterCountListItem
 import eu.kanade.presentation.manga.components.PagePreviews
-import eu.kanade.presentation.manga.components.SearchMetadataChips
+import eu.kanade.tachiyomi.util.system.toast
+import kotlinx.coroutines.launch
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.KeyboardArrowDown
+import reikai.data.local.LocalMoveResult
+import reikai.domain.chapter.CopyMark
+import reikai.domain.chapter.LooseFiles
+import reikai.domain.chapter.savedVolume
+import reikai.domain.details.ReadButtonSide
 import reikai.domain.download.whereDownloadOffered
+import reikai.domain.entry.EntryId
+import reikai.domain.library.ContentType
+import reikai.domain.local.VolumeOwner
 import reikai.domain.recommendation.RelatedMangaCandidate
 import reikai.presentation.components.ManageMergeSourceRow
 import reikai.presentation.components.MergeSourceChips
+import reikai.presentation.components.VolumeMoves
+import reikai.presentation.components.asProvider
 import reikai.presentation.components.chapterRowDate
 import reikai.presentation.components.readProgressLabel
+import reikai.presentation.notes.VolumeNotesRoute
 import reikai.presentation.novel.details.novelPageText
 import reikai.presentation.reader.chapterRowTitle
 import reikai.presentation.reader.chapterTitleWords
-import reikai.presentation.recents.NO_PROGRESS
 import reikai.presentation.recommendation.RelatedMangaCarousel
+import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.library.service.LibraryPreferences
+import tachiyomi.i18n.MR
+import tachiyomi.presentation.core.i18n.stringResource
 
 /** Dim level for a hidden chapter row shown via "Show hidden chapters". */
 private const val HIDDEN_CHAPTER_ALPHA = 0.4f
@@ -54,29 +81,25 @@ private const val HIDDEN_CHAPTER_ALPHA = 0.4f
  * Navigation and per-type actions the shared details body cannot express through [EntryDetailsBehavior]:
  * opening the reader, the per-type filter-settings sheet, and the manga-only capability taps (related
  * cards, page previews, gallery viewer). Each screen builds one and passes it in; a manga-only slot's
- * callback is simply absent for novels. The web actions are the body's own, from [EntryWebPage].
+ * callback is simply absent for novels. The web actions are the body's own, from [EntryWebPage], and so
+ * are the pushes both types make alike ([SharedDetailsPushes], over [viewedSource]), which have no field here.
  */
 data class EntryDetailsNavigation(
     val navigateUp: () -> Unit,
     val onOpenChapter: (chapterId: Long) -> Unit,
-    /** Header title / author / artist tap: a global search, scoped to this entry's type. */
-    val onGlobalSearch: (query: String) -> Unit,
-    val onTagSearch: (String) -> Unit,
-    /** The Tracking tap with no tracker logged in; with one, the body opens the track sheet itself. */
-    val onOpenTrackingSettings: () -> Unit,
-    val onEditNotes: () -> Unit,
+    val viewedSource: DetailsViewedSource,
     val onOpenFilterSettings: () -> Unit,
-    /** Library entries only: the body drops it for an entry outside the library ([forState]). */
-    val onMigrate: (() -> Unit)? = null,
     /** Smart update's interval editor; the body drops it outside the library ([forState]), and null
      *  leaves the button doing nothing. */
     val onEditInterval: (() -> Unit)? = null,
     /** Opens the novel page/volume selector sheet; novel-only. */
     val onOpenPageSelector: (() -> Unit)? = null,
-    /** Search and word count over the downloaded chapters' text; novel-only, since a manga chapter on
-     *  disk is images. Offered only while what the screen shows has downloads. */
+    /** Search and word count over the chapter text on the device; novel-only, since a manga chapter on
+     *  disk is images. Offered only while that text is there: downloads, or a local series' files. */
     val onSearchText: (() -> Unit)? = null,
     val onWordCount: (() -> Unit)? = null,
+    /** Writes the chapters on the device as an EPUB; novel-only, since manga keeps CBZ for that. */
+    val onExport: (() -> Unit)? = null,
     // Manga capability taps.
     val onRelatedClick: (RelatedMangaCandidate) -> Unit = {},
     val onRelatedSeeAll: () -> Unit = {},
@@ -89,11 +112,6 @@ data class EntryDetailsNavigation(
     val onOpenSourceSettings: (() -> Unit)? = null,
     /** Hands the viewed source's download folder to a file manager. */
     val onOpenFolder: (() -> Unit)? = null,
-    /** Header long-press: search the library, forced to this entry's type. The source row passes a
-     *  `srcid:` query for its source rather than the name it shows. */
-    val onLibrarySearch: (query: String) -> Unit,
-    /** Header source row: browse that source. Null on a stub, where there is nothing to browse. */
-    val onBrowseSource: (() -> Unit)? = null,
 )
 
 /**
@@ -112,44 +130,344 @@ fun EntryDetailsContent(
     chapterSwipeStartAction: LibraryPreferences.ChapterSwipeAction,
     chapterSwipeEndAction: LibraryPreferences.ChapterSwipeAction,
     nav: EntryDetailsNavigation,
+    settings: DetailsSettings,
+    volumeMoves: VolumeMoves,
 ) {
+    // The volume dialogs' work runs on the model's scope (VolumeMoves), so it takes the application's context.
+    val context = LocalContext.current.applicationContext
     val web = rememberEntryWebActions(state.webPage, state.details.header.title)
-    val libraryNav = nav.forState(state)
+    val navigator = LocalNavigator.current
+    val bus = LocalResultEventBus.current
+    val shared = nav.withSharedPushes(state, navigator, bus, twoPane = isTabletUi)
+    // Saved with the page, so it outlives the process as the page does; the adapter filters by it off Main.
+    var onlyCopies by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(onlyCopies) { behavior.setOnlyCopies(onlyCopies) }
+    val copies = CopiesFilter(on = state.volumeViews.onlyCopies) { onlyCopies = !onlyCopies }
+    val type = state.entryId.contentType
+    val savedVolumes by behavior.volumePicking.saved(type).collectAsState()
+    val looseFiles by behavior.volumePicking.looseFiles().collectAsState()
+    val structural = state.volumeViews.structural
+    val volumes = state.volumeViews.volumes
+    // A picked volume heads the page with its own cover, description and notes.
+    val pickedVolume = volumes?.let { view -> view.chips.firstOrNull { it.key == view.picked } }
+    val volumeFiles by produceState<VolumeOwnFiles?>(null, pickedVolume?.series, pickedVolume?.key) {
+        value = pickedVolume?.let {
+            VolumeOwnFiles(
+                cover = behavior.volumePicking.cover(type, it.series, it.key),
+                description = behavior.volumePicking.description(type, it.series, it.key),
+            )
+        }
+    }
+    val volumeNotes = pickedVolume?.let { picked ->
+        savedVolumes.savedVolume(picked.series, picked.key)?.notes
+    }.orEmpty()
+    val listed = state.volumeViews.items?.let { state.copy(chapters = state.chapters.copy(items = it)) } ?: state
+    val shown = if (pickedVolume == null) listed else listed.headedBy(volumeFiles, volumeNotes)
+    val pageNav = DetailsPageNav(
+        perType = nav,
+        shared = pickedVolume?.let { picked ->
+            shared.copy(onEditNotes = { navigator.push(VolumeNotesRoute(type, picked.series, picked.key)) })
+        } ?: shared,
+        onFilterLibraryByTag = { tag, show ->
+            settings.filterLibraryByTag(tag, show)
+            navigator.showLibraryFromDetails(bus)
+        },
+        onCoverClick = { behavior.showCoverDialog(pickedVolume) },
+    ).forState(state)
+    val shownIds = remember(shown.chapters.items) {
+        shown.chapters.items.mapNotNull { (it as? EntryChapterListItem.Chapter)?.id }
+    }
+    // Read at tap time, so a row's lambdas stay the same instance while the rows change.
+    val currentShownIds by rememberUpdatedState(shownIds)
+    val shownChapterIds = remember { { currentShownIds } }
+    var reorderingVolumes by remember { mutableStateOf(false) }
+    var volumeDialog by remember { mutableStateOf<VolumeDialog?>(null) }
+    var deletingVolumes by remember { mutableStateOf<List<String>?>(null) }
+    val ownLocal = state.ownsLocalFiles
+    // The volumes the files hold, which only a regrouping or a refresh changes, never a read mark: each listing of
+    // the local folder below waits for one of those.
+    val layout = remember(structural) { structural?.chips?.map { it.key } }
+    // Hidden, never shown disabled, where the storage cannot move or rename a file; null until it is known.
+    val canOrganizeOrNull = behavior.rememberCanOrganize(state.entryId, ownLocal, layout)
+    val canOrganize = canOrganizeOrNull == true
+    // A refresh is what finds a member folder gone or back, and its sync keeps the rows, so the layout may not change.
+    val missingFolders by produceState(emptyList<String>(), state.entryId, ownLocal, layout, state.isRefreshing) {
+        value = if (ownLocal) behavior.volumePicking.missingMembers(state.entryId) else emptyList()
+    }
+    val missing =
+        remember(missingFolders, volumes) { missingVolumes(type, missingFolders, structural?.chips.orEmpty()) }
+    var fixing by remember { mutableStateOf<MissingVolume?>(null) }
+    // A refresh is what meets the refusal, so it is asked again after each one.
+    val waitsForRepair by produceState(false, state.entryId, ownLocal, state.isRefreshing) {
+        value = ownLocal && behavior.volumePicking.waitsForRepair(state.entryId)
+    }
+    var forgetting by remember { mutableStateOf(false) }
+    val extras = ChapterListExtras(
+        copies = copies,
+        volumes = volumes,
+        missing = missing,
+        onFixMissing = { fixing = it },
+        onForgetUnfinished = { forgetting = true }.takeIf { waitsForRepair },
+        shownChapterIds = shownChapterIds,
+        // A picked volume hides the others' rows, so a selection among them would act out of sight.
+        onPickVolume = {
+            behavior.volumePicking.pick(state.entryId, it)
+            behavior.clearSelection()
+        },
+        onReorderVolumes = { reorderingVolumes = true }.takeIf { structural != null },
+        onAddVolumes = { volumeDialog = VolumeDialog.AddVolumes }.takeIf { ownLocal },
+        onSplitOut = { volumeDialog = VolumeDialog.SplitOut }.takeIf { ownLocal && structural != null },
+        onRenameFiles = { volumeDialog = VolumeDialog.RenameFiles }.takeIf { canOrganize },
+        onDeleteVolumes = { keys: List<String>? -> deletingVolumes = keys ?: structural?.chips?.map { it.key } }
+            .takeIf { ownLocal && structural != null },
+        onKeepDuplicates = { renames: List<Pair<String, String>> ->
+            val series = volumes?.chips?.firstOrNull()?.series
+            if (series !=
+                null
+            ) {
+                renames.forEach { (key, label) -> behavior.volumePicking.rename(type, series, key, label) }
+            }
+        }.takeIf { ownLocal },
+    )
+    val placement by settings.chrome.collectAsState()
+    val chrome = DetailsChrome(
+        jumpsInMenu = placement.jumpsInMenu,
+        readButtonSide = placement.readButtonSide,
+        onReadButtonDocked = settings::dockReadButton,
+        descriptionImages = settings.descriptionImages,
+    )
+    // Edit info saves the title before the screen shows it, so the files take the title it sent. A request made
+    // where the files cannot move is taken and dropped, so it does not open later out of the blue.
+    var renameTitle by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(state.entryId, canOrganizeOrNull) {
+        if (canOrganizeOrNull == null) return@LaunchedEffect
+        behavior.volumePicking.organizeRequests(state.entryId).collect {
+            // The move that opened this screen offers its Undo here, wherever its files can go.
+            it.undo?.let { undo -> volumeMoves.launch { report(context, undo.move, undo.message) } }
+            if (!canOrganize) return@collect
+            renameTitle = it.title
+            volumeDialog = VolumeDialog.RenameFiles
+        }
+    }
+    volumeMoves.PushOpened(navigator::push)
     if (isTabletUi) {
         EntryDetailsLargeContent(
             behavior,
-            state,
+            shown,
             snackbarHostState,
             chapterSwipeStartAction,
             chapterSwipeEndAction,
-            libraryNav,
+            pageNav,
             web,
+            extras,
+            chrome,
         )
     } else {
         EntryDetailsSmallContent(
             behavior,
-            state,
+            shown,
             snackbarHostState,
             chapterSwipeStartAction,
             chapterSwipeEndAction,
-            libraryNav,
+            pageNav,
             web,
+            extras,
+            chrome,
+        )
+    }
+    if (reorderingVolumes && structural != null) {
+        val series = structural.chips.first().series
+        // A series' own loose files have a setting of their own. Only a manga folder has them: every novel book is a
+        // volume keyed by its file name, so no novel chip carries the loose key.
+        val hasLoose = structural.chips.any { it.key == VolumeOwner.LOOSE }
+        ReorderVolumesDialog(
+            volumes = (volumes ?: structural).chips,
+            looseFiles = (looseFiles[series] ?: LooseFiles.ONE_VOLUME).takeIf { hasLoose },
+            onLooseFiles = { behavior.volumePicking.setLooseFiles(series, it, behavior::refresh) },
+            canRenameFiles = canOrganize,
+            onDismissRequest = { renameFiles ->
+                reorderingVolumes = false
+                if (renameFiles) volumeDialog = VolumeDialog.RenameFiles
+            },
+            onReorder = { keys -> behavior.volumePicking.reorder(type, series, keys, behavior::refresh) },
+            onRename = { key, label -> behavior.volumePicking.rename(type, series, key, label) },
+        )
+    }
+    when (volumeDialog) {
+        VolumeDialog.AddVolumes -> AddVolumesDialog(
+            title = state.details.header.title,
+            load = { behavior.volumePicking.library(type).filterNot { it.id == state.entryId.rawId } },
+            canOrganize = canOrganize,
+            onDismissRequest = { volumeDialog = null },
+            onConfirm = { others, organize ->
+                volumeDialog = null
+                volumeMoves.launch {
+                    val own = behavior.volumePicking.series(state.entryId) ?: return@launch
+                    val move = behavior.volumePicking.addVolumes(type, own, others)
+                    behavior.refresh()
+                    // Its own preview, after the chips show the volumes that came in.
+                    if (organize && move.result is LocalMoveResult.Moved) {
+                        behavior.volumePicking.requestOrganize(state.entryId)
+                    }
+                    val message = context.stringResource(MR.strings.local_volumes_combined, own.title)
+                    report(context, move, message)
+                    behavior.refresh()
+                }
+            },
+        )
+        VolumeDialog.SplitOut -> structural?.let { view ->
+            SplitOutDialog(
+                title = state.details.header.title,
+                volumes = view.chips,
+                canOrganize = canOrganize,
+                onDismissRequest = { volumeDialog = null },
+                onConfirm = { keys, title, organize ->
+                    volumeDialog = null
+                    volumeMoves.launch {
+                        val own = behavior.volumePicking.series(state.entryId) ?: return@launch
+                        val move = behavior.volumePicking.splitOut(type, own, keys, title)
+                        behavior.refresh()
+                        val message = context.stringResource(MR.strings.local_volume_split_out, title)
+                        // The new series' own screen, where its volumes show, opens on the preview with the Undo.
+                        val created = move.created?.takeIf { organize }
+                        if (created != null) {
+                            behavior.volumePicking.organizeOn(EntryId.of(type, created), move, message, ::open)
+                        } else {
+                            report(context, move, message)
+                            behavior.refresh()
+                        }
+                    }
+                },
+            )
+        }
+        VolumeDialog.RenameFiles -> RenameFilesDialog(
+            title = renameTitle ?: state.details.header.title,
+            volumes = structural?.chips.orEmpty(),
+            plan = { title, labels -> behavior.volumePicking.renamePlan(state.entryId, title, labels) },
+            onDismissRequest = {
+                volumeDialog = null
+                renameTitle = null
+            },
+            onConfirm = { series, names, newTitle ->
+                volumeDialog = null
+                renameTitle = null
+                volumeMoves.launch {
+                    val move = behavior.volumePicking.renameFiles(type, series, names, newTitle)
+                    behavior.refresh()
+                    report(context, move, context.stringResource(MR.strings.local_files_renamed))
+                    behavior.refresh()
+                }
+            },
+        )
+        null -> {}
+    }
+    fixing?.let { one ->
+        val done = { result: LocalMoveResult ->
+            behavior.refresh()
+            if (result is LocalMoveResult.Failed) context.toast(MR.strings.local_volume_member_failed)
+        }
+        MissingVolumeDialog(
+            missing = one,
+            candidates = { behavior.volumePicking.memberCandidates(state.entryId, one.folder) },
+            choices = { behavior.volumePicking.memberChoices(state.entryId, one.folder) },
+            onDismissRequest = { fixing = null },
+            onLink = { to ->
+                fixing = null
+                volumeMoves.launch { done(behavior.volumePicking.relinkMember(state.entryId, one.folder, to)) }
+            },
+            onRemove = {
+                fixing = null
+                volumeMoves.launch { done(behavior.volumePicking.removeMember(state.entryId, one.folder)) }
+            },
+        )
+    }
+    if (forgetting) {
+        ForgetUnfinishedDialog(
+            onDismissRequest = { forgetting = false },
+            onConfirm = {
+                forgetting = false
+                volumeMoves.launch {
+                    behavior.volumePicking.forgetUnfinished(state.entryId)
+                    behavior.refresh()
+                }
+            },
+        )
+    }
+    deletingVolumes?.let { keys ->
+        DeleteVolumesDialog(
+            volumes = volumesToDelete(structural, volumes, keys),
+            onDismissRequest = { deletingVolumes = null },
+            onConfirm = { picked ->
+                deletingVolumes = null
+                volumeMoves.launch {
+                    val result = behavior.volumePicking.deleteVolumes(state.entryId, picked)
+                    behavior.refresh()
+                    if (result is LocalMoveResult.Failed) context.toast(MR.strings.delete_volumes_failed)
+                }
+            },
         )
     }
 }
 
+/** Whether the list shows only chapters with copies, from the duplicate count under the chapter header. */
+@Immutable
+private data class CopiesFilter(val on: Boolean, val toggle: () -> Unit)
+
+/** What the chapter list is narrowed to above its rows: the copies filter, and a local series' volumes. */
+@Immutable
+private data class ChapterListExtras(
+    val copies: CopiesFilter,
+    val volumes: VolumeView?,
+    // The chapter rows on screen after both, which the selection verbs act on.
+    val shownChapterIds: () -> List<Long>,
+    val onPickVolume: (String?) -> Unit,
+    val onReorderVolumes: (() -> Unit)?,
+    val onAddVolumes: (() -> Unit)?,
+    val onSplitOut: (() -> Unit)?,
+    val onRenameFiles: (() -> Unit)?,
+    // Null keys offers every volume; the duplicate notice offers only the ones that clash.
+    val onDeleteVolumes: ((keys: List<String>?) -> Unit)?,
+    val onKeepDuplicates: ((renames: List<Pair<String, String>>) -> Unit)?,
+    // Folders of the series' group gone from the local folder, each tapped to link or take out.
+    val missing: List<MissingVolume>,
+    val onFixMissing: (MissingVolume) -> Unit,
+    // Set while the series waits on an organize no retry resolves, which the user may forget.
+    val onForgetUnfinished: (() -> Unit)?,
+)
+
+/** Where the details chrome sits (the scroll actions, the Start/Resume button), and whether the description shows images. */
+@Immutable
+private data class DetailsChrome(
+    val jumpsInMenu: Boolean,
+    val readButtonSide: ReadButtonSide,
+    val onReadButtonDocked: (ReadButtonSide) -> Unit,
+    val descriptionImages: Boolean,
+)
+
+private enum class VolumeDialog { AddVolumes, SplitOut, RenameFiles }
+
+// Each set's copies kept together, in the list's own order, since a date sort can part them. A marked
+// chapter stays too, so a Never skip can be found and cleared.
+internal fun EntryDetailsScreenState.Loaded.withOnlyCopies() = copy(
+    chapters = chapters.copy(
+        items = chapters.items.filterIsInstance<EntryChapterListItem.Chapter>()
+            .filter { chapters.duplicates?.run { it.id in copies || it.id in marks } == true }
+            .groupBy { chapters.duplicates?.copies?.get(it.id)?.first() ?: it.id }.values.flatten(),
+    ),
+)
+
 /** [this] with the actions that only act on a library entry dropped while [state]'s entry is outside it. */
-internal fun EntryDetailsNavigation.forState(state: EntryDetailsScreenState.Loaded) = copy(
-    onMigrate = onMigrate?.takeIf { state.details.favorite },
-    onEditInterval = onEditInterval?.takeIf { state.details.favorite },
+internal fun DetailsPageNav.forState(state: EntryDetailsScreenState.Loaded) = copy(
+    perType = perType.copy(onEditInterval = perType.onEditInterval?.takeIf { state.details.favorite }),
+    shared = shared.copy(onMigrate = shared.onMigrate?.takeIf { state.details.favorite }),
 )
 
 /** The Tracking button: the track sheet once a tracker is logged in, else tracker settings to log in to one. */
 internal fun trackingTap(
     state: EntryDetailsScreenState.Loaded,
-    behavior: EntryDetailsBehavior,
-    nav: EntryDetailsNavigation,
-): () -> Unit = if (state.details.hasLoggedInTrackers) behavior::showTrackDialog else nav.onOpenTrackingSettings
+    nav: DetailsPageNav,
+): () -> Unit =
+    if (state.details.hasLoggedInTrackers) nav.shared.onOpenTrackSheet else nav.shared.onOpenTrackingSettings
 
 @Composable
 private fun EntryDetailsSmallContent(
@@ -158,10 +476,13 @@ private fun EntryDetailsSmallContent(
     snackbarHostState: SnackbarHostState,
     chapterSwipeStartAction: LibraryPreferences.ChapterSwipeAction,
     chapterSwipeEndAction: LibraryPreferences.ChapterSwipeAction,
-    nav: EntryDetailsNavigation,
+    nav: DetailsPageNav,
     web: EntryWebActions,
+    extras: ChapterListExtras,
+    chrome: DetailsChrome,
 ) {
     val listState = rememberLazyListState()
+    val jumps = rememberEntryChapterJumps(listState, state)
     val haptic = LocalHapticFeedback.current
     val onAddToLibrary = {
         behavior.toggleFavorite()
@@ -177,9 +498,11 @@ private fun EntryDetailsSmallContent(
         onCancelSelection = behavior::clearSelection,
         fabVisible = state.resumeChapterId != null && !state.selectionMode,
         fabIsResume = state.hasStarted,
-        onFabClick = { state.resumeChapterId?.let(nav.onOpenChapter) },
+        onFabClick = { state.resumeChapterId?.let(nav.perType.onOpenChapter) },
+        fabSide = chrome.readButtonSide,
+        onFabDocked = chrome.onReadButtonDocked,
         topBar = { titleAlpha, backgroundAlpha ->
-            EntryDetailsToolbar(state, behavior, nav, web, titleAlpha, backgroundAlpha)
+            EntryDetailsToolbar(state, behavior, nav, web, extras, jumps, chrome, titleAlpha, backgroundAlpha)
         },
         bottomActionMenu = { EntryDetailsSelectionBar(state, behavior, fillFraction = 1f) },
     ) { appBarPadding ->
@@ -191,12 +514,12 @@ private fun EntryDetailsSmallContent(
             isTabletUi = false,
             appBarPadding = appBarPadding,
             onAddToLibrary = onAddToLibrary,
+            descriptionImages = chrome.descriptionImages,
         )
         if (state.isMerged) mergeSourceChipsItem(state, behavior)
         state.capabilities.mangaRelatedCarousel?.let { relatedCarouselItem(it, nav, topDivider = true) }
         state.capabilities.mangaPagePreviews?.let { pagePreviewsItem(it, nav) }
-        chapterHeaderItem(state, nav)
-        entryChapterItems(state, behavior, chapterSwipeStartAction, chapterSwipeEndAction, nav.onOpenChapter)
+        chapterRegion(state, behavior, nav, extras, chapterSwipeStartAction, chapterSwipeEndAction)
     }
 }
 
@@ -207,10 +530,13 @@ private fun EntryDetailsLargeContent(
     snackbarHostState: SnackbarHostState,
     chapterSwipeStartAction: LibraryPreferences.ChapterSwipeAction,
     chapterSwipeEndAction: LibraryPreferences.ChapterSwipeAction,
-    nav: EntryDetailsNavigation,
+    nav: DetailsPageNav,
     web: EntryWebActions,
+    extras: ChapterListExtras,
+    chrome: DetailsChrome,
 ) {
     val chapterListState = rememberLazyListState()
+    val jumps = rememberEntryChapterJumps(chapterListState, state)
     val haptic = LocalHapticFeedback.current
     val onAddToLibrary = {
         behavior.toggleFavorite()
@@ -226,9 +552,11 @@ private fun EntryDetailsLargeContent(
         onCancelSelection = behavior::clearSelection,
         fabVisible = state.resumeChapterId != null && !state.selectionMode,
         fabIsResume = state.hasStarted,
-        onFabClick = { state.resumeChapterId?.let(nav.onOpenChapter) },
+        onFabClick = { state.resumeChapterId?.let(nav.perType.onOpenChapter) },
+        fabSide = chrome.readButtonSide,
+        onFabDocked = chrome.onReadButtonDocked,
         topBar = { modifier ->
-            EntryDetailsToolbar(state, behavior, nav, web, { 1f }, { 1f }, modifier)
+            EntryDetailsToolbar(state, behavior, nav, web, extras, jumps, chrome, { 1f }, { 1f }, modifier)
         },
         bottomActionMenu = { modifier -> EntryDetailsSelectionBar(state, behavior, fillFraction = 0.5f, modifier) },
         startContent = { appBarPadding ->
@@ -240,15 +568,38 @@ private fun EntryDetailsLargeContent(
                 isTabletUi = true,
                 appBarPadding = appBarPadding,
                 onAddToLibrary = onAddToLibrary,
+                descriptionImages = chrome.descriptionImages,
             )
             state.capabilities.mangaPagePreviews?.let { pagePreviewsItem(it, nav) }
         },
         endContent = {
             state.capabilities.mangaRelatedCarousel?.let { relatedCarouselItem(it, nav, topDivider = false) }
             if (state.isMerged) mergeSourceChipsItem(state, behavior)
-            chapterHeaderItem(state, nav)
-            entryChapterItems(state, behavior, chapterSwipeStartAction, chapterSwipeEndAction, nav.onOpenChapter)
+            chapterRegion(state, behavior, nav, extras, chapterSwipeStartAction, chapterSwipeEndAction)
         },
+    )
+}
+
+/** The chapter region both layouts end on, the chapter rows last, which the header count relies on. */
+private fun LazyListScope.chapterRegion(
+    state: EntryDetailsScreenState.Loaded,
+    behavior: EntryDetailsBehavior,
+    nav: DetailsPageNav,
+    extras: ChapterListExtras,
+    chapterSwipeStartAction: LibraryPreferences.ChapterSwipeAction,
+    chapterSwipeEndAction: LibraryPreferences.ChapterSwipeAction,
+) {
+    chapterHeaderItem(state, nav, extras.copies)
+    unfinishedOrganizeItem(extras.onForgetUnfinished)
+    missingVolumesItem(extras.missing, extras.onFixMissing)
+    extras.volumes?.let { volumeChipsItem(it, extras.onPickVolume, extras.onKeepDuplicates, extras.onDeleteVolumes) }
+    entryChapterItems(
+        state,
+        behavior,
+        chapterSwipeStartAction,
+        chapterSwipeEndAction,
+        nav.perType.onOpenChapter,
+        extras.shownChapterIds,
     )
 }
 
@@ -256,48 +607,88 @@ private fun EntryDetailsLargeContent(
 private fun EntryDetailsToolbar(
     state: EntryDetailsScreenState.Loaded,
     behavior: EntryDetailsBehavior,
-    nav: EntryDetailsNavigation,
+    nav: DetailsPageNav,
     web: EntryWebActions,
+    extras: ChapterListExtras,
+    jumps: ChapterJumps,
+    chrome: DetailsChrome,
     titleAlphaProvider: () -> Float,
     backgroundAlphaProvider: () -> Float,
     modifier: Modifier = Modifier,
 ) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val openOwnFolder: () -> Unit = {
+        scope.launch { openDownloadFolder(context, behavior.volumePicking.seriesFolder(state.entryId)) }
+    }
     EntryToolbar(
         modifier = modifier,
         title = state.details.header.title,
         hasFilters = state.hasActiveFilter,
-        navigateUp = nav.navigateUp,
-        onClickFilter = nav.onOpenFilterSettings,
+        navigateUp = nav.perType.navigateUp,
+        onClickFilter = nav.perType.onOpenFilterSettings,
         onClickRefresh = behavior::refresh,
         onClickEditCategory = { behavior.showChangeCategoryDialog() }.takeIf { state.details.favorite },
         onClickEditInfo = { behavior.showEditInfoDialog() }.takeIf { state.details.favorite },
-        onClickEditNotes = nav.onEditNotes,
+        onClickEditNotes = nav.shared.onEditNotes,
         onClickShare = web.share,
         onClickManageSources = { behavior.showManageSourcesDialog() }.takeIf { state.isMerged },
-        onClickMigrate = nav.onMigrate,
+        onClickMigrate = nav.shared.onMigrate,
         onClickDownload = if (state.chaptersDownloadable) behavior::runDownloadAction else null,
-        onClickMetadataViewer = nav.onMetadataViewer,
-        onClickSourceSettings = nav.onOpenSourceSettings,
+        onClickMetadataViewer = nav.perType.onMetadataViewer,
+        onClickSourceSettings = nav.perType.onOpenSourceSettings,
         // Hidden with nothing to clear, and on a source whose downloads are the series itself.
         onClickClearDownloads = { behavior.showClearDownloadsDialog() }.takeIf {
             state.chaptersDownloadable && state.hasViewedDownloads
         },
-        onClickOpenFolder = nav.onOpenFolder?.takeIf { state.chaptersDownloadable && state.hasViewedDownloads },
-        onClickSearchText = nav.onSearchText?.takeIf { state.chaptersDownloadable && state.hasViewedDownloads },
-        onClickWordCount = nav.onWordCount?.takeIf { state.chaptersDownloadable && state.hasViewedDownloads },
-        onClickRecommendations = nav.onRecommendations,
+        // A local series opens its own folder, where its files are; others their downloads, once there are some.
+        onClickOpenFolder = if (state.ownsLocalFiles) {
+            openOwnFolder
+        } else {
+            nav.perType.onOpenFolder?.takeIf { state.chaptersDownloadable && state.hasViewedDownloads }
+        },
+        // A local series' text is on the device without being a download, so it searches and counts too.
+        onClickSearchText = nav.perType.onSearchText?.takeIf { state.textOnDevice },
+        onClickWordCount = nav.perType.onWordCount?.takeIf { state.textOnDevice },
+        onClickExport = nav.perType.onExport,
+        onClickReorderVolumes = extras.onReorderVolumes,
+        onClickAddVolumes = extras.onAddVolumes,
+        onClickSplitOut = extras.onSplitOut,
+        onClickRenameFiles = extras.onRenameFiles,
+        onClickDeleteVolumes = extras.onDeleteVolumes?.let { delete -> { delete(null) } },
+        onClickRecommendations = nav.perType.onRecommendations,
+        jumps = jumps,
+        jumpsInMenu = chrome.jumpsInMenu,
         onHide = behavior::hideSelected,
         onUnhide = behavior::unhideSelected,
         onToggleShowHidden = behavior::toggleShowHidden,
         onCorrectChapterNumber = { behavior.showChapterNumberDialog() }.takeIf { state.selection.size == 1 },
+        copyMarkActions = state.chapters.duplicates?.let { duplicates ->
+            val selectedMarks = state.selection.map { duplicates.marks[it] }
+
+            // Each closes the selection afterwards, as Hide does.
+            fun onSelected(write: DuplicateMarking.(List<MarkableChapter>) -> Unit) = {
+                behavior.duplicateMarking.write(behavior.selectedMarkable())
+                behavior.clearSelection()
+            }
+            CopyMarkActions(
+                neverSkip = onSelected(DuplicateMarking::neverSkip).takeIf {
+                    selectedMarks.any { it != CopyMark.NeverSkip }
+                },
+                markAsCopies = onSelected(DuplicateMarking::markAsCopies).takeIf {
+                    state.selection.size > 1 && behavior.duplicateMarking.canMarkAsCopies(behavior.selectedMarkable())
+                },
+                clear = onSelected(DuplicateMarking::clear).takeIf { selectedMarks.any { it != null } },
+            )
+        },
         showHidden = state.chapters.showHidden,
         hasHiddenChapters = state.chapters.hasHiddenChapters,
         allHiddenSelected = state.chapters.showHidden && state.selection.isNotEmpty() &&
             state.selection.all { it in state.chapters.hiddenChapterIds },
         actionModeCounter = state.selection.size,
         onCancelActionMode = behavior::clearSelection,
-        onSelectAll = behavior::selectAll,
-        onInvertSelection = behavior::invertSelection,
+        onSelectAll = { behavior.selectAll(extras.shownChapterIds()) },
+        onInvertSelection = { behavior.invertSelection(extras.shownChapterIds()) },
         titleAlphaProvider = titleAlphaProvider,
         backgroundAlphaProvider = backgroundAlphaProvider,
     )
@@ -330,38 +721,41 @@ private fun EntryDetailsSelectionBar(
 private fun LazyListScope.entryInfoBlock(
     state: EntryDetailsScreenState.Loaded,
     behavior: EntryDetailsBehavior,
-    nav: EntryDetailsNavigation,
+    nav: DetailsPageNav,
     web: EntryWebActions,
     isTabletUi: Boolean,
     appBarPadding: Dp,
     onAddToLibrary: () -> Unit,
+    descriptionImages: Boolean,
 ) {
     val gallery = state.capabilities.mangaGallery
     entryInfoItems(
         isTabletUi = isTabletUi,
         appBarPadding = appBarPadding,
         state = state.details,
-        onCoverClick = behavior::showCoverDialog,
-        onGlobalSearch = nav.onGlobalSearch,
-        librarySearch = nav.onLibrarySearch,
-        onBrowseSource = nav.onBrowseSource,
+        onCoverClick = nav.onCoverClick,
+        onGlobalSearch = nav.shared.onGlobalSearch,
+        librarySearch = nav.shared.onLibrarySearch,
+        onBrowseSource = nav.shared.onBrowseSource,
         onAddToLibraryClicked = onAddToLibrary,
-        onTrackingClicked = trackingTap(state, behavior, nav),
+        onTrackingClicked = trackingTap(state, nav),
         onEditCategory = { behavior.showChangeCategoryDialog() }.takeIf { state.details.favorite },
-        onEditIntervalClicked = nav.onEditInterval,
+        onEditIntervalClicked = nav.perType.onEditInterval,
         onWebViewClicked = web.openWebView,
         onWebViewLongClicked = web.copyUrl,
-        onTagSearch = nav.onTagSearch,
+        onTagSearch = nav.shared.onTagSearch,
+        onFilterLibraryByTag = nav.onFilterLibraryByTag,
         onCopyTagToClipboard = web.copyTag,
-        onEditNotes = nav.onEditNotes,
+        onEditNotes = nav.shared.onEditNotes,
+        descriptionImages = descriptionImages,
         // Namespaced, grouped tag chips for the active source's gallery metadata (or its namespaced genre).
-        searchMetadataChips = gallery?.let { SearchMetadataChips(it.metadata, it.sourceId, it.rawGenre, it.tagQuery) },
+        searchMetadataChips = gallery?.chips(),
         // Per-source gallery-info card above the description, once the metadata object has loaded.
         aboveDescription = gallery?.metadata?.let { meta ->
             {
                 GalleryInfoBox(
                     metadata = meta,
-                    onMoreInfoClick = nav.onMetadataViewer,
+                    onMoreInfoClick = nav.perType.onMetadataViewer,
                     modifier = Modifier.padding(top = 8.dp),
                 )
             }
@@ -378,14 +772,14 @@ private fun LazyListScope.mergeSourceChipsItem(
             sources = state.mergeSources.map { ManageMergeSourceRow(id = it.id, sourceName = it.sourceName) },
             selectedId = state.selectedSourceId,
             onSelect = behavior::selectSource,
-            onSplitSource = { behavior.splitSources(listOf(it)) },
+            onSplitSource = { behavior.mergeActions.splitSources(listOf(it)) },
         )
     }
 }
 
 private fun LazyListScope.relatedCarouselItem(
     capability: MangaRelatedCarouselCapability,
-    nav: EntryDetailsNavigation,
+    nav: DetailsPageNav,
     topDivider: Boolean,
 ) {
     item(key = "rk-related-carousel") {
@@ -393,8 +787,8 @@ private fun LazyListScope.relatedCarouselItem(
             items = capability.items,
             loading = capability.isLoading,
             totalCount = capability.totalCount,
-            onClick = nav.onRelatedClick,
-            onSeeAll = nav.onRelatedSeeAll,
+            onClick = nav.perType.onRelatedClick,
+            onSeeAll = nav.perType.onRelatedSeeAll,
             topDivider = topDivider,
         )
     }
@@ -402,13 +796,13 @@ private fun LazyListScope.relatedCarouselItem(
 
 private fun LazyListScope.pagePreviewsItem(
     capability: MangaPagePreviewsCapability,
-    nav: EntryDetailsNavigation,
+    nav: DetailsPageNav,
 ) {
     item(key = "rk-page-previews") {
         PagePreviews(
             pagePreviewState = capability.state,
-            onOpenPage = nav.onOpenPagePreview,
-            onMorePreviewsClicked = nav.onMorePreviews,
+            onOpenPage = nav.perType.onOpenPagePreview,
+            onMorePreviewsClicked = nav.perType.onMorePreviews,
             rowCount = capability.rowCount,
         )
     }
@@ -416,7 +810,8 @@ private fun LazyListScope.pagePreviewsItem(
 
 private fun LazyListScope.chapterHeaderItem(
     state: EntryDetailsScreenState.Loaded,
-    nav: EntryDetailsNavigation,
+    nav: DetailsPageNav,
+    copies: CopiesFilter,
 ) {
     item(key = "entry-chapter-header") {
         Column {
@@ -424,8 +819,24 @@ private fun LazyListScope.chapterHeaderItem(
                 enabled = !state.selectionMode,
                 chapterCount = state.chapters.items.count { it is EntryChapterListItem.Chapter },
                 missingChapterCount = state.chapters.missingChapterCount,
-                onClick = nav.onOpenFilterSettings,
+                onClick = nav.perType.onOpenFilterSettings,
             )
+            // Only with "Show duplicate chapters the reader skips" on, so the rule's work is visible at a glance.
+            state.chapters.duplicates?.copies?.size?.takeIf { it > 0 }?.let { count ->
+                val action = MR.strings.run {
+                    if (copies.on) chapter_duplicate_show_all else chapter_duplicate_show_only
+                }
+                Text(
+                    text = stringResource(MR.strings.chapter_duplicate_copies_count, count) + " • " +
+                        stringResource(action),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = !state.selectionMode, onClick = copies.toggle)
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
             // A paged novel's page bar sits under the header, opening the page selector. The
             // count above is the current page's, so the paged scope stays visible (sort/filter are paged).
             state.capabilities.novelPageSelector?.let { page ->
@@ -433,7 +844,7 @@ private fun LazyListScope.chapterHeaderItem(
                     text = novelPageText(page.pages[page.pageIndex], page.pages.size),
                     isLoading = page.isPageLoading,
                     enabled = !state.selectionMode,
-                    onClick = { nav.onOpenPageSelector?.invoke() },
+                    onClick = { nav.perType.onOpenPageSelector?.invoke() },
                 )
             }
         }
@@ -446,6 +857,7 @@ private fun LazyListScope.entryChapterItems(
     chapterSwipeStartAction: LibraryPreferences.ChapterSwipeAction,
     chapterSwipeEndAction: LibraryPreferences.ChapterSwipeAction,
     onOpenChapter: (Long) -> Unit,
+    shownChapterIds: () -> List<Long>,
 ) {
     // The row lambdas capture these and the typed chapter below, never the whole state, so a row whose
     // own values did not change skips recomposing when another row changes.
@@ -456,13 +868,20 @@ private fun LazyListScope.entryChapterItems(
         key = { item ->
             when (item) {
                 is EntryChapterListItem.Missing -> "missing-${item.id}"
+                is EntryChapterListItem.Volume -> "volume-${item.key}"
                 is EntryChapterListItem.Chapter -> "chapter-${item.id}"
             }
         },
-        contentType = { "entry-chapter" },
+        contentType = { if (it is EntryChapterListItem.Volume) "entry-volume" else "entry-chapter" },
     ) { item ->
         when (item) {
             is EntryChapterListItem.Missing -> MissingChapterCountListItem(count = item.count)
+            is EntryChapterListItem.Volume -> VolumeHeader(
+                volume = item,
+                onSelect = { behavior.toggleChapterBlock(item.chapterIds) },
+                onMarkRead = { read -> behavior.markChaptersRead(item.chapterIds, read) },
+                coverOf = { behavior.volumePicking.cover(state.entryId.contentType, item.series, item.key) },
+            )
             is EntryChapterListItem.Chapter -> {
                 // Typed as the stable Chapter, so the lambdas compare it by value rather than by instance.
                 val chapter: EntryChapterListItem.Chapter = item
@@ -483,26 +902,27 @@ private fun LazyListScope.entryChapterItems(
                     ),
                     date = chapterRowDate(chapter.dateUpload, state.chapters.undatedChapterDate),
                     readProgress = readProgressLabel(chapter.progress),
-                    scanlator = chapter.subtitle,
+                    scanlator = duplicateSubtitle(chapter.subtitle, chapter.id, state.chapters.duplicates),
                     read = chapter.read,
                     bookmark = chapter.bookmark,
                     selected = isSelected,
                     downloadIndicatorEnabled = !selectionMode && chaptersDownloadable,
                     downloadStateProvider = { chapter.downloadState },
-                    downloadProgressProvider = when (val progress = behavior.downloadProgress) {
-                        is EntryDownloadProgress.Live -> {
-                            { progress.percentOf(chapter.id) }
-                        }
-                        EntryDownloadProgress.Unsupported -> NO_PROGRESS
+                    downloadProgressProvider = remember(behavior, chapter.id) {
+                        behavior.downloadProgress(chapter.id).asProvider()
                     },
                     chapterSwipeStartAction = chapterSwipeStartAction.whereDownloadOffered(offersDownload),
                     chapterSwipeEndAction = chapterSwipeEndAction.whereDownloadOffered(offersDownload),
                     onLongClick = {
-                        behavior.toggleSelection(chapter.id, true)
+                        behavior.toggleSelection(chapter.id, true, shownChapterIds())
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     },
                     onClick = {
-                        if (selectionMode) behavior.toggleSelection(chapter.id, false) else onOpenChapter(chapter.id)
+                        if (selectionMode) {
+                            behavior.toggleSelection(chapter.id, false, shownChapterIds())
+                        } else {
+                            onOpenChapter(chapter.id)
+                        }
                     },
                     onDownloadClick = if (chaptersDownloadable) {
                         { behavior.onChapterDownloadAction(chapter.id, it) }
@@ -519,6 +939,15 @@ private fun LazyListScope.entryChapterItems(
                 )
             }
         }
+    }
+}
+
+/** The jumps over this screen's chapter rows, toasting when the Start/Resume chapter is not among them. */
+@Composable
+private fun rememberEntryChapterJumps(listState: LazyListState, state: EntryDetailsScreenState.Loaded): ChapterJumps {
+    val context = LocalContext.current
+    return rememberChapterJumps(listState, state.chapters.items, state.resumeChapterId) {
+        context.toast(MR.strings.no_unread_chapter_in_list)
     }
 }
 
@@ -553,4 +982,18 @@ private fun NovelPageBar(
             tint = MaterialTheme.colorScheme.primary,
         )
     }
+}
+
+/** A row's subtitle with the number of copies skip-duplicate folds it into, when the list shows them. */
+@Composable
+private fun duplicateSubtitle(subtitle: String?, chapterId: Long, duplicates: DuplicateMarks?): String? {
+    val mark = when (duplicates?.marks?.get(chapterId)) {
+        CopyMark.NeverSkip -> stringResource(MR.strings.chapter_never_skip)
+        is CopyMark.Group -> stringResource(MR.strings.chapter_marked_copy)
+        null -> null
+    }
+    val copies = duplicates?.copies?.get(chapterId)?.let {
+        stringResource(MR.strings.chapter_duplicate_copies, it.size)
+    }
+    return listOfNotNull(subtitle, copies, mark).joinToString(" • ").ifEmpty { null }
 }

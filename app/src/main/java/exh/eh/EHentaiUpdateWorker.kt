@@ -2,7 +2,6 @@ package exh.eh
 
 import android.content.Context
 import android.content.pm.ServiceInfo
-import android.os.Build
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ForegroundInfo
@@ -20,6 +19,10 @@ import eu.kanade.tachiyomi.util.system.workManager
 import exh.debug.DebugToggles
 import exh.metadata.metadata.EHentaiSearchMetadata
 import exh.source.ExhPreferences
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import logcat.LogPriority
@@ -29,12 +32,17 @@ import mihon.core.metro.metroGraph
 import mihon.core.migration.Migrator
 import mihon.domain.source.interactor.UpdateMangaFromRemote
 import reikai.data.library.addNewUpdates
+import reikai.data.library.libraryUpdateGate
 import reikai.data.library.libraryUpdatePeriodicRequest
-import reikai.data.library.shouldDeferLibraryUpdate
+import reikai.data.library.visibleArrivalCount
 import reikai.data.updateerror.UpdateErrorEntry
 import reikai.data.updateerror.UpdateErrorLog
 import reikai.data.updateerror.UpdateErrorSection
 import reikai.data.updateerror.updateFailureMessage
+import reikai.domain.download.SourceContacts
+import reikai.domain.library.ContentType
+import reikai.domain.library.LibraryHiddenRepository
+import reikai.domain.manga.MangaMergeManager
 import reikai.domain.merge.ReconcileMergedChapters
 import tachiyomi.core.common.preference.getAndSet
 import tachiyomi.core.common.util.system.logcat
@@ -81,19 +89,30 @@ class EHentaiUpdateWorker(private val context: Context, workerParams: WorkerPara
 
     @Inject private lateinit var reconcileMergedChapters: ReconcileMergedChapters
 
+    @Inject private lateinit var sourceContacts: SourceContacts
+
+    @Inject private lateinit var hiddenEntries: LibraryHiddenRepository
+
+    @Inject private lateinit var mangaMergeManager: MangaMergeManager
+
     private val updateErrorLog = UpdateErrorLog(context)
 
     override suspend fun doWork(): Result {
         // A WorkManager start has no MainActivity to wait for the migrations first
         Migrator.await()
         return try {
-            if (shouldDeferLibraryUpdate(exhPreferences.exhAutoUpdateRequirements().get(), AUTO_TAG, MANUAL_TAG)) {
-                Result.retry()
-            } else {
+            libraryUpdateGate(
+                graph.reikaiLibraryPreferences.shownContent.get(),
+                exhPreferences.exhAutoUpdateRequirements().get(),
+                AUTO_TAG,
+                MANUAL_TAG,
+            ) ?: run {
                 setForegroundSafely()
                 startUpdating()
                 Result.success()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, e) { "EHentai update job failed, retrying next run" }
             Result.success() // retry again later in next periodic run
@@ -106,11 +125,7 @@ class EHentaiUpdateWorker(private val context: Context, workerParams: WorkerPara
         return ForegroundInfo(
             Notifications.ID_EHENTAI_PROGRESS,
             updateNotifier.progressNotificationBuilder.build(),
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            } else {
-                0
-            },
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
         )
     }
 
@@ -161,7 +176,8 @@ class EHentaiUpdateWorker(private val context: Context, workerParams: WorkerPara
                             updatedThisIteration + failuresThisIteration,
                             mangaMetaToUpdateThisIter.size,
                         )
-                        updateEntryAndGetChapters(manga)
+                        // Keyed as updateBySource keys it, so a download queued after waits out the delay.
+                        sourceContacts.reaching(manga.source.toString()) { updateEntryAndGetChapters(manga) }
                     } catch (e: GalleryNotUpdatedException) {
                         if (e.network) {
                             failuresThisIteration++
@@ -185,10 +201,8 @@ class EHentaiUpdateWorker(private val context: Context, workerParams: WorkerPara
                         updateHelper.findAcceptedRootAndDiscardOthers(manga.source, chapters) ?: continue
 
                     if (new.isNotEmpty() && manga.id == acceptedRoot.manga.id) {
-                        libraryPreferences.addNewUpdates(new.size)
                         updatedManga += acceptedRoot.manga to new.toTypedArray()
                     } else if (exhNew.isNotEmpty() && updatedManga.none { it.first.id == acceptedRoot.manga.id }) {
-                        libraryPreferences.addNewUpdates(exhNew.size)
                         updatedManga += acceptedRoot.manga to exhNew.toTypedArray()
                     }
 
@@ -209,6 +223,15 @@ class EHentaiUpdateWorker(private val context: Context, workerParams: WorkerPara
             )
 
             updateNotifier.cancelProgressNotification()
+            // A stopped run has written its chapters already, and they are never new again, so it still counts.
+            val count = withContext(NonCancellable) {
+                visibleArrivalCount(
+                    updatedManga.map { (manga, new) -> manga.id to new.size },
+                    hidden = { hiddenEntries.subscribe(ContentType.MANGA).first() },
+                    memberships = { mangaMergeManager.memberships() },
+                )
+            }
+            if (count > 0) libraryPreferences.addNewUpdates(count)
             if (updatedManga.isNotEmpty()) {
                 libraryUpdateNotifier.showUpdateNotifications(updatedManga)
             }
@@ -245,11 +268,15 @@ class EHentaiUpdateWorker(private val context: Context, workerParams: WorkerPara
                 }
                 throw GalleryNotUpdatedException(false, t)
             }
-            throw GalleryNotUpdatedException(true, t)
+            throw networkFailure(t)
         }
     }
 
     companion object {
+        /** What a failed gallery raises. Cancellation stays itself: a stopped run is not a failed gallery. */
+        internal fun networkFailure(t: Throwable): Throwable =
+            t as? CancellationException ?: GalleryNotUpdatedException(true, t)
+
         private const val MAX_UPDATE_FAILURES = 5
         private const val UPDATES_PER_ITERATION = 50
 

@@ -8,6 +8,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalConfiguration
 import dev.icerock.moko.resources.StringResource
 import eu.kanade.domain.manga.model.readerOrientation
 import eu.kanade.domain.manga.model.readingMode
@@ -18,6 +19,7 @@ import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
 import eu.kanade.tachiyomi.ui.reader.viewer.webgpu.WebGpuViewer
 import eu.kanade.tachiyomi.ui.reader.viewer.webgpu.WebGpuViewerContinuous
 import eu.kanade.tachiyomi.ui.reader.viewer.webtoon.WebtoonViewer
+import kotlinx.coroutines.flow.StateFlow
 import reikai.presentation.reader.ReaderFlash
 import reikai.presentation.reader.navigation.MangaTapLayouts
 import reikai.presentation.reader.navigation.setTapLayout
@@ -52,19 +54,35 @@ private fun Viewer?.running(): RunningViewer = when (this) {
     else -> RunningViewer.Pager
 }
 
+/**
+ * Upstream's sheet rule for dual pages (WebGpuViewerSettings), read from observed state so the rows
+ * follow the Dual page view chip and a rotation. The viewer's own isDualPageMode reads neither.
+ */
+@Composable
+private fun isWebGpuDualPage(webGpu: WebGpuViewer, preferences: ReaderPreferences): Boolean {
+    val dualPageView by preferences.dualPageView.collectAsState()
+    val configuration = LocalConfiguration.current
+    return sheetDualPageRowsShown(
+        !webGpu.isContinuous,
+        dualPageView,
+        configuration.screenWidthDp,
+        configuration.screenHeightDp,
+    )
+}
+
 private val readerThemes = listOf(
-    MR.strings.black_background to 1,
-    MR.strings.gray_background to 2,
-    MR.strings.white_background to 0,
-    MR.strings.automatic_background to 3,
+    MR.strings.black_background to ReaderPreferences.ReaderTheme.BLACK.value,
+    MR.strings.gray_background to ReaderPreferences.ReaderTheme.GRAY.value,
+    MR.strings.white_background to ReaderPreferences.ReaderTheme.WHITE.value,
+    MR.strings.automatic_background to ReaderPreferences.ReaderTheme.AUTOMATIC.value,
 )
 
 /** This series' reading mode and rotation, then how the running viewer lays a page out. */
 @Composable
-internal fun ColumnScope.MangaReadingPage(viewModel: ReaderSettingsViewModel) {
+internal fun ColumnScope.MangaReadingPage(viewModel: ReaderSettingsViewModel, viewerFlow: StateFlow<Viewer?>) {
     val preferences = viewModel.preferences
     val manga by viewModel.mangaFlow.collectAsState()
-    val viewer by viewModel.viewerFlow.collectAsState()
+    val viewer by viewerFlow.collectAsState()
 
     HeadingItem(MR.strings.pref_category_for_this_series)
     val readingMode = remember(manga) { ReadingMode.fromPreference(manga?.readingMode?.toInt()) }
@@ -72,17 +90,17 @@ internal fun ColumnScope.MangaReadingPage(viewModel: ReaderSettingsViewModel) {
         ReadingMode.entries.map {
             FilterChip(
                 selected = it == readingMode,
-                onClick = { viewModel.onChangeReadingMode(it) },
+                onClick = { viewModel.setReadingMode(it) },
                 label = { Text(stringResource(it.stringRes)) },
             )
         }
     }
-    EntryRotationRow(manga?.readerOrientation?.toInt(), viewModel.onChangeOrientation)
+    EntryRotationRow(manga?.readerOrientation?.toInt(), viewModel::setOrientation)
 
     when (val running = viewer.running()) {
         RunningViewer.Pager -> {
             HeadingItem(MR.strings.pager_viewer)
-            ImageScaleTypeRow(preferences, ReaderPreferences.ImageScaleType)
+            ImageScaleTypeRow(preferences)
             ZoomStartRow(preferences)
             CheckboxItem(label = stringResource(MR.strings.pref_crop_borders), pref = preferences.cropBorders)
             CheckboxItem(label = stringResource(MR.strings.pref_landscape_zoom), pref = preferences.landscapeZoom)
@@ -114,30 +132,24 @@ internal fun ColumnScope.MangaReadingPage(viewModel: ReaderSettingsViewModel) {
             )
         }
         is RunningViewer.WebGpu -> {
-            HeadingItem(MR.strings.webgpu_viewer)
+            HeadingItem(MR.strings.pref_category_high_quality_renderer)
             val webGpu = running.viewer
-            if (!webGpu.isContinuous && !webGpu.isVertical) {
-                val dualPageView by preferences.dualPageView.collectAsState()
-                SettingsChipRow(MR.strings.pref_dual_page_view) {
-                    ReaderPreferences.DualPageView.entries.map {
-                        FilterChip(
-                            selected = it == dualPageView,
-                            onClick = { preferences.dualPageView.set(it) },
-                            label = { Text(stringResource(it.titleRes)) },
-                        )
-                    }
-                }
-            }
+            if (!webGpu.isContinuous) DualPageViewRows(preferences.dualPageView, preferences.spreadGap)
             if (webGpu.isContinuous) {
                 val numberFormat = remember { NumberFormat.getPercentInstance() }
                 val continuousMinWidth by preferences.continuousMinWidth.collectAsState()
                 SliderItem(
                     value = continuousMinWidth,
-                    valueRange = 1..100,
+                    valueRange = ReaderPreferences.CONTINUOUS_MIN_WIDTH_MIN..100,
                     label = stringResource(MR.strings.pref_continuous_minwidth),
                     valueString = numberFormat.format(continuousMinWidth / 100f),
                     onChange = { preferences.continuousMinWidth.set(it) },
                     pillColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                )
+                // The long strip crops by cropBordersWebtoon; upstream's row binds cropBorders, which it ignores.
+                CheckboxItem(
+                    label = stringResource(MR.strings.pref_crop_borders),
+                    pref = preferences.cropBordersWebtoon,
                 )
                 // Upstream offers the gap on Continuous vertical only, and useGap is how the viewer carries
                 // that distinction, since one class serves it and long strip both.
@@ -152,11 +164,31 @@ internal fun ColumnScope.MangaReadingPage(viewModel: ReaderSettingsViewModel) {
                         pillColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                     )
                 }
-            } else if (!webGpu.isDualPageMode()) {
-                ImageScaleTypeRow(preferences, ReaderPreferences.ImageScaleTypeWebGpuViewer)
+                DualPageRows(
+                    split = preferences.dualPageSplitWebtoon,
+                    invert = preferences.dualPageInvertWebtoon,
+                    rotate = preferences.dualPageRotateToFitWebtoon,
+                    rotateInvert = preferences.dualPageRotateToFitInvertWebtoon,
+                )
+            } else if (!isWebGpuDualPage(webGpu, preferences)) {
+                ImageScaleTypeRow(preferences)
                 ZoomStartRow(preferences)
                 CheckboxItem(label = stringResource(MR.strings.pref_crop_borders), pref = preferences.cropBorders)
+                val cropBorders by preferences.cropBorders.collectAsState()
+                if (cropBorders) {
+                    CheckboxItem(
+                        label = stringResource(MR.strings.pref_crop_instead_of_zoom),
+                        pref = preferences.cropInsteadOfZoom,
+                    )
+                }
                 CheckboxItem(label = stringResource(MR.strings.pref_landscape_zoom), pref = preferences.landscapeZoom)
+                // A spread shows a wide page whole, so these apply only to single pages.
+                DualPageRows(
+                    split = preferences.dualPageSplitPaged,
+                    invert = preferences.dualPageInvertPaged,
+                    rotate = preferences.dualPageRotateToFit,
+                    rotateInvert = preferences.dualPageRotateToFitInvert,
+                )
             }
         }
     }
@@ -164,9 +196,9 @@ internal fun ColumnScope.MangaReadingPage(viewModel: ReaderSettingsViewModel) {
 
 /** The page around the image: background, what the screen shows, transitions, and the E-Ink flash. */
 @Composable
-internal fun ColumnScope.MangaAppearancePage(viewModel: ReaderSettingsViewModel) {
+internal fun ColumnScope.MangaAppearancePage(viewModel: ReaderSettingsViewModel, viewerFlow: StateFlow<Viewer?>) {
     val preferences = viewModel.preferences
-    val viewer by viewModel.viewerFlow.collectAsState()
+    val viewer by viewerFlow.collectAsState()
 
     val readerTheme by preferences.readerTheme.collectAsState()
     SettingsChipRow(MR.strings.pref_reader_theme) {
@@ -182,6 +214,9 @@ internal fun ColumnScope.MangaAppearancePage(viewModel: ReaderSettingsViewModel)
         titleFormat = preferences.chapterTitleFormat,
         progressLabel = MR.strings.pref_show_page_number,
         showProgress = preferences.showPageNumber,
+        showTimeLeft = preferences.showTimeLeft,
+        progressSize = preferences.progressSize,
+        progressBacked = preferences.progressBacked,
         fullscreen = preferences.fullscreen,
         drawUnderCutout = preferences.drawUnderCutout,
         keepScreenOn = preferences.keepScreenOn,
@@ -190,16 +225,16 @@ internal fun ColumnScope.MangaAppearancePage(viewModel: ReaderSettingsViewModel)
         label = stringResource(MR.strings.pref_always_show_chapter_transition),
         pref = preferences.alwaysShowChapterTransition,
     )
-    CheckboxItem(label = stringResource(MR.strings.pref_page_transitions), pref = preferences.pageTransitions)
-
     val webGpu = (viewer.running() as? RunningViewer.WebGpu)?.viewer
-    if (webGpu != null && webGpu.isDualPageMode()) {
+    // The high quality renderer turns a page by Transition animation, which has None.
+    if (webGpu == null || webGpu.isContinuous) {
+        CheckboxItem(label = stringResource(MR.strings.pref_page_transitions), pref = preferences.pageTransitions)
+    }
+    if (webGpu != null && isWebGpuDualPage(webGpu, preferences)) {
         TransitionAnimationRow(
             titleRes = MR.strings.pref_transition_animation_dual,
             pref = preferences.transitionAnimationDual,
-            entries = ReaderPreferences.TransitionAnimation.entries -
-                ReaderPreferences.TransitionAnimation.FLIP_LEFT -
-                ReaderPreferences.TransitionAnimation.FLIP_RIGHT,
+            entries = dualPageTransitionAnimations,
         )
         CutoutModeRow(MR.strings.pref_cutout_mode_dual, preferences.cutoutModeDual)
     } else if (webGpu != null && !webGpu.isContinuous) {
@@ -216,17 +251,16 @@ internal fun ColumnScope.MangaAppearancePage(viewModel: ReaderSettingsViewModel)
 
 /** How a touch drives the reader: tap zones, panning and zoom gestures, the long tap, the rail. */
 @Composable
-internal fun ColumnScope.MangaControlsPage(viewModel: ReaderSettingsViewModel) {
+internal fun ColumnScope.MangaControlsPage(viewModel: ReaderSettingsViewModel, viewerFlow: StateFlow<Viewer?>) {
     val preferences = viewModel.preferences
-    val viewer by viewModel.viewerFlow.collectAsState()
+    val viewer by viewerFlow.collectAsState()
 
+    MangaTapZones(preferences, pager = !viewModel.usesWebtoonZones)
     when (val running = viewer.running()) {
         RunningViewer.Pager -> {
-            MangaTapZones(preferences, pager = true)
             CheckboxItem(label = stringResource(MR.strings.pref_navigate_pan), pref = preferences.navigateToPan)
         }
         RunningViewer.Webtoon -> {
-            MangaTapZones(preferences, pager = false)
             CheckboxItem(
                 label = stringResource(MR.strings.pref_double_tap_zoom),
                 pref = preferences.webtoonDoubleTapZoomEnabled,
@@ -237,24 +271,30 @@ internal fun ColumnScope.MangaControlsPage(viewModel: ReaderSettingsViewModel) {
             )
         }
         is RunningViewer.WebGpu -> {
-            MangaTapZones(preferences, pager = true)
             val webGpu = running.viewer
             if (webGpu.isContinuous) {
                 CheckboxItem(
                     label = stringResource(MR.strings.pref_webtoon_disable_zoom_out),
                     pref = preferences.webtoonDisableZoomOut,
                 )
-            } else if (!webGpu.isDualPageMode()) {
+            } else if (!isWebGpuDualPage(webGpu, preferences)) {
                 CheckboxItem(label = stringResource(MR.strings.pref_navigate_pan), pref = preferences.navigateToPan)
-                CheckboxItem(
-                    label = stringResource(MR.strings.pref_disable_double_tap_gestures),
-                    pref = preferences.disableDoubleTapGestures,
-                )
             }
+            CheckboxItem(
+                label = stringResource(MR.strings.pref_disable_double_tap_gestures),
+                pref = preferences.disableDoubleTapGestures,
+            )
         }
     }
 
     CheckboxItem(label = stringResource(MR.strings.pref_read_with_long_tap), pref = preferences.readWithLongTap)
+    VolumeKeyRows(
+        enabled = preferences.readWithVolumeKeys,
+        inverted = preferences.readWithVolumeKeysInverted,
+        scrollFraction = preferences.readWithVolumeKeysScrollAmount,
+        // Only the classic long strip reads the distance; the high quality one scrolls half a screen.
+        scrolls = viewer.running() == RunningViewer.Webtoon,
+    )
 
     val showNavigator by preferences.showNavigator.collectAsState()
     CheckboxItem(label = stringResource(MR.strings.pref_show_progress_navigator), pref = preferences.showNavigator)
@@ -278,17 +318,14 @@ internal fun ColumnScope.MangaControlsPage(viewModel: ReaderSettingsViewModel) {
 }
 
 @Composable
-private fun ColumnScope.ImageScaleTypeRow(
-    preferences: ReaderPreferences,
-    offered: List<StringResource>,
-) {
+private fun ColumnScope.ImageScaleTypeRow(preferences: ReaderPreferences) {
     val imageScaleType by preferences.imageScaleType.collectAsState()
     SettingsChipRow(MR.strings.pref_image_scale_type) {
-        offered.forEach {
+        ReaderPreferences.ImageScaleType.mapIndexed { index, label ->
             FilterChip(
-                selected = ReaderPreferences.ImageScaleType[imageScaleType - 1] == it,
-                onClick = { preferences.imageScaleType.set(ReaderPreferences.ImageScaleType.indexOf(it) + 1) },
-                label = { Text(stringResource(it)) },
+                selected = imageScaleType == index + 1,
+                onClick = { preferences.imageScaleType.set(index + 1) },
+                label = { Text(stringResource(label)) },
             )
         }
     }
@@ -370,8 +407,6 @@ private fun ColumnScope.MangaTapZones(preferences: ReaderPreferences, pager: Boo
         selected = selected,
         onSelect = { preferences.setTapLayout(pager, it) },
         layout = MangaTapLayouts.layout(selected),
-        offersInvert = MangaTapLayouts.offersInvert(selected),
-        invertModes = MangaTapLayouts.invertModes(selected),
         invert = invert,
         onInvert = invertPref::set,
         bottomZoneHeight = preferences.tapBottomZoneHeight,

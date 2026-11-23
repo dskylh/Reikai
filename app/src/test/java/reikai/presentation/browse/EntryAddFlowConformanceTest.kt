@@ -1,8 +1,9 @@
 package reikai.presentation.browse
 
-import eu.kanade.tachiyomi.ui.manga.MangaScreen
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.joinAll
@@ -10,12 +11,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import mihon.core.navigation.MangaRoute
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.MethodSource
 import reikai.novel.host.NovelItem
 import reikai.presentation.novel.browse.NovelAddFlow
-import reikai.presentation.novel.details.NovelScreen
+import reikai.presentation.novel.details.NovelRoute
 import tachiyomi.domain.manga.model.Manga
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.time.Instant
 
@@ -159,6 +162,42 @@ class EntryAddFlowConformanceTest {
         failures.get() shouldBe 0
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("probes")
+    fun `a step that throws says the add failed rather than crashing`(probe: AddFlowProbe) = runTest {
+        val failures = probe.watchFailures(this)
+        probe.storeEntry(inLibrary = false)
+        probe.failFiling()
+        probe.pressEntry()
+
+        probe.act { flow.confirmCategories(listOf(PICKED_CATEGORY)) }
+
+        (failures.get() to probe.crashes.get()) shouldBe (1 to 0)
+    }
+
+    // The step's writes run on the app scope, so leaving the screen while the picker's confirm is
+    // still filing does not cut the add off halfway.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("probes")
+    fun `a confirm still files once the screen has closed`(probe: AddFlowProbe) = runTest {
+        probe.storeEntry(inLibrary = false)
+        probe.pressEntry()
+        val held = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        probe.holdFiling {
+            held.complete(Unit)
+            release.await()
+        }
+
+        probe.flow.confirmCategories(listOf(PICKED_CATEGORY))
+        held.await()
+        probe.closeScreen()
+        release.complete(Unit)
+        probe.awaitAppScope()
+
+        probe.entryCategories() shouldBe listOf(PICKED_CATEGORY)
+    }
+
     companion object {
         const val PICKED_CATEGORY = 3L
         const val DUPLICATE_GROUP = 70L
@@ -176,7 +215,18 @@ class EntryAddFlowConformanceTest {
  */
 abstract class AddFlowProbe {
     private val job = SupervisorJob()
-    protected val scope = CoroutineScope(job)
+
+    /** Throws that escaped the flow to its scope's handler, which in the app crashes a debug build. */
+    val crashes = AtomicInteger()
+    protected val scope = CoroutineScope(job + CoroutineExceptionHandler { _, _ -> crashes.incrementAndGet() })
+
+    // Apart from the screen's, so a case can close the screen and still see what the app scope finishes.
+    private val appJob = SupervisorJob()
+    protected val appScope = CoroutineScope(appJob + CoroutineExceptionHandler { _, _ -> crashes.incrementAndGet() })
+
+    fun closeScreen() = job.cancel()
+
+    suspend fun awaitAppScope() = appJob.children.toList().joinAll()
 
     abstract val flow: EntryAddFlow<*>
 
@@ -185,6 +235,12 @@ abstract class AddFlowProbe {
 
     /** The database refuses the entry's favorite write, as a failed update does. */
     abstract fun refuseFavoriteWrites()
+
+    /** The entry's category write throws, as a database or file failure does. */
+    abstract fun failFiling()
+
+    /** Runs [hold] just before the entry's category write. */
+    abstract fun holdFiling(hold: suspend () -> Unit)
 
     /** Stores a library entry the duplicate lookup lists, answering its id. */
     abstract fun storeDuplicate(): Long
@@ -229,7 +285,7 @@ class MangaAddFlowProbe : AddFlowProbe() {
         userCategories = listOf(libraryCategory(EntryAddFlowConformanceTest.PICKED_CATEGORY)),
         mergeManager = fakeGrouping(mapOf(DUPLICATE to EntryAddFlowConformanceTest.DUPLICATE_GROUP), suggest = true),
     )
-    override val flow = MangaAddFlow(library.adder, scope, scope)
+    override val flow = MangaAddFlow(library.adder, scope, appScope)
 
     override fun toString() = "manga"
 
@@ -248,6 +304,14 @@ class MangaAddFlowProbe : AddFlowProbe() {
         library.refusedFavoriteWrites += ENTRY
     }
 
+    override fun failFiling() {
+        library.beforeFiling = { throw IOException("database gone") }
+    }
+
+    override fun holdFiling(hold: suspend () -> Unit) {
+        library.beforeFiling = hold
+    }
+
     override fun storeDuplicate(): Long {
         library.insert(
             library.put(DUPLICATE, favorite = true).copy(title = EntryAddFlowConformanceTest.DUPLICATE_TITLE),
@@ -264,7 +328,7 @@ class MangaAddFlowProbe : AddFlowProbe() {
     override fun entryId() = ENTRY
     override fun entryCategories() = library.filed[ENTRY]
 
-    override fun openedDuplicate(duplicateId: Long) = (flow.duplicateScreen(duplicateId) as? MangaScreen)?.mangaId
+    override fun openedDuplicate(duplicateId: Long) = (flow.duplicateScreen(duplicateId) as? MangaRoute)?.mangaId
     override val expectedDuplicate: Any = DUPLICATE
 
     private companion object {
@@ -279,7 +343,7 @@ class NovelAddFlowProbe : AddFlowProbe() {
         userCategories = listOf(libraryCategory(EntryAddFlowConformanceTest.PICKED_CATEGORY)),
         mergeManager = fakeGrouping(mapOf(DUPLICATE to EntryAddFlowConformanceTest.DUPLICATE_GROUP), suggest = true),
     )
-    override val flow = NovelAddFlow(library.adder, scope, scope)
+    override val flow = NovelAddFlow(library.adder, scope, appScope)
 
     override fun toString() = "novel"
 
@@ -298,6 +362,14 @@ class NovelAddFlowProbe : AddFlowProbe() {
 
     override fun refuseFavoriteWrites() {
         library.refusedFavoriteWrites += ENTRY
+    }
+
+    override fun failFiling() {
+        library.beforeFiling = { throw IOException("database gone") }
+    }
+
+    override fun holdFiling(hold: suspend () -> Unit) {
+        library.beforeFiling = hold
     }
 
     override fun storeDuplicate(): Long {
@@ -321,8 +393,8 @@ class NovelAddFlowProbe : AddFlowProbe() {
     override fun entryId() = stored(entry)!!.id
     override fun entryCategories() = library.filed[entryId()]
 
-    override fun openedDuplicate(duplicateId: Long) = (flow.duplicateScreen(duplicateId) as? NovelScreen)?.novelUrl
-    override val expectedDuplicate: Any = DUPLICATE_PATH
+    override fun openedDuplicate(duplicateId: Long) = (flow.duplicateScreen(duplicateId) as? NovelRoute)?.novelId
+    override val expectedDuplicate: Any = DUPLICATE
 
     private companion object {
         const val ENTRY = 1L

@@ -5,22 +5,29 @@ import eu.kanade.tachiyomi.network.HttpException
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.mockk
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import logcat.LogPriority
+import logcat.LogcatLogger
 import okhttp3.Cookie
 import okhttp3.CookieJar
 import okhttp3.HttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.jupiter.api.Test
+import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.util.Base64
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Plugins hand the host a JSON `FetchInit`. When strict decoding fails (a field has a shape the
- * serializer rejects), the bridge falls back to picking out the fields it understands rather than
- * aborting the whole fetch. These pin that lenient fallback.
+ * Plugins hand the host a JSON `FetchInit`, read field by field so a field with a shape the
+ * serializer rejects drops alone rather than aborting the whole fetch; and the fetch itself.
  */
 class LnHostBridgeTest {
 
@@ -43,6 +50,86 @@ class LnHostBridgeTest {
         val opts = bridge.parseFetchOpts("""{"method":"POST","headers":["bad"],"body":"data"}""")
 
         Triple(opts.method, opts.headers, opts.body) shouldBe Triple("POST", null, "data")
+    }
+
+    // A null header failed the strict decode, and the fallback sent the FormData post with no body.
+    @Test
+    fun `a null header leaves a multipart body in place`() {
+        val opts = bridge.parseFetchOpts("""{"method":"POST","headers":{"X-A":null},"multipart":[["k","v"]]}""")
+
+        opts.multipart shouldBe listOf(listOf("k", "v"))
+    }
+
+    @Test
+    fun `a null header leaves a binary body in place`() {
+        val opts = bridge.parseFetchOpts("""{"headers":{"X-A":null},"bodyBase64":"AAE=","binary":true}""")
+
+        (opts.bodyBase64 to opts.binary) shouldBe ("AAE=" to true)
+    }
+
+    // A GBK site declares gb2312, which cannot decode the rarer characters its pages carry.
+    @Test
+    fun `the encoding a plugin names decodes the body over the declared charset`() {
+        val gbk = "镕喆".toByteArray(charset("GBK"))
+        val bridge = LnHostBridge(
+            preferenceStore = mockk(relaxed = true),
+            client = OkHttpClient.Builder().addInterceptor { chain ->
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("")
+                    .body(gbk.toResponseBody("text/html; charset=gb2312".toMediaType())).build()
+            }.build(),
+        ) { "agent" }
+
+        val response = bridge.runFetch("https://example.org/c", """{"encoding":"gbk"}""") {}
+
+        LnPluginHost.JSON.parseToJsonElement(response).jsonObject["body"]?.jsonPrimitive?.content shouldBe "镕喆"
+    }
+
+    // WuxiaWorld reads its gRPC-web reply through arrayBuffer(), and UTF-8 text cannot carry 0x92.
+    @Test
+    fun `a binary response reaches the plugin as its bytes`() {
+        val bytes = byteArrayOf(0, 0, 0, 0, 2, 0x92.toByte(), 0x01)
+
+        val response = answeringWith(bytes, "application/grpc-web+proto").runFetch("https://example.org/rpc", "{}") {}
+
+        val bodyBase64 = LnPluginHost.JSON.parseToJsonElement(
+            response,
+        ).jsonObject["bodyBase64"]?.jsonPrimitive?.contentOrNull
+        bodyBase64?.let { Base64.getDecoder().decode(it).toList() } shouldBe bytes.toList()
+    }
+
+    // The parked worry was a mislabelled GBK page garbled by guessing; a text type keeps its text path.
+    @Test
+    fun `a text response carries its text and no bytes`() {
+        val response = answeringWith("<p>é</p>".toByteArray(), "text/html; charset=utf-8")
+            .runFetch("https://example.org/c", "{}") {}
+
+        val body = LnPluginHost.JSON.parseToJsonElement(response).jsonObject
+        (body["body"]?.jsonPrimitive?.content to body["bodyBase64"]?.jsonPrimitive?.contentOrNull) shouldBe
+            ("<p>é</p>" to null)
+    }
+
+    @Test
+    fun `a failed fetch is logged without its query or fragment`() {
+        val logged = mutableListOf<String>()
+        val logger = object : LogcatLogger {
+            override fun log(priority: LogPriority, tag: String, message: String) {
+                logged += message
+            }
+        }
+        if (!LogcatLogger.isInstalled) LogcatLogger.install()
+        LogcatLogger.loggers += logger
+        val failing = LnHostBridge(
+            preferenceStore = mockk(relaxed = true),
+            client = OkHttpClient.Builder().addInterceptor { throw IOException("offline") }.build(),
+        ) { "agent" }
+
+        try {
+            failing.runFetch("https://example.org/search?q=private+terms&token=abc#top", "{}") {}
+        } finally {
+            LogcatLogger.loggers -= logger
+        }
+
+        logged.single { it.startsWith("fetch(") }.lines().first() shouldBe "fetch(https://example.org/search) failed"
     }
 
     /**
@@ -85,20 +172,30 @@ class LnHostBridgeTest {
     // a plugin sets itself (an age gate, a read token) never reached a site that had set one of its own.
     @Test
     fun `a cookie the plugin sets reaches the site beside the ones it stored`() {
-        cookieSeen("""{"headers":{"Cookie":"fr_read=token"}}""") shouldBe "session=stored; fr_read=token"
+        headerSeen("""{"headers":{"Cookie":"fr_read=token"}}""") shouldBe "session=stored; fr_read=token"
     }
 
     @Test
     fun `a cookie the plugin sets wins over a stored one of the same name`() {
-        cookieSeen("""{"headers":{"Cookie":"session=mine"}}""") shouldBe "session=mine"
+        headerSeen("""{"headers":{"Cookie":"session=mine"}}""") shouldBe "session=mine"
     }
 
-    // The Cookie header a local server receives for one fetch, with the jar holding `session=stored`.
-    private fun cookieSeen(optsJson: String): String? {
+    @Test
+    fun `a fetch the plugin sets no User-Agent on goes with the device's`() {
+        headerSeen("{}", header = "User-Agent") shouldBe "agent"
+    }
+
+    @Test
+    fun `a User-Agent the plugin sets wins over the device's, whatever its case`() {
+        headerSeen("""{"headers":{"user-agent":"plugin"}}""", header = "User-Agent") shouldBe "plugin"
+    }
+
+    // The [header] a local server receives for one fetch, with the jar holding `session=stored`.
+    private fun headerSeen(optsJson: String, header: String = "Cookie"): String? {
         val seen = AtomicReference<String?>()
         val server = HttpServer.create(InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0).apply {
             createContext("/") { exchange ->
-                seen.set(exchange.requestHeaders.getFirst("Cookie"))
+                seen.set(exchange.requestHeaders.getFirst(header))
                 exchange.sendResponseHeaders(200, -1)
                 exchange.close()
             }
@@ -118,6 +215,15 @@ class LnHostBridgeTest {
         }
         return seen.get()
     }
+
+    // Answers every request with [bytes] as [contentType], so no request reaches the network.
+    private fun answeringWith(bytes: ByteArray, contentType: String) = LnHostBridge(
+        preferenceStore = mockk(relaxed = true),
+        client = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("")
+                .body(bytes.toResponseBody(contentType.toMediaType())).build()
+        }.build(),
+    ) { "agent" }
 
     // Answers every request with [code] itself, so no request reaches the network.
     private fun answering(code: Int) = LnHostBridge(

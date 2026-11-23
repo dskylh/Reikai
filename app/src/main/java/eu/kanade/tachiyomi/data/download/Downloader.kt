@@ -7,7 +7,6 @@ import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
 import eu.kanade.domain.chapter.model.toSChapter
 import eu.kanade.domain.manga.model.getComicInfo
-import eu.kanade.tachiyomi.data.cache.ChapterCache
 import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.data.library.LibraryUpdateNotifier
 import eu.kanade.tachiyomi.data.notification.NotificationHandler
@@ -15,9 +14,9 @@ import eu.kanade.tachiyomi.network.HttpException
 import eu.kanade.tachiyomi.source.UnmeteredSource
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.online.HttpSource
+import eu.kanade.tachiyomi.util.lang.compareToCaseInsensitiveNaturalOrder
 import eu.kanade.tachiyomi.util.storage.DiskUtil
 import eu.kanade.tachiyomi.util.storage.DiskUtil.NOMEDIA_FILE
-import eu.kanade.tachiyomi.util.storage.saveTo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -50,11 +49,21 @@ import kotlinx.coroutines.withContext
 import logcat.LogPriority
 import mihon.core.archive.ZipWriter
 import mihon.core.metro.AppCoroutineScope
+import mihon.data.cache.ChapterCache
 import nl.adaptivity.xmlutil.serialization.XML
 import okhttp3.Response
+import okio.buffer
+import okio.source
+import reikai.data.download.ResumedImageDownload
+import reikai.domain.download.DownloadPacing
 import reikai.domain.download.DownloadRetry
 import reikai.domain.download.SeriesCompletions
+import reikai.domain.download.SourceContacts
+import reikai.domain.download.SourcePace
 import reikai.domain.download.hasRoomToDownload // RK
+import reikai.domain.download.parallelPagesFor // RK
+import reikai.domain.download.parallelSourcesFor // RK
+import reikai.domain.manga.MangaPreferences
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.withIOContext
@@ -69,9 +78,9 @@ import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.track.interactor.GetTracks
 import tachiyomi.i18n.MR
-import java.io.File
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.random.Random
 
 /**
  * This class is the one in charge of downloading chapters.
@@ -93,6 +102,8 @@ class Downloader(
     private val getTracks: GetTracks,
     private val store: DownloadStore,
     private val notifier: DownloadNotifier,
+    private val mangaPreferences: MangaPreferences, // RK
+    private val sourceContacts: SourceContacts, // RK
 ) {
 
     /**
@@ -118,8 +129,16 @@ class Downloader(
     /**
      * Whether the downloader is paused
      */
-    @Volatile
-    var isPaused: Boolean = false
+    // RK --> a flow behind the flag, so the queue screen sees a pause no status change reports
+    private val pausedState = MutableStateFlow(false)
+    val pausedChanges = pausedState.asStateFlow()
+
+    var isPaused: Boolean
+        get() = pausedState.value
+        set(value) {
+            pausedState.value = value
+        }
+    // RK <--
 
     // RK: completes once the persisted queue has been restored on startup. A resume triggered by
     // WorkManager after a force-kill awaits this, so it doesn't check the still-empty queue before
@@ -128,6 +147,7 @@ class Downloader(
 
     init {
         scope.launch(Dispatchers.Main, CoroutineStart.UNDISPATCHED) {
+            // RK: a failed restore still releases whoever awaits it
             try {
                 addAllToQueue(withIOContext { store.restore() })
             } finally {
@@ -265,7 +285,7 @@ class Downloader(
                         .filter { it.status.value <= Download.State.DOWNLOADING.value }
                         .groupBy { it.source }
                         .toList()
-                        .take(parallelCount)
+                        .take(parallelSourcesFor(parallelCount)) // RK: a restored backup can hold any value
                         .map { (_, downloads) -> downloads.first() }
                     emit(activeDownloads)
 
@@ -319,8 +339,11 @@ class Downloader(
         downloadJobs: MutableMap<Download, Job>,
         owner: Job,
     ) = launchIO {
-        val slots = Semaphore(downloadPreferences.parallelPageLimit.get())
+        val slots = Semaphore(parallelPagesFor(downloadPreferences.parallelPageLimit.get())) // RK: as the source limit
+        val pace = SourcePace() // RK
         while (true) {
+            // RK: a source an update or an earlier run reached moments ago waits out its delay first; Off never waits
+            delay(sourceContacts.waitBefore(source.id.toString(), paceFloor(source)))
             // A canceled job can mark a chapter as downloading after it's been reset, so that counts as waiting too
             val download = queueState
                 .map { queue ->
@@ -335,14 +358,35 @@ class Downloader(
             val pagesStarted = CompletableDeferred<Unit>()
             val job = launchDownloadJob(download, slots, pagesStarted, owner)
             downloadJobs[download] = job
+            // RK: as the chapter ends, even when its own end stops the downloader and cancels this loop
+            job.invokeOnCompletion { sourceContacts.record(source.id.toString()) }
             job.invokeOnCompletion {
                 downloadJobs.remove(download, job)
                 // A job canceled before it starts never reaches its finally block
                 pagesStarted.complete(Unit)
             }
             pagesStarted.await()
+            // RK --> a delay above Off lets the chapter finish, then paces by the rule novels share, so the
+            // wait is a real gap; Off keeps the overlap above exactly as upstream runs it
+            val floorMs = paceFloor(source)
+            if (floorMs > 0L) job.join()
+            val succeeded = download.status != Download.State.ERROR
+            delay(pace.waitAfter(source.id.toString(), succeeded, floorMs, hasQueuedFrom(source), Random.nextDouble()))
+            // RK <--
         }
     }
+
+    // RK --> the source's delay between chapters: its own, or the global one
+    private fun paceFloor(source: HttpSource): Long = DownloadPacing.floorFor(
+        source.id.toString(),
+        mangaPreferences.downloadChapterDelayMs().get(),
+        DownloadPacing.parse(mangaPreferences.downloadSourceDelays().get()),
+        minimumMs = 0L,
+    )
+
+    private fun hasQueuedFrom(source: HttpSource) =
+        queueState.value.any { it.source == source && it.status == Download.State.QUEUE }
+    // RK <--
 
     private fun CoroutineScope.launchDownloadJob(
         download: Download,
@@ -607,10 +651,8 @@ class Downloader(
             // If the image is already downloaded, do nothing. Otherwise download from network
             val file = when {
                 imageFile != null -> imageFile
-                chapterCache.isImageInCache(
-                    page.imageUrl!!,
-                ) -> copyImageFromCache(chapterCache.getImageFile(page.imageUrl!!), tmpDir, filename)
-                else -> downloadImage(page, download.source, tmpDir, filename)
+                else -> copyImageFromCache(page.imageUrl!!, tmpDir, filename)
+                    ?: downloadImage(page, download.source, tmpDir, filename)
             }
 
             // When the page is ready, set page path, progress (just in case) and status
@@ -653,13 +695,21 @@ class Downloader(
                 ?: tmpDir.createFile("$filename.tmp")!!
 
             try {
-                source.getImage(page, file.length()).use {
-                    it.body.source().saveTo(
-                        // If the server supports partial downloads (HTTP 206),
-                        // append to the existing file.
-                        // Otherwise, start from scratch and overwrite the file.
-                        stream = file.openOutputStream(it.code == 206),
-                    )
+                // RK -->
+                // A resume is appended only when it continues the bytes on disk: a source that decrypts its
+                // images decodes the shortened answer from its own start (ResumedImageDownload).
+                ResumedImageDownload.write(
+                    existingSize = file.length(),
+                    stored = { from ->
+                        file.openInputStream().source().buffer().use {
+                            it.skip(from)
+                            it.readByteArray()
+                        }
+                    },
+                    fetch = { from -> source.getImage(page, from) },
+                    open = { append -> file.openOutputStream(append) },
+                ).use {
+                    // RK <--
                     val extension = getImageExtension(it, file)
                     file.renameTo("$filename.$extension")
                 }
@@ -685,24 +735,25 @@ class Downloader(
     }
 
     /**
-     * Copies the image from cache to file in tmpDir.
+     * Copies the image from cache to file in tmpDir, or returns null when it isn't cached.
      *
-     * @param cacheFile the file from cache.
+     * @param imageUrl the url of the image.
      * @param tmpDir the temporary directory of the download.
      * @param filename the filename of the image.
      */
-    private fun copyImageFromCache(cacheFile: File, tmpDir: UniFile, filename: String): UniFile {
-        // Delete temp file if it exists
-        tmpDir.findFile("$filename.tmp")?.delete()
-        val tmpFile = tmpDir.createFile("$filename.tmp")!!
-        cacheFile.inputStream().use { input ->
-            tmpFile.openOutputStream().use { output ->
-                input.copyTo(output)
+    private suspend fun copyImageFromCache(imageUrl: String, tmpDir: UniFile, filename: String): UniFile? {
+        val tmpFile = chapterCache.openImage(imageUrl)?.use { input ->
+            // Delete temp file if it exists
+            tmpDir.findFile("$filename.tmp")?.delete()
+            tmpDir.createFile("$filename.tmp")!!.also { tmpFile ->
+                tmpFile.openOutputStream().use { output ->
+                    input.copyTo(output)
+                }
             }
-        }
-        val extension = ImageUtil.findImageType(cacheFile.inputStream()) ?: return tmpFile
+        } ?: return null
+        chapterCache.removeImage(imageUrl)
+        val extension = tmpFile.openInputStream().use { ImageUtil.findImageType(it) } ?: return tmpFile
         tmpFile.renameTo("$filename.${extension.extension}")
-        cacheFile.delete()
         return tmpFile
     }
 
@@ -762,9 +813,15 @@ class Downloader(
     ) {
         val zip = mangaDir.createFile("$dirname.cbz$TMP_DIR_SUFFIX")!!
         ZipWriter(context, zip).use { writer ->
-            tmpDir.listFiles()?.forEach { file ->
-                writer.write(file)
-            }
+            // RK --> pages in reading order, so the archive reads sequentially (mihonapp/mihon#4208)
+            tmpDir.listFiles()
+                ?.sortedWith { first, second ->
+                    first.name.orEmpty().compareToCaseInsensitiveNaturalOrder(second.name.orEmpty())
+                }
+                ?.forEach { file ->
+                    writer.write(file)
+                }
+            // RK <--
         }
         zip.renameTo("$dirname.cbz")
         tmpDir.delete()
@@ -872,6 +929,8 @@ class Downloader(
      * queued or removed meanwhile aren't lost to a stale copy of the queue.
      */
     suspend fun updateQueue(transform: (List<Download>) -> List<Download>) = editQueue {
+        // RK: the rewrite below clears the store, which before the restore has read it loses the saved queue
+        queueRestored.await()
         // One update, since chapters are queued without the lock
         _queueState.update { queue ->
             val downloads = transform(queue).distinctBy { it.chapter.id }
@@ -894,6 +953,8 @@ class Downloader(
      * Removes [chapters] from the queue, keeping the state of the downloads that stay.
      */
     suspend fun dequeue(chapters: List<Chapter>) = editQueue {
+        // RK: only a live download's saved row is removed, so one still waiting in the restore came back
+        queueRestored.await()
         removeFromQueue(chapters)
     }
 

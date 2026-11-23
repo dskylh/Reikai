@@ -12,8 +12,8 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.xml.sax.XMLReader
 import reikai.novel.content.NovelChapterAddress
+import reikai.novel.content.anchorTarget
 import reikai.presentation.reader.NovelTextScale
-import java.net.URLDecoder
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -51,17 +51,6 @@ internal object NovelChapterTags : Html.TagHandler {
         val absolute = NovelChapterAddress.absolute(baseUrl, href)
         if (absolute.startsWith("#")) return absolute.substring(1)
         return NovelChapterAddress.fragmentInDocument(absolute, NovelChapterAddress.trustedBase(baseUrl))
-    }
-
-    /**
-     * The element a fragment names: as written first, then percent-decoded, the order a browser tries and
-     * reader.js mirrors. An empty name names nothing, and jsoup throws on one.
-     */
-    private fun anchorTarget(doc: Document, fragment: String): Element? {
-        val decoded = runCatching { URLDecoder.decode(fragment.replace("+", "%2B"), "UTF-8") }.getOrNull()
-        return listOfNotNull(fragment, decoded).distinct().filter { it.isNotEmpty() }.firstNotNullOfOrNull { name ->
-            doc.getElementById(name) ?: doc.getElementsByAttributeValue("name", name).firstOrNull()
-        }
     }
 
     private class Open(val tag: String)
@@ -172,8 +161,8 @@ internal class RuleSpan : LineBackgroundSpan {
         paint.style = style
     }
 
-    private companion object {
-        /** `opacity: 0.3` in reader.css. */
+    internal companion object {
+        /** `opacity: 0.3` in reader.css, held there by NovelWebTwinValuesTest. */
         const val RULE_ALPHA = 77
     }
 }

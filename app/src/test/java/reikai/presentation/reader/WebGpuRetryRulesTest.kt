@@ -1,5 +1,6 @@
 package reikai.presentation.reader
 
+import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.ui.reader.loader.PageLoader
 import eu.kanade.tachiyomi.ui.reader.model.DownloadStream
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
@@ -12,6 +13,21 @@ import tachiyomi.domain.chapter.model.Chapter
 class WebGpuRetryRulesTest {
 
     private val failed = ReaderChapter.State.Error(RuntimeException("offline"))
+
+    @Test
+    fun `a page the loader fetched after failing no longer waits for its Retry`() {
+        holdsForRetry(failedDecoding = false, Page.State.Ready) shouldBe false
+    }
+
+    @Test
+    fun `a page that failed to load waits while it is still failed`() {
+        holdsForRetry(failedDecoding = false, Page.State.Error(Exception("503"))) shouldBe true
+    }
+
+    @Test
+    fun `a page that failed decoding waits though its file is there`() {
+        holdsForRetry(failedDecoding = true, Page.State.Ready) shouldBe true
+    }
 
     @Test
     fun `a neighbour still waiting is loaded on reaching its edge`() {
@@ -82,6 +98,13 @@ class WebGpuRetryRulesTest {
         val preview = Any()
 
         previewAfterError(preview, shown = preview) shouldBe null
+    }
+
+    @Test
+    fun `an error page over another image keeps the streaming preview`() {
+        val preview = Any()
+
+        previewAfterError(preview, shown = Any()) shouldBe preview
     }
 
     private class RecordingLoader : PageLoader() {

@@ -56,8 +56,8 @@ A plain word never searches `language:`, `srcid:`, `chapter:`, `status:`, `track
 **`source:` matches the source's display name**, so `source:mangadex` and `src:manga` both work on a partial name.
 **`srcid:` matches its exact identity** instead: a number for manga sources, the plugin's id (such as `novelupdates`) for light-novel plugins, and a prefixed number such as `tachiyomi:42` or `ireader:42` for novel [extension apps](/docs/faq/browse/extensions#extension-apps-and-plugins).
 Reach for `srcid:` when two sources have similar names.
-On manga, `source:local` finds entries from your local source.
-A merged series answers for every source it reads from, so `source:`, `srcid:` and `lang:` find it through any of them, not only the one leading it.
+`source:local` finds entries from the local sources, manga and novels alike. A local series answers `lang:` by the language its files name, which you can set in its [`details.json`](/docs/guides/local-source/advanced).
+A merged series answers for every source it reads from, so `source:`, `srcid:` and `lang:` find it through any of them, not only the one leading it. Each source keeps its own notes, so `notes:` and a bare word find it by any source's notes too.
 
 **`chapter:` searches chapter names**, so `chapter:epilogue` finds every entry with a chapter called that.
 It is the one field that looks past the entry itself, which is why a plain word never includes chapter names.
@@ -127,4 +127,4 @@ See [adult sources](adult-sources.md).
 - **A misspelled field name is searched as plain text.** `titel:solo` looks for the literal text rather than warning you, and finds nothing.
 - **Search uses the details you set, not the source's.** Rename an entry through **Edit info** and search finds it under your name, no longer the source's. The same goes for an author, artist, description or genre you overrode. Sorting and grouping still use the source's values.
 - **`chapter:` only searches chapters already saved on your device**, which for most entries means everything fetched so far rather than the source's full catalogue.
-- **A [merged series](multi-source.md) is matched as one card.** Title, author, artist and description read the entry you see, while `genre:`, `source:`, `srcid:`, `lang:`, `chapter:`, `tracker:` and `score` also look through every source behind it. Tags you set in **Edit info** replace the sources' tags.
+- **A [merged series](multi-source.md) is matched as one card.** Title, author, artist and description read the entry you see, while `genre:`, `source:`, `srcid:`, `lang:`, `chapter:`, `tracker:` and `score` also look through every source behind it. Tags you set in **Edit info** replace the sources' tags, and a tag you made count as another (long-press it in **Filter** -> **Tags**) is found by either name.

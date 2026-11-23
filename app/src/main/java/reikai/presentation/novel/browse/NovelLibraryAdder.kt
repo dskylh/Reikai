@@ -1,6 +1,7 @@
 package reikai.presentation.novel.browse
 
 import dev.zacsweers.metro.Inject
+import logcat.LogPriority
 import reikai.data.novel.toNovel
 import reikai.domain.category.GetNovelCategories
 import reikai.domain.category.groupCategoryIds
@@ -13,6 +14,7 @@ import reikai.domain.novel.NovelGroupCategories
 import reikai.domain.novel.NovelMergeManager
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRepository
+import reikai.domain.novel.NovelViewerFlagSettings
 import reikai.domain.novel.interactor.RemoveNovelsFromLibrary
 import reikai.domain.novel.interactor.SetNovelCategories
 import reikai.domain.novel.interactor.UpdateNovel
@@ -36,8 +38,10 @@ import reikai.presentation.browse.duplicatePrompt
 import reikai.presentation.browse.finishAdd
 import reikai.presentation.browse.step
 import reikai.presentation.library.reikaiSortCategories
+import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.core.common.preference.mapAsCheckboxState
+import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.category.model.Category
 
 /**
@@ -59,6 +63,7 @@ class NovelLibraryAdder(
     private val autoBindOnAdd: AutoBindOnAdd,
     private val removeNovelsFromLibrary: RemoveNovelsFromLibrary,
     private val chapterSettings: NovelChapterSettings,
+    private val viewerFlagSettings: NovelViewerFlagSettings,
 ) {
 
     private val groupCategories = NovelGroupCategories(getNovelCategories, setNovelCategories)
@@ -176,15 +181,13 @@ class NovelLibraryAdder(
     )
 
     /**
-     * The stored-row form of the browse [addToExistingGroup] above, answering the shared result type
-     * instead of a browse dialog. Twin of `MangaLibraryAdder.addToExistingGroup`, pinned by the
-     * `addEntryOrPrompt` kernel both call.
+     * The stored-row form of the browse [addToExistingGroup] above: nothing is inserted, only joined and
+     * filed. Twin of `MangaLibraryAdder.addToExistingGroup`, pinned by the `addEntry` kernel both call.
      */
-    suspend fun addToExistingGroup(novelId: Long, selectedIds: List<Long>): AddFavoriteResult = addEntryOrPrompt(
+    suspend fun addToExistingGroup(novelId: Long, selectedIds: List<Long>): AddOutcome = addEntry(
         resolveCategories = { groupCategoryIdsOf(selectedIds) },
         favorite = { joinGroup(novelId, selectedIds) },
         fileCategories = { id, categoryIds -> applyCategories(id, categoryIds) },
-        categoryPicker = { categoryPickerPrompt(novelId) },
     )
 
     /**
@@ -195,11 +198,17 @@ class NovelLibraryAdder(
      */
     suspend fun joinGroup(novelId: Long, selectedIds: List<Long>): Long? {
         val novel = novelRepository.getById(novelId) ?: return null
-        val favorited = chapterSettings.rejoin(novelId, mergeManager) {
-            transactions.run {
-                val ok = novel.favorite || updateNovel.awaitUpdateFavorite(novelId, favorite = true)
-                if (ok) mergeManager.merge(selectedIds + novelId)
-                ok
+        val favorited = rejoinGroup(novelId) {
+            // As manga's: a rolled-back unit is a failed write.
+            runCatchingCancellable {
+                transactions.runThrowingOnRollback {
+                    val ok = novel.favorite || updateNovel.awaitUpdateFavorite(novelId, favorite = true)
+                    if (ok) mergeManager.merge(selectedIds + novelId)
+                    ok
+                }
+            }.getOrElse { e ->
+                logcat(LogPriority.ERROR, e) { "Adding to a group failed" }
+                false
             }
         }
         if (!favorited) return null
@@ -233,7 +242,7 @@ class NovelLibraryAdder(
      *  row rejoining its group takes the group's chapter settings. */
     private suspend fun favoriteStored(novel: Novel): Long? {
         if (novel.favorite) return novel.id
-        val added = chapterSettings.rejoin(novel.id, mergeManager) {
+        val added = rejoinGroup(novel.id) {
             updateNovel.awaitUpdateFavorite(novel.id, favorite = true)
         }
         if (!added) return null
@@ -304,4 +313,8 @@ class NovelLibraryAdder(
     suspend fun confirmRemove(item: NovelItem, sourceId: String) {
         novelRepository.getByUrlAndSource(item.path, sourceId)?.let { removeNovelsFromLibrary.await(listOf(it.id)) }
     }
+
+    /** [add], after which a series back in the library takes its group's chapter settings and reader flags. */
+    private suspend fun <T> rejoinGroup(id: Long, add: suspend () -> T): T =
+        chapterSettings.rejoin(id, mergeManager) { viewerFlagSettings.rejoin(id, mergeManager, add) }
 }

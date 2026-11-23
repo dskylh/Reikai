@@ -15,9 +15,14 @@ import reikai.domain.novel.model.NovelMigrationFlag
 import reikai.domain.novel.tts.TtsAudioSource
 import reikai.domain.novel.tts.TtsHighlightColors
 import reikai.domain.novel.tts.TtsHighlightStyle
+import reikai.domain.reader.AUTO_SCROLL_INTERVAL_DEFAULT_SECONDS
+import reikai.domain.reader.AUTO_SCROLL_SPEED_DEFAULT
 import reikai.domain.reader.BOTTOM_ZONE_DEFAULT_PERCENT
 import reikai.domain.reader.CONTINUOUS_COMPLETE_PERCENT
+import reikai.domain.reader.CONTRAST_DEFAULT_PERCENT
 import reikai.domain.reader.ChapterTitleFormat
+import reikai.domain.reader.FLASH_PAGE_INTERVAL_DEFAULT
+import reikai.domain.reader.ReaderProgressSize
 import reikai.domain.reader.VOLUME_KEY_SCROLL_DEFAULT_FRACTION
 import reikai.domain.source.NovelIconHints
 import reikai.novel.content.NovelSnippetKind
@@ -54,7 +59,7 @@ class NovelPreferences(
     fun installedPluginMetadata() = preferenceStore.getObjectFromString(
         key = "ln_installed_plugin_metadata",
         defaultValue = emptyMap(),
-        serializer = { metadataJson.encodeToString(metadataMapSerializer, it) },
+        serializer = ::encodePluginMetadata,
         deserializer = { decodePluginMetadata(it) },
     )
 
@@ -65,9 +70,9 @@ class NovelPreferences(
      * restore adds the name the backup recorded for a source it lacks; one never seen falls back to its raw id.
      */
     fun seenNovelSources() = preferenceStore.getObjectFromString(
-        key = "ln_seen_novel_sources",
+        key = SEEN_NOVEL_SOURCES_KEY,
         defaultValue = emptyMap(),
-        serializer = { metadataJson.encodeToString(seenSourcesMapSerializer, it) },
+        serializer = ::encodeSeenNovelSources,
         deserializer = { decodeSeenNovelSources(it) },
     )
 
@@ -109,8 +114,9 @@ class NovelPreferences(
     /** Ids of the installed plugins a repo offers a newer version of; the Browse badge counts them. */
     fun pendingPluginUpdates() = preferenceStore.getStringSet("ln_plugin_updates_pending", emptySet())
 
-    /** Last successful update-check timestamp (millis); gates the on-launch path to skip if recent. */
-    fun lastLnPluginCheck() = preferenceStore.getLong("ln_plugin_last_check", 0L)
+    /** Last successful update-check timestamp (millis); gates the on-launch path to skip if recent. App-state,
+     *  so a restore does not bring another device's check time and skip this one's next check. */
+    fun lastLnPluginCheck() = preferenceStore.getLong(Preference.appStateKey("ln_plugin_last_check"), 0L)
 
     /** Epoch-millis the last novel library update started; feeds the shared Updates "Last updated"
      *  line. App-state (not backed up), mirroring manga's [LibraryPreferences.lastUpdatedTimestamp]. */
@@ -205,13 +211,20 @@ class NovelPreferences(
     /** Whether a chapter scrolls or turns a page at a time, and which way its pages turn. */
     fun readerPageLayout() = preferenceStore.getEnum("ln_reader_page_layout", NovelPageLayout.SCROLL)
 
+    /** Two pages side by side while paged, by manga's dual page view rule, kept apart from manga's setting. */
+    fun readerDualPageView() =
+        preferenceStore.getEnum("ln_reader_dual_page_view", ReaderPreferences.DualPageView.NEVER)
+
+    /** The space a spread adds between its two pages' inner margins, in percent of a page's width. */
+    fun readerSpreadGap() = preferenceStore.getInt("ln_reader_spread_gap", 0)
+
     /** The e-ink flash after a page turn, kept apart from the manga reader's so each type has its own. */
     fun readerFlashOnPageChange() = preferenceStore.getBoolean("ln_reader_flash", false)
 
     fun readerFlashDurationMillis() =
         preferenceStore.getInt("ln_reader_flash_duration", ReaderPreferences.MILLI_CONVERSION)
 
-    fun readerFlashPageInterval() = preferenceStore.getInt("ln_reader_flash_interval", 1)
+    fun readerFlashPageInterval() = preferenceStore.getInt("ln_reader_flash_interval", FLASH_PAGE_INTERVAL_DEFAULT)
 
     fun readerFlashColor() = preferenceStore.getEnum("ln_reader_flash_mode", ReaderPreferences.FlashColor.BLACK)
 
@@ -229,6 +242,7 @@ class NovelPreferences(
     fun readerColorFilterMode() = preferenceStore.getInt("ln_reader_color_filter_mode", 0)
     fun readerGrayscale() = preferenceStore.getBoolean("ln_reader_grayscale", false)
     fun readerInvertedColors() = preferenceStore.getBoolean("ln_reader_inverted_colors", false)
+    fun readerContrast() = preferenceStore.getInt("ln_reader_contrast", CONTRAST_DEFAULT_PERCENT)
 
     /** When on, the reader's next/previous skip a chapter whose number matches the one just read (the
      *  same-number duplicates a cross-source merge produces). Reading-navigation only, non-destructive. */
@@ -374,6 +388,12 @@ class NovelPreferences(
      *  which the shared engine draws for both. On by default (matches manga and LNReader). */
     fun readerShowProgressPercentage() = preferenceStore.getBoolean("ln_reader_show_progress_percentage", true)
 
+    fun readerShowTimeLeft() = preferenceStore.getBoolean("ln_reader_show_time_left", false)
+
+    fun readerProgressSize() = preferenceStore.getEnum("ln_reader_progress_size", ReaderProgressSize.DEFAULT)
+
+    fun readerProgressBacked() = preferenceStore.getBoolean("ln_reader_progress_backed", false)
+
     /** How far into a chapter, as a whole percent, a novel counts it as read. */
     fun readerMarkReadPercent() = preferenceStore.getInt("ln_reader_mark_read_percent", CONTINUOUS_COMPLETE_PERCENT)
 
@@ -394,8 +414,11 @@ class NovelPreferences(
         preferenceStore.getEnum("ln_reader_tap_layout", NovelTapLayout.DISABLED)
     }
 
+    /** Name the reading mode when a novel opens, as manga's `showReadingMode` does; a setting of its own. */
+    fun readerShowReadingMode() = preferenceStore.getBoolean("ln_reader_show_reading_mode", true)
+
     /** Show the tap zones when a novel opens, the twin of the manga reader's `showNavigationOverlayOnStart`,
-     *  pinned by `ReaderNavigationOverlayView.setNavigation`, which both readers hand it to. */
+     *  pinned by `ReaderNavigationOverlayState.setNavigation`, which both readers hand it to. */
     fun readerShowTapZonesOnStart() = preferenceStore.getBoolean("ln_reader_show_navigation_overlay_on_start", false)
 
     fun readerTapInvert(paged: Boolean) =
@@ -444,15 +467,17 @@ class NovelPreferences(
     }
 
     /** Auto-scroll speed in CSS pixels per frame (~60fps). */
-    fun readerAutoScrollSpeed() = preferenceStore.getFloat("ln_reader_auto_scroll_speed", 1.0f)
+    fun readerAutoScrollSpeed() = preferenceStore.getFloat("ln_reader_auto_scroll_speed", AUTO_SCROLL_SPEED_DEFAULT)
 
     /** Seconds per page while auto-scroll turns pages, in paged reading. */
-    fun readerAutoScrollInterval() = preferenceStore.getInt("ln_reader_auto_scroll_interval", 5)
+    fun readerAutoScrollInterval() = preferenceStore.getInt(
+        "ln_reader_auto_scroll_interval",
+        AUTO_SCROLL_INTERVAL_DEFAULT_SECONDS,
+    )
 
-    /** Scroll the chapter with the hardware volume keys (down = forward), the novel twin of the manga
-     *  reader's `readWithVolumeKeys`. Intercepted at the host window; off by default. No pin: manga's half
-     *  is upstream's key handling inside its View-based viewers, which a JVM test cannot drive; this side's
-     *  rule is NovelVolumeKeysTest. */
+    /** Scroll the chapter with the hardware volume keys (down = forward), twin of the manga reader's
+     *  `readWithVolumeKeys`, pinned by `volumeKeysActive`, which both readers answer it through. Intercepted at
+     *  the host window; off by default. */
     fun readerUseVolumeButtons() = preferenceStore.getBoolean("ln_reader_use_volume_buttons", false)
 
     /** Swap which volume key scrolls forward vs back, mirroring `readWithVolumeKeysInverted`. */
@@ -466,8 +491,8 @@ class NovelPreferences(
     )
 
     /** How far a finger scroll must move before the menu hides, the novel twin of the manga reader's
-     *  `readerHideThreshold`. Both read the distance off the shared [ReaderHideThreshold]. No pin: manga's
-     *  half is upstream's scroll listener in `WebtoonViewer`, a View a JVM test cannot drive. */
+     *  `readerHideThreshold`, twin of `WebtoonPageTracker.onScrolledBy`, pinned by HideThresholdConformanceTest.
+     *  Both read the distance off the shared [ReaderHideThreshold]. */
     fun readerHideThreshold() = preferenceStore.getEnum("ln_reader_hide_threshold", ReaderHideThreshold.LOW)
 
     /** Reopen a read chapter where it was left rather than at its start, as the manga reader's
@@ -482,6 +507,9 @@ class NovelPreferences(
 
     /** The order of [readerBottomButtons], as codes; empty draws them in declaration order. */
     fun readerBottomButtonOrder() = preferenceStore.getStringList("ln_reader_bottom_button_order")
+
+    /** The novel reader's own [ReaderPreferences.readerBottomButtonsFilled]. */
+    fun readerBottomButtonsFilled() = preferenceStore.getBoolean("ln_reader_bottom_buttons_filled", false)
 
     /**
      * Puts the read-aloud button on a customised bar, for someone whose retired read-aloud switch was on:
@@ -619,7 +647,7 @@ class NovelPreferences(
         mangaDownloadDefaults.autoDownloadWhileReading.defaultValue(),
     )
 
-    /** The shortest wait between two downloaded chapters from one source; see `NovelDownloadPacing`. */
+    /** The shortest wait between two downloaded chapters from one source; see `DownloadPacing`. */
     fun downloadChapterDelayMs() = preferenceStore.getLong("novel_download_chapter_delay_ms", 500L)
 
     /** A source's own delay, overriding [downloadChapterDelayMs], as `sourceId=ms` entries. */
@@ -711,12 +739,21 @@ class NovelPreferences(
             MapSerializer(String.serializer(), LnSourceIdentity.serializer())
         private val metadataJson = Json { ignoreUnknownKeys = true }
 
-        // Public for the restore screen, which reads a backup's copies of these two without storing them.
+        // Public for the restore screen, which reads a backup's copies of these two without storing them,
+        // and for the LNReader import, which writes them into the backup it converts to.
+        fun encodePluginMetadata(metadata: Map<String, LnInstalledPluginMetadata>): String =
+            metadataJson.encodeToString(metadataMapSerializer, metadata)
+
+        fun encodeSeenNovelSources(sources: Map<String, LnSourceIdentity>): String =
+            metadataJson.encodeToString(seenSourcesMapSerializer, sources)
+
         fun decodePluginMetadata(stored: String): Map<String, LnInstalledPluginMetadata> =
             runCatching { metadataJson.decodeFromString(metadataMapSerializer, stored) }.getOrElse { emptyMap() }
 
         fun decodeSeenNovelSources(stored: String): Map<String, LnSourceIdentity> =
             runCatching { metadataJson.decodeFromString(seenSourcesMapSerializer, stored) }.getOrElse { emptyMap() }
+
+        const val SEEN_NOVEL_SOURCES_KEY = "ln_seen_novel_sources"
 
         const val CSS_SNIPPETS_KEY = "ln_reader_css_snippets"
 

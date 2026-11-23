@@ -9,11 +9,14 @@ import kotlinx.coroutines.flow.StateFlow
 import reikai.data.novel.expectedNextUpdate
 import reikai.domain.chapter.ChapterNumberEdit
 import reikai.domain.entry.EntryId
+import reikai.domain.entry.seriesAltTitles
+import reikai.domain.library.ContentType
 import reikai.domain.merge.GroupMarks
 import reikai.domain.merge.coverFallbacks
 import reikai.domain.novel.NovelChapterListEntry
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.reader.ChapterProgress
+import reikai.presentation.components.DownloadProgress
 import reikai.presentation.components.UndatedChapterDate
 import reikai.presentation.components.chapterSubtitle
 import reikai.presentation.components.mergeSourceLabels
@@ -58,22 +61,40 @@ internal fun NovelChapter.toEntryChapter(
 class NovelEntryAdapter(
     private val model: NovelDetailsViewModel,
     private val coverViewModelFactory: NovelCoverViewModel.Factory,
+    override val duplicateMarking: DuplicateMarking,
+    override val volumePicking: VolumePicking,
 ) : EntryDetailsBehavior {
 
-    override val state: StateFlow<EntryDetailsScreenState> = model.neutralDetailsState(model.state) { it.toNeutral() }
+    private val duplicatesMemo = DuplicateMarksMemo<NovelChapter>()
+
+    private val volumeInputs = DetailsVolumeInputs(volumePicking, ContentType.NOVELS)
+
+    override val state: StateFlow<EntryDetailsScreenState> =
+        model.neutralDetailsState(model.state, duplicateMarking.marks, volumeInputs) { state, marks ->
+            state.toNeutral(marks)
+        }
+
+    override fun setOnlyCopies(on: Boolean) = volumeInputs.setOnlyCopies(on)
 
     // A novel chapter is one request, so there is no percentage to report while it runs.
-    override val downloadProgress = EntryDownloadProgress.Unsupported
+    override fun downloadProgress(chapterId: Long) = DownloadProgress.Unsupported
 
-    private fun NovelDetailsState.toNeutral(): EntryDetailsScreenState = when (this) {
+    private fun NovelDetailsState.toNeutral(marks: CopyMarks?): EntryDetailsScreenState = when (this) {
         NovelDetailsState.Loading -> EntryDetailsScreenState.Loading
-        is NovelDetailsState.Failed -> EntryDetailsScreenState.Failed(message)
-        is NovelDetailsState.Loaded -> toNeutralLoaded()
+        NovelDetailsState.NotFound -> EntryDetailsScreenState.NotFound
+        is NovelDetailsState.Loaded -> toNeutralLoaded(marks)
     }
 
-    private fun NovelDetailsState.Loaded.toNeutralLoaded(): EntryDetailsScreenState.Loaded {
+    private fun NovelDetailsState.Loaded.toNeutralLoaded(marks: CopyMarks?): EntryDetailsScreenState.Loaded {
         val sibling = displayNovel.takeIf { it.id != novel.id }
         val display = shownNovel(novel, sibling, customInfo, chipCustomInfo)
+        val tags = shownTags(
+            wholeGroup = headerNamesWholeGroup(mergeSources.size, selectedSourceNovelId),
+            shown = display.genre,
+            custom = customInfo?.genre,
+            anchor = novel.genre,
+            members = groupNovels.map { it.genre },
+        )
         return EntryDetailsScreenState.Loaded(
             entryId = EntryId.Novel(novel.id),
             viewedEntryId = displayNovel.id,
@@ -84,6 +105,13 @@ class NovelEntryAdapter(
                     sourceQuery = model.headerSourceQuery(this),
                     // Filled on the All view only; a chip shows its own source's cover.
                     coverFallbacks = coverFallbacks(novel.id, groupNovels) { it.id },
+                    altTitles = seriesAltTitles(
+                        display.title,
+                        altTitleMembers(mergeSources.size, selectedSourceNovelId, groupNovels, displayNovel).map {
+                            it.title
+                        },
+                        customInfo?.altTitles.orEmpty(),
+                    ),
                 ),
                 favorite = novel.favorite,
                 trackingCount = trackingCount,
@@ -91,8 +119,8 @@ class NovelEntryAdapter(
                 nextUpdate = intervalNovel.expectedNextUpdate(),
                 isUserIntervalMode = intervalNovel.fetchInterval < 0,
                 description = display.description,
-                tags = display.genre,
-                notes = novel.notes,
+                tags = tags,
+                notes = display.notes,
                 descriptionDefaultExpanded = model.isFromSource,
             ),
             chapters = EntryChapterListUiState(
@@ -105,6 +133,22 @@ class NovelEntryAdapter(
                 // Novel sources hardly ever date a chapter, so upstream's "N/A" would land on nearly
                 // every row and say nothing.
                 undatedChapterDate = UndatedChapterDate.Blank,
+                // The arguments the reader's skip-duplicate rule takes (NovelReaderViewModel), over the rows
+                // before the filters, as manga's, so a filtered-out copy still marks the one shown.
+                duplicates = marks?.let {
+                    duplicatesMemo.get(unfilteredRows, it) {
+                        unfilteredRows.duplicateMarks(
+                            it,
+                            numberOf = { it.chapterNumber },
+                            nameOf = { it.name },
+                            originOf = { it.scanlator },
+                            ownerOf = { it.novelId },
+                            urlOf = { it.url },
+                            idOf = { it.id },
+                        )
+                    }
+                },
+                volumes = storedRows.mapNotNull { novelChapterVolume(ownerUrl(it.novelId), it.url, it.name) },
             ),
             capabilities = EntryCapabilities(
                 novelPreRender = NovelPreRenderCapability,
@@ -140,24 +184,28 @@ class NovelEntryAdapter(
                     loaded.marks,
                     loaded.downloadStateOf(chapter.id),
                     numberHinted = chapter.id in loaded.numberHints,
-                )
+                ).copy(volume = novelChapterVolume(loaded.ownerUrl(chapter.novelId), chapter.url, chapter.name))
             is NovelChapterListEntry.Missing -> EntryChapterListItem.Missing(id = id, count = count)
         }
+
+    // The address of the series that lists the chapter, which a grouped local volume's key is relative to.
+    private fun NovelDetailsState.Loaded.ownerUrl(novelId: Long): String? =
+        (groupNovels + novel).firstOrNull { it.id == novelId }?.url
 
     private fun chapterById(id: Long): NovelChapter? =
         (model.state.value as? NovelDetailsState.Loaded)?.chapters?.firstOrNull { it.id == id }
 
     // --- EntryDetailsBehavior: forward to the model (resolving id -> NovelChapter where needed). ---
 
-    override fun toggleSelection(chapterId: Long, fromLongPress: Boolean) {
-        model.toggleSelection(chapterId, fromLongPress)
+    override fun toggleSelection(chapterId: Long, fromLongPress: Boolean, shown: List<Long>) {
+        model.toggleSelection(chapterId, fromLongPress, shown)
     }
 
-    override fun selectAll() {
-        model.selectAll()
+    override fun selectAll(shown: List<Long>) {
+        model.selectAll(shown)
     }
-    override fun invertSelection() {
-        model.invertSelection()
+    override fun invertSelection(shown: List<Long>) {
+        model.invertSelection(shown)
     }
     override fun clearSelection() {
         model.clearSelection()
@@ -223,8 +271,8 @@ class NovelEntryAdapter(
     override fun showChangeCategoryDialog() {
         model.showChangeCategoryDialog()
     }
-    override fun showCoverDialog() {
-        model.showCoverDialog()
+    override fun showCoverDialog(volume: EntryChapterListItem.Volume?) {
+        model.showCoverDialog(volume)
     }
     override fun createCoverViewModel(): EntryCoverViewModel<*> = coverArgs().let { (url, source) ->
         coverViewModelFactory.create(novelUrl = url, novelSource = source)
@@ -241,6 +289,16 @@ class NovelEntryAdapter(
     }
 
     private fun loadedState(): NovelDetailsState.Loaded? = model.state.value as? NovelDetailsState.Loaded
+
+    override fun toggleChapterBlock(chapterIds: List<Long>) = model.toggleBlock(chapterIds)
+
+    override fun markChaptersRead(chapterIds: List<Long>, read: Boolean) = model.markChaptersRead(chapterIds, read)
+
+    override fun selectedMarkable(): List<MarkableChapter> {
+        val loaded = loadedState() ?: return emptyList()
+        val ids = EntrySelection.selectedAmong(loaded.selection, loaded.chapters.map { it.id })
+        return loaded.chapters.filter { it.id in ids }.map { MarkableChapter(it.novelId, it.url) }
+    }
     override fun showEditInfoDialog() {
         model.showEditNovelInfoDialog()
     }
@@ -250,9 +308,8 @@ class NovelEntryAdapter(
     override fun resetInfo() {
         model.resetNovelInfo()
     }
-    override fun showTrackDialog() {
-        model.showTrackDialog()
-    }
+    override suspend fun mergedSourceTags(): List<String>? = model.mergedSourceTags()
+
     override suspend fun autofillCandidates(): List<Pair<Track, Tracker>> = model.autofillCandidates()
 
     override suspend fun fetchTrackerMetadata(track: Track, tracker: Tracker): TrackMangaMetadata =
@@ -279,24 +336,14 @@ class NovelEntryAdapter(
         model.setFetchInterval(days)
     }
 
+    override fun relinkSeries(folder: String) {
+        model.relinkSeries(folder)
+    }
+
     override fun showManageSourcesDialog() {
         model.showManageSourcesDialog()
     }
-    override fun reorderSources(orderedIds: List<Long>) {
-        model.reorderSources(orderedIds)
-    }
-    override fun resetSourceOrder() {
-        model.resetSourceOrder()
-    }
-    override fun splitSources(targetIds: List<Long>) {
-        model.splitSources(targetIds)
-    }
-    override fun removeSourcesFromLibrary(targetIds: List<Long>) {
-        model.removeSourcesFromLibrary(targetIds)
-    }
-    override fun removeAllSourcesFromLibrary() {
-        model.removeAllSourcesFromLibrary()
-    }
+    override val mergeActions get() = model.mergeActions
     override fun refresh() {
         model.refresh()
     }

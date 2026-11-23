@@ -1,5 +1,6 @@
 package reikai.presentation.novel.browse
 
+import androidx.lifecycle.viewModelScope
 import eu.kanade.domain.source.service.SourcePreferences
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
@@ -25,15 +26,14 @@ import reikai.novel.source.NovelSourceManager
 import reikai.presentation.browse.EntryBulkFavoriteViewModel
 import reikai.presentation.browse.catalogue.EntryBrowseScreenState
 import reikai.presentation.browse.catalogue.NovelBrowseAdapter
-import reikai.presentation.migrate.flow.MigrationPickHandoff
 import reikai.presentation.recents.EmittingPreferenceStore
 import reikai.util.testAppScope
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.i18n.MR
 
 /**
- * A novel catalogue whose source is gone says so the way a manga one does, by the source's name, and one
- * whose plugin is installed but threw while loading says why and offers a retry.
+ * A novel catalogue whose plugin is installed but threw while loading says why and offers a retry. A source
+ * that is gone altogether is MissingSourceConformanceTest's, over both types.
  */
 class NovelBrowseMissingSourceTest {
 
@@ -51,11 +51,6 @@ class NovelBrowseMissingSourceTest {
 
     @AfterEach
     fun tearDown() = Dispatchers.resetMain()
-
-    @Test
-    fun `a source that is not installed shows as missing under its last known name`() = runTest {
-        adapter().settled() shouldBe EntryBrowseScreenState.SourceMissing("Gone plugin")
-    }
 
     @Test
     fun `an installed plugin that threw while loading shows why`() = runTest {
@@ -95,7 +90,6 @@ class NovelBrowseMissingSourceTest {
                 every { getFavoritedKeysAsFlow() } returns flowOf(FavoritedNovels.None)
             },
             libraryAdder = mockk(relaxed = true),
-            pickHandoff = MigrationPickHandoff(),
             reikaiSourcePreferences = ReikaiSourcePreferences(store),
             sourcePreferences = SourcePreferences(store),
             getIncognitoState = mockk(relaxed = true),
@@ -104,7 +98,7 @@ class NovelBrowseMissingSourceTest {
         val bulk = mockk<NovelBulkFavoriteViewModel> {
             every { state } returns MutableStateFlow(EntryBulkFavoriteViewModel.State())
         }
-        return NovelBrowseAdapter(model, bulk, SOURCE_ID)
+        return NovelBrowseAdapter(model, bulk, SOURCE_ID, model.viewModelScope)
     }
 
     private suspend fun NovelBrowseAdapter.settled() = state.first { it != EntryBrowseScreenState.Loading }

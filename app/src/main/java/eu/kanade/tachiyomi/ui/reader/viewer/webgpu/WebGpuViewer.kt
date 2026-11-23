@@ -1,18 +1,18 @@
 package eu.kanade.tachiyomi.ui.reader.viewer.webgpu
 
 import android.content.Context
-import android.graphics.PointF
 import android.graphics.Rect
 import android.os.SystemClock
-import android.view.InputDevice
-import android.view.KeyEvent
-import android.view.MotionEvent
-import android.view.View
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import ca.mpreg.imagedecoder.ImageDecoder
-import ca.mpreg.webgpuviewer.ImageView
 import ca.mpreg.webgpuviewer.closeTo
 import ca.mpreg.webgpuviewer.renderer.GainmapInput
 import ca.mpreg.webgpuviewer.renderer.Image
+import ca.mpreg.webgpuviewer.renderer.ImageFilterWgsl
+import ca.mpreg.webgpuviewer.renderer.Sampler
 import ca.mpreg.webgpuviewer.transition.TransitionBasic
 import ca.mpreg.webgpuviewer.transition.TransitionCube
 import ca.mpreg.webgpuviewer.transition.TransitionCubeOuter
@@ -29,19 +29,29 @@ import ca.mpreg.webgpuviewer.transition.TransitionStackRight
 import ca.mpreg.webgpuviewer.transition.TransitionStackUp
 import ca.mpreg.webgpuviewer.viewer.AnimationFrame
 import ca.mpreg.webgpuviewer.viewer.ImagePage
+import ca.mpreg.webgpuviewer.viewer.ImageViewer
 import ca.mpreg.webgpuviewer.viewer.ImageViewerContinuousState
+import ca.mpreg.webgpuviewer.viewer.ImageViewerState
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.reader.loader.HttpPageLoader
 import eu.kanade.tachiyomi.ui.reader.model.DownloadStream
+import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
+import eu.kanade.tachiyomi.ui.reader.setting.GeneralSettings
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences.TransitionAnimation
+import eu.kanade.tachiyomi.ui.reader.viewer.DualPageSettings
+import eu.kanade.tachiyomi.ui.reader.viewer.LongStripSettings
+import eu.kanade.tachiyomi.ui.reader.viewer.PagedSettings
 import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView.ZoomStartPosition
 import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
-import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation.NavigationRegion
+import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation
+import eu.kanade.tachiyomi.ui.reader.viewer.collectChanges
+import eu.kanade.tachiyomi.ui.reader.viewer.mouseWheelPaging
+import eu.kanade.tachiyomi.ui.reader.viewer.position
 import eu.kanade.tachiyomi.util.system.createReaderThemeContext
 import eu.kanade.tachiyomi.util.system.readerBackgroundColor
 import kotlinx.coroutines.CancellationException
@@ -52,20 +62,30 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.takeWhile
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import logcat.LogPriority
 import mihon.app.di.appGraph
+import reikai.presentation.reader.LocalPageColorAdjust
+import reikai.presentation.reader.WidePageShape
 import reikai.presentation.reader.cancelPageJobs
 import reikai.presentation.reader.chapterToRetry
+import reikai.presentation.reader.fitHomeScale
+import reikai.presentation.reader.holdsForRetry
 import reikai.presentation.reader.isCachedPageCurrent
 import reikai.presentation.reader.keepsShownPage
-import reikai.presentation.reader.navigation.actionAt
+import reikai.presentation.reader.landsOnSecondHalf
+import reikai.presentation.reader.landscapeZoomApplies
 import reikai.presentation.reader.previewAfterError
 import reikai.presentation.reader.requeueForRetry
+import reikai.presentation.reader.reshapePixels
 import reikai.presentation.reader.shouldAutoPreload
 import reikai.presentation.reader.showsTransition
+import reikai.presentation.reader.widePageShape
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
@@ -85,23 +105,23 @@ private const val STREAM_WAIT_MS = 1000L
 /** Least time between feeds, so a trickle of small reads decodes and uploads in batches. */
 private const val STREAM_BATCH_MS = 33L
 
+private const val RETUNE_DELAY_MS = 150L
+
 open class WebGpuViewer(
     val activity: ReaderActivity,
     val isReversed: Boolean,
     val isVertical: Boolean,
-    val pager: ImageView = ImageView(activity, isVertical = isVertical, isReversed = isReversed),
+    val viewerState: ImageViewerState = ImageViewerState(isVertical = isVertical, isReversed = isReversed),
 ) : Viewer {
 
     open val isContinuous: Boolean = false
-
-    val readerPreferences by lazy { activity.appGraph.readerPreferences }
 
     /** Resolved once: render() asks per frame, and createReaderThemeContext builds a Resources. */
     @Volatile
     private var cachedBackgroundColor: Int? = null
 
     internal fun readerBackgroundColor(): Int =
-        cachedBackgroundColor ?: activity.baseContext.readerBackgroundColor(config.theme)
+        cachedBackgroundColor ?: activity.baseContext.readerBackgroundColor(general.theme)
             .also { cachedBackgroundColor = it }
 
     @Volatile
@@ -177,12 +197,12 @@ open class WebGpuViewer(
     private val pairAspectTolerance = 0.1f
 
     private sealed class PageKey {
-        data class Reader(val chapterId: Long?, val index: Int) : PageKey()
+        data class Reader(val chapterId: Long?, val index: Int, val secondHalf: Boolean) : PageKey() // RK
         data class Transition(val prevId: Long?, val nextId: Long?) : PageKey()
     }
 
     private fun pageKey(page: ViewerPage): PageKey = when (page) {
-        is ViewerReaderPage -> PageKey.Reader(page.page.chapter.chapter.id, page.page.index)
+        is ViewerReaderPage -> readerKey(page.page) // RK
         is ViewerTransitionPage -> PageKey.Transition(page.prevChapter?.chapter?.id, page.nextChapter?.chapter?.id)
         else -> PageKey.Transition(null, null)
     }
@@ -192,6 +212,59 @@ open class WebGpuViewer(
     protected fun viewerPageFor(imagePage: ImagePage): ViewerPage? = synchronized(lock) {
         pageCache.values.firstOrNull { it.imagePage === imagePage }
     }
+
+    // RK --> Split wide pages in a paged viewer: a wide page's second half is an InsertPage, as in the classic
+    // pager, keyed apart from its first and reached only from it. Under [lock].
+    private val secondHalves = HashMap<PageKey.Reader, InsertPage>()
+
+    private fun readerKey(page: ReaderPage) = PageKey.Reader(page.chapter.chapter.id, page.index, page is InsertPage)
+
+    private val wideSettings: DualPageSettings
+        get() = if (isContinuous) settingsViewModel.simpleLongStrip.value.page else settingsViewModel.simplePaged.value
+
+    /** As the classic pager has it: only its left-to-right viewer shows a split page's left half first. */
+    private val leftToRight get() = !isReversed && !isVertical
+
+    private fun wideShape(page: ReaderPage, dec: ImageDecoder): WidePageShape =
+        if (isDualPageMode()) {
+            WidePageShape.Whole
+        } else {
+            wideSettings.widePageShape(dec.width, dec.height, isContinuous, leftToRight, page is InsertPage)
+        }
+
+    /** [page]'s second half, once its decode found it wide; null for a page shown whole. */
+    private fun secondHalfOf(page: ReaderPage): InsertPage? =
+        if (page is InsertPage || isDualPageMode()) {
+            null
+        } else {
+            synchronized(lock) { secondHalves[readerKey(page)]?.takeIf { it.parent === page } }
+        }
+
+    /** The page reading backward lands on: a split page's second half. */
+    private fun lastHalfOf(page: ReaderPage): ReaderPage = secondHalfOf(page) ?: page
+
+    /** The page last reached reading backward, which its decode may yet find split. */
+    @Volatile
+    private var arrivedBackward: PageKey? = null
+
+    private fun noteArrival(page: ViewerPage, direction: Int) {
+        arrivedBackward = (page as? ViewerReaderPage)?.takeIf { direction < 0 }?.let(::pageKey)
+    }
+
+    /** Moves the reader from [first] to [second] when [landsOnSecondHalf] says so. Main thread. */
+    private fun landOnSecondHalf(first: ReaderPage, second: InsertPage) {
+        val key = readerKey(first)
+        if (!landsOnSecondHalf(arrivedBackward, currentPage?.let(::pageKey), key)) return
+        val target = getPage(second)
+        arrivedBackward = null
+        currentPage = target
+        preloadPages(target)
+        viewerState.invalidate()
+    }
+
+    /** Reading order, in which a second half follows its first. */
+    private fun readingOrder(page: ReaderPage) = page.index * 2 + if (page is InsertPage) 1 else 0
+    // RK <--
 
     /** Check if a page is in the cache by identity. O(1) via key lookup. */
     private fun pageInCache(page: ViewerPage): Boolean = pageCache[pageKey(page)] === page
@@ -204,8 +277,8 @@ open class WebGpuViewer(
     private fun queueForDecode(page: ViewerReaderPage, prioritize: Boolean = false) {
         // Already has a decoded image
         if (page.isDecoded) return
-        // RK: a failed page waits for its Retry tap, rather than failing again on every preload.
-        if (page.imagePage is ErrorPage) return
+        // RK: a failed page waits for its Retry tap, unless the loader has fetched it since
+        (page.imagePage as? ErrorPage)?.let { if (holdsForRetry(it.failedDecoding, page.page.status)) return }
 
         when (page.state) {
             PageState.IDLE -> {
@@ -258,7 +331,7 @@ open class WebGpuViewer(
                         synchronized(lock) {
                             if (pageInCache(page) && !page.isDecoded && !page.imagePage.destroyed) {
                                 val oldImagePage = page.imagePage
-                                page.imagePage = ErrorPage(this@WebGpuViewer, page, e)
+                                page.imagePage = ErrorPage(this@WebGpuViewer, page, e, failedDecoding = true) // RK
                                 page.preview = null
                                 page.state = PageState.IDLE
                                 cleanupImage(oldImagePage)
@@ -279,10 +352,42 @@ open class WebGpuViewer(
         }
     }
 
+    private val settingsViewModel = activity.settingsViewModel
+
     /**
-     * Configuration used by the pager, like allow taps, scale mode on images, page transitions...
+     * Settings every paged viewer uses, like scale mode on images or tap zones, which the long strip uses too.
      */
-    val config = WebGpuConfig(this, scope, readerPreferences)
+    val paged: PagedSettings
+        get() = settingsViewModel.paged.value
+
+    /**
+     * Settings every long strip viewer uses, like crop image borders.
+     */
+    val longStrip: LongStripSettings
+        get() = settingsViewModel.longStrip.value
+
+    /**
+     * Settings only the paged WebGPU viewers use, like page transitions, which the long strip uses too.
+     */
+    val webgpuPaged: WebGpuPagedSettings
+        get() = settingsViewModel.webgpuPaged.value
+
+    /**
+     * Settings only the long strip WebGPU viewer uses, like the page gap.
+     */
+    val webgpuLongStrip: WebGpuLongStripSettings
+        get() = settingsViewModel.webgpuLongStrip.value
+
+    /**
+     * Settings shared by every viewer, like allow taps.
+     */
+    val general: GeneralSettings
+        get() = settingsViewModel.general.value
+
+    val imageZoomType: ZoomStartPosition
+        get() = paged.page.zoomStart.position(
+            auto = if (isReversed) ZoomStartPosition.RIGHT else ZoomStartPosition.LEFT,
+        )
 
     // Read from the render and decode threads, via the prevChapter/nextChapter getters.
     @Volatile
@@ -369,8 +474,13 @@ open class WebGpuViewer(
             is ViewerReaderPage -> {
                 val chapterId = page.page.chapter.chapter.id
                 val nextIndex = page.page.index + 1
-                candidates.find {
-                    it is ViewerReaderPage && it.page.chapter.chapter.id == chapterId && it.page.index == nextIndex
+                // RK --> a split page's second half comes first
+                val half = candidates.find { it is ViewerReaderPage && (it.page as? InsertPage)?.parent === page.page }
+                // RK <--
+                // RK
+                half ?: candidates.find {
+                    it is ViewerReaderPage && it.page.chapter.chapter.id == chapterId && it.page.index == nextIndex &&
+                        it.page !is InsertPage // RK
                 } ?: candidates.find { it is ViewerTransitionPage && it.prevChapter?.chapter?.id == chapterId }
                     ?: page.nextChapter?.chapter?.id?.let { nextChapterId ->
                         candidates.find {
@@ -393,7 +503,16 @@ open class WebGpuViewer(
             is ViewerReaderPage -> {
                 val chapterId = page.page.chapter.chapter.id
                 val prevIndex = page.page.index - 1
-                candidates.find {
+                // RK --> a second half goes back to its first, and a page back to the second half before it
+                val parent = (page.page as? InsertPage)?.parent
+                val half = parent?.let { first -> candidates.find { (it as? ViewerReaderPage)?.page === first } }
+                    ?: candidates.find {
+                        val second = (it as? ViewerReaderPage)?.page as? InsertPage
+                        second != null && second.chapter.chapter.id == chapterId && second.index == prevIndex
+                    }
+                // RK <--
+                // RK
+                half ?: candidates.find {
                     it is ViewerReaderPage && it.page.chapter.chapter.id == chapterId && it.page.index == prevIndex
                 } ?: candidates.find { it is ViewerTransitionPage && it.nextChapter?.chapter?.id == chapterId }
                     ?: page.prevChapter?.let { prevChapter ->
@@ -448,7 +567,7 @@ open class WebGpuViewer(
      * @param referencePage The page to use as reference for eviction (defaults to currentPage)
      */
     fun getPage(page: ReaderPage, referencePage: ViewerPage? = null): ViewerPage {
-        val key = PageKey.Reader(page.chapter.chapter.id, page.index)
+        val key = readerKey(page) // RK
         return synchronized(lock) {
             // RK --> a chapter loaded again keeps its id and indices but has new pages, so the wrapper
             // of a page it replaced goes, cleaned up as an eviction is, rather than drawing the old image.
@@ -503,6 +622,7 @@ open class WebGpuViewer(
             if (!chapterPreloadsInFlight.add(chapterId)) return
         }
 
+        // RK: coroutine helper in place of upstream's raw dispatcher
         scope.launchIO {
             // RK: a transition page draws the chapter's state, so it repaints as that changes.
             val repaint = launch { chapter.stateFlow.collect { repaintTransitionPages(chapter) } }
@@ -511,7 +631,7 @@ open class WebGpuViewer(
                 repeat(25) {
                     if (chapter.state is ReaderChapter.State.Loaded) {
                         currentPage?.let { preloadPages(it) }
-                        return@launchIO
+                        return@launchIO // RK: the helper's label
                     }
                     // RK -->
                     if (chapter.state is ReaderChapter.State.Error) {
@@ -541,17 +661,32 @@ open class WebGpuViewer(
                 }
             }
         }
-        pager.state.invalidate()
+        viewerState.invalidate()
     }
 
     /** Shows [page]'s load failure with its Retry, in place of a progress ring that never moves. Call under [lock]. */
     private fun showLoadError(page: ViewerReaderPage, error: Throwable) {
-        if (page.isDecoded || page.imagePage is ErrorPage) return
+        if (page.isDecoded) return
+        watchForRecovery(page)
+        if (page.imagePage is ErrorPage) return
         val oldImagePage = page.imagePage
         page.imagePage = ErrorPage(this, page, error)
         page.preview = previewAfterError(page.preview, oldImagePage)
         cleanupImage(oldImagePage)
-        pager.state.invalidate()
+        viewerState.invalidate()
+    }
+
+    /**
+     * Decodes [page] if the loader's chunk fetches it with no Retry, which would otherwise leave a false
+     * error over a good file. Ends when the page is ready, when a new watch on it replaces it, or with the viewer: an
+     * evicted page's watch waits on, and [pageInCache] keeps it from decoding. Call under [lock].
+     */
+    private fun watchForRecovery(page: ViewerReaderPage) {
+        page.recoveryWatch?.cancel()
+        page.recoveryWatch = scope.launch {
+            page.page.statusFlow.first { it == Page.State.Ready }
+            synchronized(lock) { if (pageInCache(page)) queueForDecode(page) }
+        }
     }
 
     /**
@@ -567,12 +702,13 @@ open class WebGpuViewer(
                 .distinct()
             pages to chapters
         }
-        pages.forEach(::retryPage)
+        pages.forEach(::retryLoad)
         chapters.forEach(::retryChapter)
         return pages.isNotEmpty() || chapters.isNotEmpty()
     }
 
-    private fun retryPage(page: ViewerReaderPage) {
+    /** [ErrorPage]'s Retry, through the download path, so the refetch fills in as it arrives. */
+    internal fun retryLoad(page: ViewerReaderPage) {
         val loader = page.page.chapter.pageLoader ?: return
         synchronized(lock) {
             if (!pageInCache(page) || page.imagePage !is ErrorPage) return
@@ -581,14 +717,11 @@ open class WebGpuViewer(
             page.state = PageState.IDLE
             cleanupImage(oldImagePage)
         }
-        // The download path, so the refetch fills in as it arrives and a page turn can drop it.
+        // A page turn can drop this too.
         requeueForRetry(page.page, loader)
         startPageLoad(page)
-        pager.state.invalidate()
+        viewerState.invalidate()
     }
-
-    /** [ErrorPage]'s Retry, through the download path [retryPage] takes. */
-    internal fun retryLoad(page: ViewerReaderPage) = retryPage(page)
 
     /** [TransitionPage]'s Retry for a neighbour chapter that failed to load. */
     internal fun retryChapter(chapter: ReaderChapter) {
@@ -625,7 +758,7 @@ open class WebGpuViewer(
         override var imagePage: ImagePage = TransitionPage(this@WebGpuViewer, prevChapter, nextChapter)
 
         override val prev: ViewerPage?
-            get() = prevChapter?.pages?.lastOrNull()?.let { getPage(it, currentPage) }
+            get() = prevChapter?.pages?.lastOrNull()?.let { getPage(lastHalfOf(it), currentPage) } // RK
 
         override val next: ViewerPage?
             get() = nextChapter?.pages?.firstOrNull()?.let { getPage(it, currentPage) }
@@ -634,6 +767,9 @@ open class WebGpuViewer(
     inner class ViewerReaderPage(val page: ReaderPage) : ViewerPage() {
         /** Cached spread ImagePage when this page is the anchor of a dual-page spread */
         var spreadPage: ImagePage.ImageSpread? = null
+
+        // RK: see watchForRecovery, guarded by [lock]
+        var recoveryWatch: Job? = null
 
         /** The side the file names, or null for none. Never a value merely derived from the index. */
         @Volatile
@@ -696,8 +832,10 @@ open class WebGpuViewer(
             }
 
         override val prev: ViewerPage?
-            get() = page.chapter.pages?.let { pages ->
-                pages.getOrNull(page.index - 1)?.let { getPage(it, currentPage) } ?: run {
+            // RK: a second half goes back to its first half, and a page back to the second half before it
+            get() = (page as? InsertPage)?.let { getPage(it.parent, currentPage) } ?: page.chapter.pages?.let { pages ->
+                // RK
+                pages.getOrNull(page.index - 1)?.let { getPage(lastHalfOf(it), currentPage) } ?: run {
                     val prevChapter = prevChapter ?: return@run getPage(null, page.chapter, currentPage)
 
                     // RK -->
@@ -706,17 +844,18 @@ open class WebGpuViewer(
                         preloadChapterThenRetry(prevChapter)
                     }
 
-                    if (showsTransition(config.alwaysShowChapterTransition, prevChapter.state)) {
+                    if (showsTransition(general.alwaysShowChapterTransition, prevChapter.state)) {
                         // RK <--
                         getPage(prevChapter, page.chapter, currentPage)
                     } else {
-                        prevChapter.pages?.lastOrNull()?.let { getPage(it, currentPage) }
+                        prevChapter.pages?.lastOrNull()?.let { getPage(lastHalfOf(it), currentPage) } // RK
                     }
                 }
             }
 
         override val next: ViewerPage?
-            get() = page.chapter.pages?.let { pages ->
+            // RK: a split page goes on to its second half
+            get() = secondHalfOf(page)?.let { getPage(it, currentPage) } ?: page.chapter.pages?.let { pages ->
                 pages.getOrNull(page.index + 1)?.let { getPage(it, currentPage) } ?: run {
                     val nextChapter = nextChapter ?: return@run getPage(page.chapter, null, currentPage)
 
@@ -726,7 +865,7 @@ open class WebGpuViewer(
                         preloadChapterThenRetry(nextChapter)
                     }
 
-                    if (showsTransition(config.alwaysShowChapterTransition, nextChapter.state)) {
+                    if (showsTransition(general.alwaysShowChapterTransition, nextChapter.state)) {
                         // RK <--
                         getPage(page.chapter, nextChapter, currentPage)
                     } else {
@@ -736,21 +875,18 @@ open class WebGpuViewer(
             }
     }
 
-    /** Read live: these pages are built before the surface has a size, and outlive a rotation. */
-    private fun viewportPageWidth(half: Boolean): Int = if (half) pager.state.width / 2 else pager.state.width
-
     /**
-     * Check if dual page mode is currently active based on config and view dimensions.
+     * Check if dual page mode is currently active based on settings and view dimensions.
      * Dual page is never active for continuous (scrolling) viewers.
      */
     fun isDualPageMode(): Boolean {
         if (isContinuous) return false
-        return when (config.dualPageView) {
+        return when (webgpuPaged.page.dualPageView) {
             ReaderPreferences.DualPageView.NEVER -> false
             ReaderPreferences.DualPageView.ALWAYS -> true
             ReaderPreferences.DualPageView.WIDE -> {
-                val width = pager.state.width
-                val height = pager.state.height
+                val width = viewerState.width
+                val height = viewerState.height
                 width > 0 && height > 0 && width.toFloat() / height > 1f
             }
         }
@@ -841,6 +977,7 @@ open class WebGpuViewer(
         }
 
         if (!isDualPageMode()) {
+            page.imagePage.fitsAsSpread = false // RK: a single page fits the screen outside dual page view
             return page.imagePage
         }
 
@@ -851,6 +988,8 @@ open class WebGpuViewer(
 
         if (page.spreadPosition == SpreadPosition.SINGLE) {
             page.spreadPage = null
+            // RK: a double page shown alone fits as the spreads around it do, so their page height holds
+            imagePage.fitsAsSpread = page.standsAlone
             return imagePage
         }
 
@@ -878,7 +1017,7 @@ open class WebGpuViewer(
     }
 
     init {
-        pager.state.apply {
+        viewerState.apply {
             fetchPage = fetch@{ index ->
                 val current = currentPage ?: return@fetch null
 
@@ -898,132 +1037,235 @@ open class WebGpuViewer(
             }
 
             onTap = { offset ->
-                when (config.navigator.actionAt(PointF(offset.x, offset.y))) {
-                    // RK: a zone-only layout leaves the rest to the page, where a failure's Retry still answers
+                // RK --> a zone-only layout leaves the rest to the page, where a failure's Retry still answers
+                when (activity.tapAction(offset)) {
                     null -> retryFailuresOnScreen()
-                    // RK
-                    NavigationRegion.MENU -> if (!retryFailuresOnScreen()) activity.toggleMenu()
-                    NavigationRegion.NEXT -> moveToNext()
-                    NavigationRegion.PREV -> moveToPrevious()
-                    NavigationRegion.RIGHT -> moveRight()
-                    NavigationRegion.LEFT -> moveLeft()
+                    ViewerNavigation.Action.MENU -> if (!retryFailuresOnScreen()) activity.toggleMenu()
+                    ViewerNavigation.Action.FORWARD -> moveForward()
+                    ViewerNavigation.Action.BACKWARD -> moveBackward()
                 }
+                // RK <--
             }
 
-            onLongTap = { _ ->
-                if (activity.viewModel.state.value.menuVisible || config.longTapEnabled) {
-                    (currentPage as? ViewerReaderPage)?.let { activity.onPageLongTap(it.page) }
+            // RK: the page under the press, since a spread, a strip or a turn shows several
+            onLongTap = { offset ->
+                if (activity.viewModel.state.value.menuVisible || general.longTapEnabled) {
+                    val pressed = pageAt(offset)?.let(::viewerPageFor) as? ViewerReaderPage // RK
+                    pressed?.let { activity.onPageLongTap(it.page) } // RK
                 }
             }
         }
 
-        config.imagePropertyChangedListener = {
-            // A theme change comes through here.
-            cachedBackgroundColor = null
-            cachedThemedContext = null
+        // The pages are made with all of these, applied at first only from the WebGPU paged ones every mode reads
+        settingsViewModel.general.collectChanges(scope) { old, new ->
+            if (old != null && old.theme != new.theme) {
+                onPageSettingsChanged()
+            }
+        }
+        settingsViewModel.webgpuPaged.collectChanges(scope) { old, new ->
+            if (old?.page != new.page) {
+                onPageSettingsChanged()
+            }
+            // RK: the library re-lays out its spreads for a new gap, so no page is remade
+            if (old?.spreadGap != new.spreadGap) viewerState.spreadGap = new.spreadGap / 100f
+        }
+        if (isContinuous) {
+            settingsViewModel.longStrip.collectChanges(scope) { old, _ ->
+                if (old != null) {
+                    onPageSettingsChanged()
+                }
+            }
+            settingsViewModel.webgpuLongStrip.collectChanges(scope) { old, new ->
+                if (old != null && old.page != new.page) {
+                    onPageSettingsChanged()
+                }
+            }
+        }
+        val common = if (isContinuous) {
+            settingsViewModel.webgpuLongStrip.map { it.common }
+        } else {
+            settingsViewModel.webgpuPaged.map { it.common }
+        }
+        common.distinctUntilChanged().collectChanges(scope) { old, new ->
+            if (old?.doubleTapGesturesDisabled != new.doubleTapGesturesDisabled) {
+                viewerState.doubleTapGesturesEnabled = !new.doubleTapGesturesDisabled
+            }
+            if (old?.fastRenderingOnly != new.fastRenderingOnly) {
+                viewerState.enableTiles = !new.fastRenderingOnly
+            }
+            if (old?.holdUntilFinal != new.holdUntilFinal) viewerState.holdUntilFinal = new.holdUntilFinal
+            if (old?.imageFilters != new.imageFilters) imageFilters.update(new.imageFilters)
+            if (old?.tileFilters != new.tileFilters) tileFilters.update(new.tileFilters)
+            if (old?.upscaler != new.upscaler) upscaler.update(new.upscaler)
+            if (old?.downscaler != new.downscaler) downscaler.update(new.downscaler)
+        }
+        settingsViewModel.paged.collectChanges(scope) { old, new ->
+            if (old != null && old.page != new.page) {
+                onPageSettingsChanged()
+            }
+        }
+        // RK --> Split wide pages and Rotate to fit remake the pages, as the classic viewers' settings do
+        val wide = if (isContinuous) {
+            settingsViewModel.simpleLongStrip.map { it.page }
+        } else {
+            settingsViewModel.simplePaged
+        }
+        wide.distinctUntilChanged().collectChanges(scope) { old, _ -> if (old != null) onPageSettingsChanged() }
+        // RK <--
+    }
 
-            val isDual = isDualPageMode()
-            pager.state.apply {
-                transition = when (if (isDual) config.transitionAnimationDual else config.transitionAnimation) {
-                    TransitionAnimation.BASIC -> if (isVertical) TransitionBasic.Vertical else TransitionBasic
-                    TransitionAnimation.FLIP -> TransitionFlip
-                    TransitionAnimation.FLIP_LEFT -> TransitionFlipLeft
-                    TransitionAnimation.FLIP_RIGHT -> TransitionFlipRight
-                    TransitionAnimation.STACK_LEFT -> TransitionStackLeft
-                    TransitionAnimation.STACK_RIGHT -> TransitionStackRight
-                    TransitionAnimation.STACK_UP -> TransitionStackUp
-                    TransitionAnimation.STACK_DOWN -> TransitionStackDown
-                    TransitionAnimation.SPHERE -> TransitionSphere
-                    TransitionAnimation.CUBE_INSIDE -> TransitionCube
-                    TransitionAnimation.CUBE_OUTSIDE -> TransitionCubeOuter
-                    TransitionAnimation.FADE -> TransitionFade
-                    TransitionAnimation.FADE_WHITE -> TransitionFadeWhite
-                    TransitionAnimation.NONE -> TransitionNone
+    /**
+     * Applies what the pages are made with and remakes them.
+     */
+    private fun onPageSettingsChanged() {
+        val pageSettings = webgpuPaged.page
+        // A theme change comes through here.
+        cachedBackgroundColor = null
+        cachedThemedContext = null
+
+        val isDual = isDualPageMode()
+        viewerState.apply {
+            transition = when (if (isDual) pageSettings.transitionAnimationDual else pageSettings.transitionAnimation) {
+                TransitionAnimation.BASIC -> if (isVertical) TransitionBasic.Vertical else TransitionBasic
+                TransitionAnimation.FLIP -> TransitionFlip
+                TransitionAnimation.FLIP_LEFT -> TransitionFlipLeft
+                TransitionAnimation.FLIP_RIGHT -> TransitionFlipRight
+                TransitionAnimation.STACK_LEFT -> TransitionStackLeft
+                TransitionAnimation.STACK_RIGHT -> TransitionStackRight
+                TransitionAnimation.STACK_UP -> TransitionStackUp
+                TransitionAnimation.STACK_DOWN -> TransitionStackDown
+                TransitionAnimation.SPHERE -> TransitionSphere
+                TransitionAnimation.CUBE_INSIDE -> TransitionCube
+                TransitionAnimation.CUBE_OUTSIDE -> TransitionCubeOuter
+                TransitionAnimation.FADE -> TransitionFade
+                TransitionAnimation.FADE_WHITE -> TransitionFadeWhite
+                TransitionAnimation.NONE -> TransitionNone
+            }
+
+            when (if (isDual) pageSettings.cutoutModeDual else pageSettings.cutoutMode) {
+                ReaderPreferences.CutoutMode.IGNORE -> avoidCutout = false
+                ReaderPreferences.CutoutMode.AVOID -> {
+                    avoidCutout = true
+                    alwaysAvoidCutout = false
                 }
 
-                when (if (isDual) config.cutoutModeDual else config.cutoutMode) {
-                    ReaderPreferences.CutoutMode.IGNORE -> avoidCutout = false
-                    ReaderPreferences.CutoutMode.AVOID -> {
-                        avoidCutout = true
-                        alwaysAvoidCutout = false
-                    }
-
-                    ReaderPreferences.CutoutMode.SHIFT -> {
-                        avoidCutout = true
-                        alwaysAvoidCutout = true
-                    }
-                }
-
-                (this as? ImageViewerContinuousState)?.let {
-                    backgroundColor = readerBackgroundColor()
-                    homeScale = config.continuousMinWidth / 100f
-                    scale = homeScale
-                    cropBorders = this@WebGpuViewer.cropBorders
-                    minScale = if (config.zoomOutDisabled) 0f else 0.1f
-
-                    (this@WebGpuViewer as? WebGpuViewerContinuous)?.let {
-                        if (this@WebGpuViewer.useGap) {
-                            pageGap = config.continuousGap / 100f
-                        }
-                    }
+                ReaderPreferences.CutoutMode.SHIFT -> {
+                    avoidCutout = true
+                    alwaysAvoidCutout = true
                 }
             }
 
-            synchronized(lock) {
-                decodeQueue.clear()
-                loadJobs.values.forEach { it.cancel() }
-                loadJobs.clear()
-                watchJobs.values.forEach { it.cancel() }
-                watchJobs.clear()
-                pageCache.values.forEach {
-                    it.state = PageState.IDLE
-                    (it as? ViewerReaderPage)?.spreadPage?.let(::cleanupImage)
-                    cleanupImage(it.imagePage)
-                }
-                pageCache.clear()
+            (this as? ImageViewerContinuousState)?.let {
+                backgroundColor = readerBackgroundColor()
+                homeScale = webgpuLongStrip.page.continuousMinWidth / 100f
+                scale = homeScale
+                cropBorders = this@WebGpuViewer.cropBorders
+                // RK: the floor Min width starts at
+                minScale = if (longStrip.zoomOutDisabled) 0f else ReaderPreferences.CONTINUOUS_MIN_WIDTH_MIN / 100f
 
-                currentPage = (currentPage as? ViewerReaderPage)?.page?.let { getPage(it) }
-                    ?: (currentPage as? ViewerTransitionPage)?.let {
-                        getPage(it.prevChapter, it.nextChapter)
+                (this@WebGpuViewer as? WebGpuViewerContinuous)?.let {
+                    if (this@WebGpuViewer.useGap) {
+                        pageGap = webgpuLongStrip.page.continuousGap / 100f
                     }
-
-                currentPage?.let { preloadPages(it) }
+                }
             }
-
-            pager.state.invalidate()
         }
 
-        config.navigationModeChangedListener = {
-            val showOnStart = config.navigationOverlayOnStart || config.forceNavigationOverlay
-            activity.binding.navigationOverlay.setNavigation(config.navigator, showOnStart)
+        synchronized(lock) {
+            decodeQueue.clear()
+            loadJobs.values.forEach { it.cancel() }
+            loadJobs.clear()
+            watchJobs.values.forEach { it.cancel() }
+            watchJobs.clear()
+            pageCache.values.forEach {
+                it.state = PageState.IDLE
+                (it as? ViewerReaderPage)?.spreadPage?.let(::cleanupImage)
+                cleanupImage(it.imagePage)
+            }
+            pageCache.clear()
+            secondHalves.clear() // RK: a page split under the old settings is decoded again
+            arrivedBackward = null // RK: the page remade here stays where it was, not on a half reached backward
+
+            // RK: a second half stood for its first, which decodes again
+            currentPage = (currentPage as? ViewerReaderPage)?.page?.let { getPage((it as? InsertPage)?.parent ?: it) }
+                ?: (currentPage as? ViewerTransitionPage)?.let {
+                    getPage(it.prevChapter, it.nextChapter)
+                }
+
+            currentPage?.let { preloadPages(it) }
         }
 
-        config.imageFiltersChangedListener = {
-            val shaders = config.imageFilters
+        viewerState.invalidate()
+    }
+
+    private val imageFilters = FilterSlot { viewerState.imageFilters = it }
+    private val tileFilters = FilterSlot { viewerState.tileFilters = it }
+    private val upscaler = SamplerSlot(Sampler::catmullRom) { viewerState.upscaler = it }
+    private val downscaler = SamplerSlot(Sampler::box) { viewerState.downscaler = it }
+
+    // Main thread only.
+    private inner class SamplerSlot(private val default: () -> Sampler, private val assign: (Sampler) -> Unit) {
+        private var job: Job? = null
+
+        fun update(shader: WebGpuShader?) {
             // Else an older, slower load could land last.
-            imageFiltersJob?.cancel()
-            imageFiltersJob = scope.launch { pager.state.imageFilters = loadFilters(shaders) }
-        }
-
-        config.tileFiltersChangedListener = {
-            val shaders = config.tileFilters
-            tileFiltersJob?.cancel()
-            tileFiltersJob = scope.launch { pager.state.tileFilters = loadFilters(shaders) }
+            job?.cancel()
+            job = scope.launch {
+                // default() reads a resource.
+                // RK: coroutine helper in place of upstream's raw dispatcher
+                val sampler = withIOContext {
+                    shader?.let {
+                        try {
+                            WebGpuShaders.loadSampler(activity, it)
+                        } catch (e: Exception) {
+                            logcat(LogPriority.ERROR, e) { "sampler ${it.name}" }
+                            null
+                        }
+                    } ?: default()
+                }
+                assign(sampler)
+            }
         }
     }
 
-    private var imageFiltersJob: Job? = null
-    private var tileFiltersJob: Job? = null
+    // Main thread only.
+    private inner class FilterSlot(private val assign: (List<ImageFilterWgsl>) -> Unit) {
+        private var job: Job? = null
+        private var retune: Job? = null
+        private var loaded: List<Pair<WebGpuShader, ImageFilterWgsl>> = emptyList()
 
-    /** Fresh instances: one belongs to one viewer and one chain. Skips any that fail to load. */
-    private suspend fun loadFilters(shaders: List<WebGpuShader>) = withIOContext {
-        // RK: coroutine helper in place of upstream's raw dispatcher
-        shaders.mapNotNull { shader ->
-            try {
-                WebGpuShaders.load(activity, shader)
-            } catch (e: Exception) {
-                logcat(LogPriority.ERROR, e) { "filter ${shader.name}" }
-                null
+        fun update(shaders: List<WebGpuShader>) {
+            retune?.cancel()
+            if (job?.isActive != true && loaded.map { it.first.file } == shaders.map { it.file }) {
+                // Each value rebuilds pipelines on the render thread; a slider sends one per step.
+                retune = scope.launch {
+                    delay(RETUNE_DELAY_MS.milliseconds)
+                    loaded = loaded.zip(shaders) { (_, filter), shader ->
+                        WebGpuShaders.applyValues(filter, shader)
+                        shader to filter
+                    }
+                }
+                return
+            }
+            // Else an older, slower load could land last.
+            job?.cancel()
+            job = scope.launch {
+                val fresh = load(shaders)
+                loaded = fresh
+                assign(fresh.map { it.second })
+            }
+        }
+
+        /** Fresh instances: one belongs to one viewer and one chain. Skips any that fail to load. */
+        private suspend fun load(shaders: List<WebGpuShader>) = withIOContext {
+            // RK: coroutine helper in place of upstream's raw dispatcher
+            shaders.mapNotNull { shader ->
+                try {
+                    shader to WebGpuShaders.load(activity, shader)
+                } catch (e: Exception) {
+                    logcat(LogPriority.ERROR, e) { "filter ${shader.name}" }
+                    null
+                }
             }
         }
     }
@@ -1057,10 +1299,18 @@ open class WebGpuViewer(
         }
     }
 
-    override fun getView(): View = pager
+    @Composable
+    override fun Content(modifier: Modifier) {
+        // RK --> grayscale, invert and contrast, as the page table the library applies to page images only
+        val adjust = LocalPageColorAdjust.current
+        val lut = remember(adjust) { adjust.lut() }
+        SideEffect { viewerState.imageLut = lut }
+        // RK <--
+        ImageViewer(modifier = modifier.mouseWheelPaging(this), state = viewerState)
+    }
 
     private val cropBorders: Boolean
-        get() = if (isContinuous) config.imageCropBordersWebtoon else config.imageCropBorders
+        get() = if (isContinuous) longStrip.cropBorders else paged.page.cropBorders
 
     /**
      * Asks the loader for [page], after whatever it was asked for before; a request replaces
@@ -1080,7 +1330,7 @@ open class WebGpuViewer(
         }
     }
 
-    // RK: retryLoad sits beside retryPage above, through its download path
+    // RK: retryLoad sits above, in the failed-load island
 
     /** Downloads [page] if needed, then re-queues it for decode once ready. */
     private fun startPageLoad(page: ViewerReaderPage) {
@@ -1163,7 +1413,7 @@ open class WebGpuViewer(
                         if (old is ProgressPage) {
                             page.imagePage = ErrorPage(this@WebGpuViewer, page, status.error)
                             cleanupImage(old)
-                            pager.state.invalidate()
+                            viewerState.invalidate()
                         }
                     }
                     if (pageInCache(page) && page.state == PageState.LOADING) {
@@ -1305,7 +1555,7 @@ open class WebGpuViewer(
                         page.preview = null
                         page.imagePage = ErrorPage(this@WebGpuViewer, page, status.error)
                         cleanupImage(preview)
-                        pager.state.invalidate()
+                        viewerState.invalidate()
                     }
                     if (pageInCache(page) && !page.isDecoded && page.state == PageState.IDLE &&
                         page.page.status == Page.State.Ready
@@ -1344,11 +1594,14 @@ open class WebGpuViewer(
     ) {
         // The decoder hands the map over unapplied - see ImageDecoder.Gainmap - because how
         // much of it to use depends on the display, so the viewer applies it.
-        fun ImageDecoder.Gainmap.toInput() = let {
+        fun ImageDecoder.Gainmap.toInput(shape: WidePageShape) = let {
+            // RK
+            // RK: split or turned as its page is, the map being that page's gains at its own resolution
+            val map = reshapePixels(it.pixels, it.width, it.height, it.channels, shape)
             GainmapInput(
-                pixels = it.pixels,
-                width = it.width,
-                height = it.height,
+                pixels = map.pixels, // RK
+                width = map.width, // RK
+                height = map.height, // RK
                 channels = it.channels,
                 gamma = it.gamma,
                 minContentBoost = it.minContentBoost,
@@ -1367,10 +1620,16 @@ open class WebGpuViewer(
             }
         }
 
-        val backgroundColor = if (config.automaticBackground) null else readerBackgroundColor()
+        val backgroundColor = if (general.automaticBackground) null else readerBackgroundColor()
 
         // SDR only: HDR skips Image's tone mapping; a gain map may need float textures.
         var previewing = streaming && !dec.isHdr && dec.hdrKind != ImageDecoder.HdrKind.GAINMAP
+
+        // RK --> a wide page split or rotated to fit is reshaped from its whole first frame, so it has no
+        // preview: the whole-file decode after the download makes it. An animated one stays whole.
+        val shape = wideShape(page.page, dec)
+        if (shape != WidePageShape.Whole) previewing = false
+        // RK <--
 
         // Null once the page is unwanted.
         suspend fun nextWhole(onPartial: (suspend (ImageDecoder.Frame) -> Unit)? = null): ImageDecoder.Frame? {
@@ -1407,6 +1666,7 @@ open class WebGpuViewer(
                 ).apply {
                     // The tile cache would go stale.
                     highQuality = false
+                    isPlaceholder = true
                 }
                 val installed = synchronized(lock) {
                     val old = page.imagePage
@@ -1417,7 +1677,7 @@ open class WebGpuViewer(
                         cleanupImage(old)
                         if (old.isOnScreen) single.fadeIn()
                         if (!isDualPageMode() && !applyWideZoomIfNeeded(single)) applyFitModeAnchor(single)
-                        pager.state.invalidate()
+                        viewerState.invalidate()
                     }
                 }
                 if (installed) preview = single else single.cleanup()
@@ -1432,7 +1692,7 @@ open class WebGpuViewer(
                 shown.image?.update(f.image, rect)
                 shown.invalidate()
                 // A spread's page isn't on screen itself.
-                pager.state.invalidate()
+                viewerState.invalidate()
             }
         }
 
@@ -1460,6 +1720,25 @@ open class WebGpuViewer(
                 }
             }
             val animated = if (streaming) secondFrame != null else dec.hasNext
+            // Image filters draw only base levels. Pages already made keep what they have.
+            val mipMaps = !animated && viewerState.imageFilters.isEmpty()
+
+            // RK --> reshaped from the decoded pixels, and its gain map with it in toInput
+            val reshaped = if (!animated && shape != WidePageShape.Whole) {
+                reshapePixels(firstFrame.image, firstFrame.width, firstFrame.height, if (dec.isHdr) 8 else 4, shape)
+            } else {
+                null
+            }
+            if (shape is WidePageShape.Half && reshaped != null && page.page !is InsertPage) {
+                val second = InsertPage(page.page)
+                synchronized(lock) { secondHalves[readerKey(page.page)] = second }
+                // So the second half loads behind its first, as the next page does, or is shown in its place.
+                scope.launch {
+                    landOnSecondHalf(page.page, second)
+                    currentPage?.let { preloadPages(it) }
+                }
+            }
+            // RK <--
 
             // A gain map belongs to a still; its headroom is the map's, not the decoder's.
             val gainmap = if (!animated && dec.hdrKind == ImageDecoder.HdrKind.GAINMAP) {
@@ -1478,28 +1757,33 @@ open class WebGpuViewer(
             } else {
                 null
             }
+            val crop = trimColors != null && !isContinuous && webgpuPaged.page.cropInsteadOfZoom
 
             // The preview's textures become the image, or frame 0; one since replaced or freed
             // (a settings reset) leaves a fresh image to install instead.
             val shown = preview?.takeIf { synchronized(lock) { page.imagePage === it && !it.destroyed } }
-            // Only a page the reader hasn't moved re-homes for its trim.
+            // Only a page the reader hasn't moved re-homes for its trim, unless a crop resizes it.
             val wasHome = shown?.atHome == true
             val firstImage = shown?.image?.also {
                 it.update(firstFrame.image)
-                if (!animated) it.createMipMaps(firstFrame.image)
+                if (mipMaps) it.createMipMaps(firstFrame.image)
                 it.measure(firstFrame.image, trimColors, trimThreshold = 0.15f, backgroundColor = backgroundColor)
+                it.crop = crop
             } ?: Image(
-                firstFrame.image,
-                firstFrame.width,
-                firstFrame.height,
-                createMipMaps = !animated,
+                reshaped?.pixels ?: firstFrame.image, // RK
+                reshaped?.width ?: firstFrame.width, // RK
+                reshaped?.height ?: firstFrame.height, // RK
+                createMipMaps = mipMaps,
                 trimColors = trimColors,
                 trimThreshold = 0.15f,
                 backgroundColor = backgroundColor,
                 hdr = dec.isHdr,
                 hdrHeadroom = hdrHeadroom,
-                gainmap = gainmap?.toInput(),
-            ).also { orphan = it }
+                gainmap = gainmap?.toInput(shape), // RK
+            ).also {
+                it.crop = crop
+                orphan = it
+            }
             val firstDuration = firstFrame.duration
             firstFrame.close()
 
@@ -1512,9 +1796,11 @@ open class WebGpuViewer(
                     // something replaced it meanwhile.
                     shown != null -> shown.takeIf { page.imagePage === it && !it.destroyed }?.also {
                         page.preview = null
+                        it.isPlaceholder = false
                         // Tiles for a still; an animation swaps images every frame.
                         it.highQuality = !animated
-                        if (wasHome && firstImage.trim != null && !isDualPageMode()) rehome(it)
+                        // Else a crop's new size would keep the old size's home and limits.
+                        if ((wasHome || crop) && firstImage.trim != null && !isDualPageMode()) rehome(it)
                         // Bumps frameVersion, so a transition's cached render of the preview is stale.
                         it.invalidate()
                     }
@@ -1572,7 +1858,7 @@ open class WebGpuViewer(
                         }
                     }
                     noteIfLone(page)
-                    pager.state.invalidate()
+                    viewerState.invalidate()
                 }
             }
         } finally {
@@ -1608,10 +1894,10 @@ open class WebGpuViewer(
     }
 
     private fun applyWideZoomIfNeeded(page: ImagePage.ImageSingle): Boolean {
-        if (!config.landscapeZoom) return false
+        if (!landscapeZoomApplies(paged.page.landscapeZoom, paged.page.imageScaleType)) return false // RK
 
-        val screenW = pager.state.width
-        val screenH = pager.state.viewportHeight
+        val screenW = viewerState.width
+        val screenH = viewerState.viewportHeight
         if (screenW <= 0 || screenH <= 0) return false
 
         // don't zoom if it fits at original scale
@@ -1634,7 +1920,7 @@ open class WebGpuViewer(
             (aspectRatio > 2f * screenW.toFloat() / screenH)
         if (!isWide) return false
 
-        page.parent = pager.state
+        page.parent = viewerState
 
         // Half the image width fills the screen width.
         page.homeScale = screenW.toFloat() / (page.trimWidth / 2f)
@@ -1644,7 +1930,7 @@ open class WebGpuViewer(
         val minX = page.minX(page.homeScale)
         val maxX = page.maxX(page.homeScale)
 
-        page.x = when (config.imageZoomType) {
+        page.x = when (imageZoomType) {
             ZoomStartPosition.LEFT -> maxX
             ZoomStartPosition.RIGHT -> minX
             ZoomStartPosition.CENTER -> 0f
@@ -1656,28 +1942,27 @@ open class WebGpuViewer(
     }
 
     private fun applyFitModeAnchor(page: ImagePage.ImageSingle) {
-        val scaleType = config.imageScaleType
-        if (scaleType != 3 && scaleType != 4 && scaleType != 5) return
+        val scaleType = paged.page.imageScaleType
+        // RK: the guard on which scale types this sets moved into fitHomeScale, below
 
-        val screenW = pager.state.width
-        val screenH = pager.state.viewportHeight
+        val screenW = viewerState.width
+        val screenH = viewerState.viewportHeight
         if (screenW <= 0 || screenH <= 0) return
 
         val w = page.trimWidth.toFloat()
         val h = page.trimHeight.toFloat()
         if (w <= 0f || h <= 0f) return
 
-        page.parent = pager.state
+        // RK: the scale types it sets, Smart fit among them; the library fits the others to the screen
+        val homeScale = fitHomeScale(scaleType, screenW.toFloat(), screenH.toFloat(), w, h) ?: return
 
-        page.homeScale = when (scaleType) {
-            3 -> screenW / w
-            4 -> screenH / h
-            else -> 1f // original size
-        }.coerceAtLeast(0.01f)
+        page.parent = viewerState
+
+        page.homeScale = homeScale.coerceAtLeast(0.01f) // RK
 
         page.scale = page.homeScale
 
-        if (scaleType == 5) { // original size
+        if (scaleType == ReaderPreferences.ScaleType.ORIGINAL_SIZE) {
             if (page.homeScale < page.minScale) {
                 page.minScale = page.homeScale
             }
@@ -1686,7 +1971,7 @@ open class WebGpuViewer(
         val minX = page.minX(page.homeScale)
         val maxX = page.maxX(page.homeScale)
 
-        page.x = when (config.imageZoomType) {
+        page.x = when (imageZoomType) {
             ZoomStartPosition.LEFT -> maxX
             ZoomStartPosition.RIGHT -> minX
             ZoomStartPosition.CENTER -> 0f
@@ -1811,7 +2096,9 @@ open class WebGpuViewer(
         val shown = when (val current = currentPage) {
             null -> null
             is ViewerReaderPage -> current.takeIf {
-                keepsShownPage(it.page, chapters, readerAt = activity.viewModel.state.value.position?.chapterId)
+                // A split page's second half is kept as its first is
+                val shownPage = (it.page as? InsertPage)?.parent ?: it.page
+                keepsShownPage(shownPage, chapters, readerAt = activity.viewModel.state.value.position?.chapterId)
             }
             else -> current.takeIf {
                 it.prevChapter?.chapter?.id == chapters.currChapter.chapter.id ||
@@ -1823,11 +2110,14 @@ open class WebGpuViewer(
         currentPage = anchor
         // A kept page was reported already. Reported again from a strip, whose top page can still be
         // in the chapter it just scrolled out of, it switched the reader straight back.
-        if (shown == null) progressPage(anchor)?.let { activity.onPageSelected(it.page) }
+        if (shown == null) {
+            progressPage(anchor)?.let { activity.onPageSelected(it.page) }
+            landed()
+        }
         // RK <--
         preloadPages(anchor)
 
-        pager.state.apply {
+        viewerState.apply {
             onPageChange = onPageChange@{ delta ->
                 // The viewer already showed the page at fetchPage(delta).
                 // We need to update currentPage to match that.
@@ -1843,6 +2133,7 @@ open class WebGpuViewer(
                 // Synchronous, since the viewer walks getPage() from here - stale, and the next
                 // scroll step crosses the same boundary again.
                 currentPage = page
+                noteArrival(page, step) // RK
 
                 // The rest ran here too, on the animation thread under the viewer's scroll lock.
                 // Posted in order, so nothing is skipped or reordered - and on this viewer's own
@@ -1891,6 +2182,7 @@ open class WebGpuViewer(
         synchronized(lock) { flushDeferredCleanup() }
 
         currentPage = newPage
+        arrivedBackward = null // RK: a jump lands where it was aimed; navigateSpread notes a step
         // RK
         releaseFailedChapterPreloads()
         progressPage(newPage)?.let { activity.onPageSelected(it.page) }
@@ -1908,7 +2200,7 @@ open class WebGpuViewer(
             is ViewerReaderPage if newPage is ViewerReaderPage -> if (previousPage.page.chapter ==
                 newPage.page.chapter
             ) {
-                (newPage.page.index - previousPage.page.index).coerceIn(-1, 1)
+                readingOrder(newPage.page).compareTo(readingOrder(previousPage.page)) // RK: halves of one page too
             } else if (previousPage.page.chapter == newPage.prevChapter) {
                 1
             } else {
@@ -1937,34 +2229,33 @@ open class WebGpuViewer(
         if (direction != 0 && fromSpread != null) {
             animateTurn(direction, fromSpread)
         } else {
-            pager.state.invalidate()
+            viewerState.invalidate()
         }
     }
 
+    // RK: the reader jumped to a chapter, which the strip must not take for a scroll
+    protected open fun landed() {}
+
     /** How a [moveToPage] turn is shown. [direction] is 1 forward through the pages, -1 back. */
     protected open fun animateTurn(direction: Int, fromSpread: ImagePage) {
-        pager.state.transitionFromPage = fromSpread
-        pager.state.animatePageTurn(if (isReversed) direction else -direction)
+        viewerState.transitionFromPage = fromSpread
+        viewerState.animatePageTurn(if (isReversed) direction else -direction)
     }
 
-    // moveRight/moveLeft are screen directions, so a right-to-left book's next is to the left.
-    fun moveToNext() {
-        if (isReversed) moveLeft() else moveRight()
-    }
+    // RK: moveRight/moveLeft are screen directions, so a right-to-left book's next is to the left.
+    override fun moveForward() = if (isReversed) moveLeft() else moveRight()
 
-    fun moveToPrevious() {
-        if (isReversed) moveRight() else moveLeft()
-    }
+    override fun moveBackward() = if (isReversed) moveRight() else moveLeft()
 
     protected open fun moveRight() {
-        pager.state.getPage(0)?.let { page ->
-            if (config.navigateToPan) {
+        viewerState.getPage(0)?.let { page ->
+            if (paged.navigateToPan) {
                 val minX = page.minX(page.scale)
                 val maxX = page.maxX(page.scale)
                 // Where a running pan is headed, else where it sits.
                 val currentX = page.animationTargetX ?: page.x
 
-                val c = if (isVertical && config.imageZoomType == ZoomStartPosition.RIGHT) -1 else 1
+                val c = if (isVertical && imageZoomType == ZoomStartPosition.RIGHT) -1 else 1
                 val x = (currentX - c / page.scale).coerceIn(minX, maxX)
 
                 if (!currentX.closeTo(x)) {
@@ -1978,13 +2269,13 @@ open class WebGpuViewer(
     }
 
     protected open fun moveLeft() {
-        pager.state.getPage(0)?.let { page ->
-            if (config.navigateToPan) {
+        viewerState.getPage(0)?.let { page ->
+            if (paged.navigateToPan) {
                 val minX = page.minX(page.scale)
                 val maxX = page.maxX(page.scale)
                 val currentX = page.animationTargetX ?: page.x
 
-                val c = if (isVertical && config.imageZoomType == ZoomStartPosition.RIGHT) -1 else 1
+                val c = if (isVertical && imageZoomType == ZoomStartPosition.RIGHT) -1 else 1
                 val x = (currentX + c / page.scale).coerceIn(minX, maxX)
 
                 if (!currentX.closeTo(x)) {
@@ -2017,69 +2308,6 @@ open class WebGpuViewer(
     private fun navigateSpread(direction: Int) {
         val target = currentPage?.let { nextPage(it, direction) } ?: return
         moveToPage(target)
-    }
-
-    protected fun moveUp() {
-        moveToPrevious()
-    }
-
-    protected fun moveDown() {
-        moveToNext()
-    }
-
-    /**
-     * Called from the containing activity when a key [event] is received. It should return true
-     * if the event was handled, false otherwise.
-     */
-    override fun handleKeyEvent(event: KeyEvent): Boolean {
-        val isUp = event.action == KeyEvent.ACTION_UP
-        val ctrlPressed = event.metaState.and(KeyEvent.META_CTRL_ON) > 0
-        when (event.keyCode) {
-            KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                if (!config.volumeKeysEnabled || activity.viewModel.state.value.menuVisible) {
-                    return false
-                } else if (isUp) {
-                    if (!config.volumeKeysInverted) moveDown() else moveUp()
-                }
-            }
-
-            KeyEvent.KEYCODE_VOLUME_UP -> {
-                if (!config.volumeKeysEnabled || activity.viewModel.state.value.menuVisible) {
-                    return false
-                } else if (isUp) {
-                    if (!config.volumeKeysInverted) moveUp() else moveDown()
-                }
-            }
-
-            KeyEvent.KEYCODE_DPAD_RIGHT -> if (isUp) if (ctrlPressed) moveToNext() else moveRight()
-            KeyEvent.KEYCODE_DPAD_LEFT -> if (isUp) if (ctrlPressed) moveToPrevious() else moveLeft()
-            KeyEvent.KEYCODE_DPAD_DOWN -> if (isUp) moveDown()
-            KeyEvent.KEYCODE_DPAD_UP -> if (isUp) moveUp()
-            KeyEvent.KEYCODE_PAGE_DOWN -> if (isUp) moveDown()
-            KeyEvent.KEYCODE_PAGE_UP -> if (isUp) moveUp()
-            KeyEvent.KEYCODE_MENU -> if (isUp) activity.toggleMenu()
-            else -> return false
-        }
-        return true
-    }
-
-    /**
-     * Called from the containing activity when a generic motion [event] is received. It should
-     * return true if the event was handled, false otherwise.
-     */
-    override fun handleGenericMotionEvent(event: MotionEvent): Boolean {
-        if (event.source and InputDevice.SOURCE_CLASS_POINTER != 0) {
-            when (event.action) {
-                MotionEvent.ACTION_SCROLL -> {
-                    if (event.getAxisValue(MotionEvent.AXIS_VSCROLL) < 0.0f) {
-                        moveDown()
-                    } else {
-                        moveUp()
-                    }
-                    return true
-                }
-            }
-        }
-        return false
+        noteArrival(target, direction) // RK
     }
 }

@@ -68,13 +68,16 @@ import eu.kanade.tachiyomi.util.system.isOnline
 import eu.kanade.tachiyomi.util.system.openInBrowser
 import eu.kanade.tachiyomi.util.system.toast
 import exh.md.utils.MdConstants
-import exh.md.utils.MdUtil
+import kotlinx.serialization.Serializable
 import mihon.app.di.appGraph
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.automirroredrounded.Help
 import mihon.icons.materialsymbols.rounded.Close
 import mihon.icons.materialsymbols.roundedfilled.Visibility
 import mihon.icons.materialsymbols.roundedfilled.VisibilityOff
+import reikai.data.track.newLoginPkce
+import reikai.domain.track.shownIn
+import reikai.presentation.components.LocalShownContent
 import reikai.presentation.components.RevealableSecureTextField
 import reikai.presentation.settings.resetToDefaultPreference
 import reikai.presentation.track.TrackerError
@@ -88,7 +91,8 @@ import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState as collectPreferenceAsState
 
-object SettingsTrackingScreen : SearchableSettings {
+@Serializable
+data object SettingsTrackingScreen : SearchableSettings {
 
     @ReadOnlyComposable
     @Composable
@@ -113,6 +117,7 @@ object SettingsTrackingScreen : SearchableSettings {
         val reikaiLibraryPreferences = remember { context.appGraph.reikaiLibraryPreferences } // RK
         val trackerManager = remember { context.appGraph.trackerManager }
         val sourceManager = remember { context.appGraph.sourceManager }
+        val shown = LocalShownContent.current // RK
         // RK: RanobeDB's sync toggle only means anything once it is bound, so it follows it.
         val ranobeDbLoggedIn by trackerManager.ranobeDb.isLoggedInFlow
             .collectAsState(initial = trackerManager.ranobeDb.isLoggedIn)
@@ -211,7 +216,13 @@ object SettingsTrackingScreen : SearchableSettings {
                 preferenceItems = listOf(
                     Preference.PreferenceItem.TrackerPreference(
                         tracker = trackerManager.myAnimeList,
-                        login = { context.openInBrowser(MyAnimeListApi.authUrl(), forceDefaultBrowser = true) },
+                        // RK: the login URL stores its PKCE verifier for the redirect
+                        login = {
+                            context.openInBrowser(
+                                MyAnimeListApi.authUrl(trackPreferences, trackerManager.myAnimeList),
+                                forceDefaultBrowser = true,
+                            )
+                        },
                         logout = { dialog = LogoutDialog(trackerManager.myAnimeList) },
                     ),
                     Preference.PreferenceItem.TrackerPreference(
@@ -247,12 +258,24 @@ object SettingsTrackingScreen : SearchableSettings {
                     // RK: listed after Hikka by owner choice; upstream lists it first
                     Preference.PreferenceItem.TrackerPreference(
                         tracker = trackerManager.mangaBaka,
-                        login = { context.openInBrowser(MangaBakaApi.authUrl(), forceDefaultBrowser = true) },
+                        // RK: the login URL stores its PKCE verifier and state for the redirect
+                        login = {
+                            context.openInBrowser(
+                                MangaBakaApi.authUrl(trackPreferences, trackerManager.mangaBaka),
+                                forceDefaultBrowser = true,
+                            )
+                        },
                         logout = { dialog = LogoutDialog(trackerManager.mangaBaka) },
                     ),
                     Preference.PreferenceItem.TrackerPreference(
                         tracker = trackerManager.comick,
-                        login = { context.openInBrowser(ComickApi.authUrl(), forceDefaultBrowser = true) },
+                        // RK: the login URL stores its PKCE verifier and state for the redirect
+                        login = {
+                            context.openInBrowser(
+                                ComickApi.authUrl(trackPreferences, trackerManager.comick),
+                                forceDefaultBrowser = true,
+                            )
+                        },
                         logout = { dialog = LogoutDialog(trackerManager.comick) },
                     ),
                     // RK: MangaDex MDList tracker. Browser OAuth (PKCE), callback lands in
@@ -261,7 +284,9 @@ object SettingsTrackingScreen : SearchableSettings {
                         tracker = trackerManager.mdList,
                         login = {
                             context.openInBrowser(
-                                MdConstants.Login.authUrl(MdUtil.getPkceChallengeCode()),
+                                MdConstants.Login.authUrl(
+                                    trackPreferences.newLoginPkce(trackerManager.mdList).codeChallenge,
+                                ),
                                 forceDefaultBrowser = true,
                             )
                         },
@@ -305,14 +330,23 @@ object SettingsTrackingScreen : SearchableSettings {
                         logout = { dialog = LogoutDialog(trackerManager.novelUpdates) },
                     ),
                     Preference.PreferenceItem.InfoPreference(stringResource(MR.strings.tracking_info)),
-                ) + ranobeDbPreferences(trackPreferences, ranobeDbLoggedIn) +
-                    novelListPreferences(trackPreferences, novelListLoggedIn) +
-                    novelUpdatesPreferences(trackPreferences, novelUpdatesLoggedIn) { dialog = it },
+                ).filterNot { it is Preference.PreferenceItem.TrackerPreference && !it.tracker.shownIn(shown) } + // RK
+                    // RK: a tracker's options leave with it
+                    ranobeDbPreferences(trackPreferences, ranobeDbLoggedIn && trackerManager.ranobeDb.shownIn(shown)) +
+                    novelListPreferences(
+                        trackPreferences,
+                        novelListLoggedIn && trackerManager.novelList.shownIn(shown),
+                    ) +
+                    novelUpdatesPreferences(
+                        trackPreferences,
+                        novelUpdatesLoggedIn && trackerManager.novelUpdates.shownIn(shown),
+                    ) { dialog = it },
             ),
             Preference.PreferenceGroup(
                 title = stringResource(MR.strings.enhanced_services),
                 preferenceItems = (
                     enhancedTrackers.first
+                        .filter { it.shownIn(shown) } // RK
                         .map { service ->
                             Preference.PreferenceItem.TrackerPreference(
                                 tracker = service,
@@ -332,30 +366,26 @@ object SettingsTrackingScreen : SearchableSettings {
         onDismissRequest: () -> Unit,
     ) {
         val context = LocalContext.current
-        val scope = rememberCoroutineScope()
+        // RK: scope, processing and inputError moved into TrackingLoginDialogShell, which runs the login
 
         val username = rememberTextFieldState(tracker.getUsername())
         val password = rememberTextFieldState(tracker.getPassword())
-        var processing by remember { mutableStateOf(false) }
-        var inputError by remember { mutableStateOf(false) }
 
-        AlertDialog(
-            onDismissRequest = onDismissRequest,
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = stringResource(MR.strings.login_title, tracker.name),
-                        modifier = Modifier.weight(1f),
-                    )
-                    IconButton(onClick = onDismissRequest) {
-                        Icon(
-                            imageVector = MaterialSymbols.Rounded.Close,
-                            contentDescription = stringResource(MR.strings.action_close),
-                        )
-                    }
-                }
+        // RK --> the title and the confirm button are the shell the token login shares
+        TrackingLoginDialogShell(
+            tracker = tracker,
+            canLogin = username.text.isNotBlank() && password.text.isNotBlank(),
+            login = {
+                checkLogin(
+                    context = context,
+                    tracker = tracker,
+                    username = username.text.toString(),
+                    password = password.text.toString(),
+                )
             },
-            text = {
+            onDismissRequest = onDismissRequest,
+            fields = { isError ->
+                // RK <--
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(
                         modifier = Modifier
@@ -365,7 +395,7 @@ object SettingsTrackingScreen : SearchableSettings {
                         label = { Text(text = stringResource(uNameStringRes)) },
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                         lineLimits = TextFieldLineLimits.SingleLine,
-                        isError = inputError && !processing,
+                        isError = isError, // RK
                     )
 
                     var hidePassword by remember { mutableStateOf(true) }
@@ -396,34 +426,11 @@ object SettingsTrackingScreen : SearchableSettings {
                             keyboardType = KeyboardType.Password,
                             imeAction = ImeAction.Done,
                         ),
-                        isError = inputError && !processing,
+                        isError = isError, // RK
                     )
                 }
-            },
-            confirmButton = {
-                Button(
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !processing && username.text.isNotBlank() && password.text.isNotBlank(),
-                    onClick = {
-                        scope.launchIO {
-                            processing = true
-                            val result = checkLogin(
-                                context = context,
-                                tracker = tracker,
-                                username = username.text.toString(),
-                                password = password.text.toString(),
-                            )
-                            inputError = !result
-                            if (result) onDismissRequest()
-                            processing = false
-                        }
-                    },
-                ) {
-                    val id = if (processing) MR.strings.logging_in else MR.strings.login
-                    Text(text = stringResource(id))
-                }
-            },
-        )
+            }, // RK
+        ) // RK
     }
 
     private suspend fun checkLogin(
@@ -531,9 +538,67 @@ object SettingsTrackingScreen : SearchableSettings {
     ) {
         val context = LocalContext.current
         val uriHandler = LocalUriHandler.current
-        val scope = rememberCoroutineScope()
 
         val token = rememberTextFieldState(tracker.getPassword())
+
+        TrackingLoginDialogShell(
+            tracker = tracker,
+            canLogin = token.text.isNotBlank(),
+            login = {
+                // The tracker reads the token out of the password slot, so the username
+                // it stores comes from the service itself once the token validates.
+                checkLogin(context = context, tracker = tracker, username = "", password = token.text.toString())
+            },
+            onDismissRequest = onDismissRequest,
+        ) { isError ->
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (onWebViewLogin != null) {
+                    // The easier path, so it leads. A token outlasts a session cookie, which is
+                    // why the field below stays rather than being replaced by this.
+                    OutlinedButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onWebViewLogin,
+                    ) {
+                        Text(text = stringResource(MR.strings.login_with_browser))
+                    }
+                    Text(text = stringResource(MR.strings.login_token_or_paste))
+                } else {
+                    Text(text = stringResource(MR.strings.login_token_info))
+                }
+
+                Text(
+                    text = stringResource(helpStringRes),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                RevealableSecureTextField(
+                    state = token,
+                    label = stringResource(tokenStringRes),
+                    isError = isError,
+                )
+
+                TextButton(onClick = { uriHandler.openUri(helpUrl) }) {
+                    Text(text = stringResource(MR.strings.login_get_token))
+                }
+            }
+        }
+    }
+
+    /**
+     * A login dialog's title with its close button and the full-width confirm button, around [fields],
+     * which is told when to show the last attempt as failed. [login] runs off the main thread, and the
+     * dialog closes when it succeeds.
+     */
+    @Composable
+    private fun TrackingLoginDialogShell(
+        tracker: Tracker,
+        canLogin: Boolean,
+        login: suspend () -> Boolean,
+        onDismissRequest: () -> Unit,
+        fields: @Composable (isError: Boolean) -> Unit,
+    ) {
+        val scope = rememberCoroutineScope()
         var processing by remember { mutableStateOf(false) }
         var inputError by remember { mutableStateOf(false) }
 
@@ -553,54 +618,15 @@ object SettingsTrackingScreen : SearchableSettings {
                     }
                 }
             },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    if (onWebViewLogin != null) {
-                        // The easier path, so it leads. A token outlasts a session cookie, which is
-                        // why the field below stays rather than being replaced by this.
-                        OutlinedButton(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = onWebViewLogin,
-                        ) {
-                            Text(text = stringResource(MR.strings.login_with_browser))
-                        }
-                        Text(text = stringResource(MR.strings.login_token_or_paste))
-                    } else {
-                        Text(text = stringResource(MR.strings.login_token_info))
-                    }
-
-                    Text(
-                        text = stringResource(helpStringRes),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-
-                    RevealableSecureTextField(
-                        state = token,
-                        label = stringResource(tokenStringRes),
-                        isError = inputError && !processing,
-                    )
-
-                    TextButton(onClick = { uriHandler.openUri(helpUrl) }) {
-                        Text(text = stringResource(MR.strings.login_get_token))
-                    }
-                }
-            },
+            text = { fields(inputError && !processing) },
             confirmButton = {
                 Button(
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !processing && token.text.isNotBlank(),
+                    enabled = !processing && canLogin,
                     onClick = {
                         scope.launchIO {
                             processing = true
-                            // The tracker reads the token out of the password slot, so the username
-                            // it stores comes from the service itself once the token validates.
-                            val result = checkLogin(
-                                context = context,
-                                tracker = tracker,
-                                username = "",
-                                password = token.text.toString(),
-                            )
+                            val result = login()
                             inputError = !result
                             if (result) onDismissRequest()
                             processing = false

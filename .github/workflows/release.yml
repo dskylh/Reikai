@@ -36,7 +36,7 @@ jobs:
   # took about 26 minutes in turn.
   test:
     name: Unit tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Clone repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,13 +47,22 @@ jobs:
         uses: ./.github/actions/setup-build
         with:
           cache-encryption-key: ${{ secrets.GRADLE_ENCRYPTION_KEY }}
+          robolectric-cache: 'true'
 
       - name: Run unit tests
         run: ./gradlew test
 
+      - name: Save Robolectric's Android SDK jars
+        if: always() && env.ROBOLECTRIC_CACHE_HIT != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: ${{ env.ROBOLECTRIC_CACHE_KEY }}
+
   release:
     name: Build signed release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Clone repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -106,7 +115,7 @@ jobs:
   # -Pdist rather than a per-variant one, so it never shared a Gradle run with the release build.
   foss:
     name: Build signed FOSS
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Clone repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -150,7 +159,7 @@ jobs:
 
   publish:
     name: Draft the release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [test, release, foss]
     steps:
       # Full history and tags: the notes link the changes since the previous tag.
@@ -190,7 +199,7 @@ jobs:
         run: bash scripts/ci/package-apks.sh release "${VERSION_TAG}"
 
       - name: Create draft release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ env.VERSION_TAG }}
           name: Reikai ${{ env.VERSION_TAG }}

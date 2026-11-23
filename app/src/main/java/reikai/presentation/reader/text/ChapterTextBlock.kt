@@ -6,6 +6,7 @@ import android.text.Selection
 import android.text.Spannable
 import android.text.Spanned
 import android.text.style.ImageSpan
+import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import kotlinx.coroutines.CoroutineScope
@@ -53,7 +54,8 @@ class ChapterTextBlock(
 
     fun ensureChunkCount(count: Int) {
         while (chunkViews.size < count) {
-            val view = createChunkView()
+            // Android lists other apps' text actions (a dictionary, a translator) only for a view with an id.
+            val view = createChunkView().apply { id = View.generateViewId() }
             chunkViews.add(view)
             container.addView(view)
         }
@@ -76,7 +78,7 @@ class ChapterTextBlock(
             val text = view.text as? Spanned ?: return@forEach
             text.getSpans(0, text.length, ChapterImageSpan::class.java).forEach { span ->
                 val picture = (span.drawable as? DrawableWrapper)?.innerDrawable as? TiledPicture ?: return@forEach
-                tiledPictures += TiledAnchor(view, text.getSpanStart(span), span.topPx, picture)
+                tiledPictures += TiledAnchor(view, text.getSpanStart(span), span, picture)
             }
         }
     }
@@ -91,6 +93,8 @@ class ChapterTextBlock(
     internal fun releasePictures() {
         pictureScope?.cancel()
         pictureScope = null
+        // Afresh, since a batch cancelled between setting the text and collecting it left a picture uncounted.
+        collectTiledPictures()
         tiledPictures.forEach { it.picture.close() }
         tiledPictures.clear()
     }

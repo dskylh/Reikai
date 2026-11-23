@@ -3,6 +3,8 @@ package eu.kanade.tachiyomi.data.backup
 import android.content.SharedPreferences
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.service.TrackPreferences
+import eu.kanade.tachiyomi.core.security.PrivacyPreferences
+import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.data.backup.create.creators.PreferenceBackupCreator
 import eu.kanade.tachiyomi.data.backup.create.creators.configurableSources
 import eu.kanade.tachiyomi.data.backup.models.BackupPreference
@@ -17,8 +19,10 @@ import eu.kanade.tachiyomi.network.NetworkPreferences
 import eu.kanade.tachiyomi.network.interceptor.FLARESOLVERR_URL_KEY
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.Source
+import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.source.sourcePreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
+import exh.source.EnhancedHttpSource
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.every
@@ -43,6 +47,7 @@ import reikai.domain.novel.NovelPreferences
 import reikai.domain.source.ReikaiSourcePreferences
 import reikai.novel.content.NovelCodeSnippet
 import reikai.novel.content.NovelSnippets
+import reikai.novel.host.LnPluginHost
 import reikai.presentation.recents.EmittingPreferenceStore
 import tachiyomi.core.common.preference.PreferenceStore
 
@@ -75,6 +80,17 @@ class SourcePreferencesBackupTest {
     fun `a settings file a manga and a novel source share is written once`() {
         configurableSources(listOf(configurable(7)), listOf(novelApp(configurable(7)))).map { it.id } shouldBe
             listOf(7L)
+    }
+
+    // A delegated extension arrives wrapped, and the wrapper itself is never configurable.
+    @Test
+    fun `a delegated extension's settings go into the backup`() {
+        val extension = mockk<HttpSource>(moreInterfaces = arrayOf(ConfigurableSource::class)) {
+            every { id } returns 3
+        }
+
+        configurableSources(listOf(EnhancedHttpSource(extension, mockk<HttpSource>())), emptyList())
+            .map { it.id } shouldBe listOf(3L)
     }
 
     @Test
@@ -132,6 +148,7 @@ class SourcePreferencesBackupTest {
             }
         }
         val restorer = PreferenceRestorer(
+            lnPluginHost = { mockk(relaxed = true) },
             context = mockk(),
             getCategories = mockk(),
             preferenceStore = store,
@@ -158,7 +175,10 @@ class SourcePreferencesBackupTest {
     private val store = EmittingPreferenceStore()
     private val novelPreferences = NovelPreferences(store)
 
+    private val pluginHost = mockk<LnPluginHost>(relaxed = true)
+
     private val restorer = PreferenceRestorer(
+        lnPluginHost = { pluginHost },
         context = mockk(),
         getCategories = mockk(),
         preferenceStore = store,
@@ -169,6 +189,9 @@ class SourcePreferencesBackupTest {
             SourcePreferences(store),
             NetworkPreferences(store, isDebugBuild = false),
             TrackPreferences(store),
+            mockk(relaxed = true),
+            SecurityPreferences(store),
+            PrivacyPreferences(store),
             mockk(relaxed = true),
         ),
     )
@@ -214,6 +237,21 @@ class SourcePreferencesBackupTest {
         } finally {
             unmockkStatic("eu.kanade.tachiyomi.source.ConfigurableSourceKt")
         }
+    }
+
+    // A plugin reads its settings and sign-in while its engine is built, so one already running keeps the old ones.
+    @Test
+    fun `a plugin's restored settings start its next call in a fresh engine`() = runTest {
+        restorer.restoreSource(
+            listOf(
+                BackupSourcePreferences(
+                    "ln_storage::boxnovel::",
+                    listOf(BackupPreference("ln_storage::boxnovel::storage:url", StringPreferenceValue("u"))),
+                ),
+            ),
+        )
+
+        verify { pluginHost.storageChanged("boxnovel") }
     }
 
     @Test

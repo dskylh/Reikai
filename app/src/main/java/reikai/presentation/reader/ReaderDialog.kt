@@ -2,6 +2,7 @@ package reikai.presentation.reader
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.Stable
+import eu.kanade.tachiyomi.ui.reader.ReaderViewModel
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
 
 /**
@@ -29,6 +30,9 @@ sealed interface ReaderDialog {
 
     data object ReadingModeSelect : ReaderDialog
 
+    /** A novel's reading-mode picker, over the capability that holds its own mode, which manga builds none of. */
+    data class PageLayoutSelect(val settings: ReaderTextSettings) : ReaderDialog
+
     data object OrientationSelect : ReaderDialog
 
     data object ChapterList : ReaderDialog
@@ -39,6 +43,11 @@ sealed interface ReaderDialog {
      * take no argument: each instance is already bound to its page.
      */
     data class PageActions(val actions: ReaderPageActions) : ReaderDialog
+
+    /** A picture in a novel chapter, full screen: [model] is what coil loads, [name] what Save calls it,
+     *  [folder] where under Pictures it goes, [cover] the verb making it the cover of the novel it was opened in. */
+    data class Picture(val model: Any, val name: String, val folder: String, val cover: ReaderPictureCover) :
+        ReaderDialog
 
     /** Both carry the typography capability for the same reason: a type that builds none cannot
      *  raise them, so the buttons are absent rather than opening a picker over nothing. */
@@ -64,4 +73,9 @@ interface ReaderPageActions {
     fun share(copyToClipboard: Boolean)
 
     fun setAsCover()
+}
+
+/** Makes a picture, given its bytes, the cover of the entry it was opened in. */
+fun interface ReaderPictureCover {
+    suspend fun setAsCover(picture: suspend () -> ByteArray?): ReaderViewModel.SetAsCoverResult
 }

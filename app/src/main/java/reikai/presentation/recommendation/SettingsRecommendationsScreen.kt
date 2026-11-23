@@ -13,6 +13,7 @@ import eu.kanade.presentation.more.settings.screen.SearchableSettings
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import mihon.app.di.appGraph
 import reikai.data.recommendation.taste.TrackerLibraryRefreshWorker
 import reikai.domain.recommendation.ReikaiRecommendationPreferences
@@ -30,7 +31,8 @@ import tachiyomi.presentation.core.util.collectAsState
  * DSL. "Show related manga" is the master switch: with it off the carousel does no work at all, so
  * every other group here is hidden rather than left dangling.
  */
-object SettingsRecommendationsScreen : SearchableSettings {
+@Serializable
+data object SettingsRecommendationsScreen : SearchableSettings {
 
     @Composable
     @ReadOnlyComposable
@@ -93,7 +95,7 @@ object SettingsRecommendationsScreen : SearchableSettings {
                 visible = relatedEnabled && includeTrackers,
             )
         return Preference.PreferenceGroup(
-            title = stringResource(MR.strings.pref_recommendation_sources),
+            title = stringResource(MR.strings.label_sources),
             preferenceItems = listOfNotNull(
                 Preference.PreferenceItem.SwitchPreference(
                     preference = prefs.enableRelatedMangas,
@@ -120,7 +122,7 @@ object SettingsRecommendationsScreen : SearchableSettings {
         val scope = rememberCoroutineScope()
         val repository = remember { context.appGraph.tasteLibraryRepository }
         val fetchers = remember { context.appGraph.trackerLibraryFetchers }
-        val neverLabel = stringResource(MR.strings.pref_last_refresh_never)
+        val neverLabel = stringResource(MR.strings.relative_time_span_never)
         // Re-read whenever the manual pull starts or ends, so the summary updates as it lands. withIOContext
         // because a produceState body runs on Main, and this is one DB read per tracker.
         val lastRefreshSummary by produceState("", neverLabel) {
@@ -209,6 +211,7 @@ object SettingsRecommendationsScreen : SearchableSettings {
                 Preference.PreferenceItem.SliderPreference(
                     preference = prefs.recommendationStyle,
                     title = stringResource(MR.strings.pref_recommendation_style),
+                    subtitle = stringResource(MR.strings.pref_recommendation_style_summary),
                     valueText = { "$it%" },
                     valueRange = 0..100,
                     visible = rerank,
@@ -216,6 +219,7 @@ object SettingsRecommendationsScreen : SearchableSettings {
                 Preference.PreferenceItem.SliderPreference(
                     preference = prefs.serendipity,
                     title = stringResource(MR.strings.pref_serendipity),
+                    subtitle = stringResource(MR.strings.pref_serendipity_summary),
                     valueText = { "$it%" },
                     valueRange = 0..100,
                     visible = rerank,
@@ -227,17 +231,15 @@ object SettingsRecommendationsScreen : SearchableSettings {
     @Composable
     private fun filtersGroup(prefs: ReikaiRecommendationPreferences): Preference.PreferenceGroup =
         Preference.PreferenceGroup(
-            title = stringResource(MR.strings.pref_recommendation_filters),
+            title = stringResource(MR.strings.reader_settings_filters),
             preferenceItems = listOf(
                 Preference.PreferenceItem.SwitchPreference(
                     preference = prefs.hideInLibraryRecommendations,
                     title = stringResource(MR.strings.pref_hide_in_library_recommendations),
-                    subtitle = stringResource(MR.strings.pref_hide_in_library_recommendations_summary),
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = prefs.hideTrackedReadingCompleted,
                     title = stringResource(MR.strings.pref_hide_tracked_reading_completed),
-                    subtitle = stringResource(MR.strings.pref_recommendation_filters_summary),
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = prefs.hideTrackedDropped,

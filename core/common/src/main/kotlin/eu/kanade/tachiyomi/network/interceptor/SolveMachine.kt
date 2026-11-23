@@ -27,6 +27,7 @@ internal class SolveMachine(
 
     private var lastPress = 0L
     private var hasPressed = false
+    private var pressQueued = false
     private var clearReadings = 0
     private var deadline = 0L
 
@@ -118,7 +119,20 @@ internal class SolveMachine(
         // token in the main frame, so on the pages this feature sees it is the cooldown beside it
         // that does the work. The cooldown is measured only against a press that happened, since a
         // zero [lastPress] would otherwise silence the first one whenever the clock reads low.
-        if (hasToken || (hasPressed && at - lastPress < PRESS_COOLDOWN_MS)) return
+        if (hasToken) return
+        val wait = if (hasPressed) lastPress + PRESS_COOLDOWN_MS - at else 0L
+        if (wait > 0) {
+            // With no probe no tick comes back to press once the cooldown passes, so a reissue that
+            // arrives inside it is pressed when it ends.
+            if (!watching && !pressQueued) {
+                pressQueued = true
+                schedule(wait) {
+                    pressQueued = false
+                    pressWhenDue(hasToken = false)
+                }
+            }
+            return
+        }
 
         press()
         lastPress = at
@@ -182,6 +196,6 @@ internal const val SOLVE_BUDGET_MS = 20_000L
 private const val ACCEPT_POLL_MS = 250L
 private const val ACCEPT_POLL_ATTEMPTS = 20
 
-/** The events Cloudflare posts that this decides anything from. */
-private const val INTERACTIVE_BEGIN = "interactiveBegin"
-private const val COMPLETE = "complete"
+/** The events Cloudflare posts that this decides anything from, which the probe also filters on. */
+internal const val INTERACTIVE_BEGIN = "interactiveBegin"
+internal const val COMPLETE = "complete"

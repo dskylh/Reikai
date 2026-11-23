@@ -16,9 +16,17 @@ import org.junit.jupiter.params.provider.EnumSource
 import reikai.data.merge.MergeGroupRepositoryImpl
 import reikai.data.novel.NovelHistoryRepositoryImpl
 import reikai.data.novel.NovelRepositoryImpl
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
 import reikai.domain.library.ContentType
+import reikai.domain.library.FakeLibraryHiddenRepository
+import reikai.domain.library.FakeLibraryManualOrderRepository
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
 import tachiyomi.data.manga.MangaRepositoryImpl
@@ -93,6 +101,9 @@ class GroupMemberBackupConformanceTest {
         )
         return if (type == ContentType.MANGA) {
             val creator = MangaBackupCreator(
+                libraryHides = FakeLibraryHiddenRepository(),
+                tombstones = NoChapterTombstoneRepository,
+                manualOrder = FakeLibraryManualOrderRepository(),
                 mangaRepository = MangaRepositoryImpl(database),
                 chapterRepository = mockk(),
                 trackRepository = mockk(),
@@ -114,12 +125,18 @@ class GroupMemberBackupConformanceTest {
                 getManga = GetManga(MangaRepositoryImpl(database)),
                 mergeGroupRepository = groups,
                 chapterNumberOverrides = NoChapterNumberOverrides,
+                copyMarks = InMemoryChapterCopyMarks(),
+                localVolumes = NoLocalVolumes,
+                volumePicks = NoVolumePicks,
                 readingLog = NoReadingLog,
             )
             options.backupEntries(creator).toList().map { it.url to it.favorite }
         } else {
             val novels = NovelRepositoryImpl(database)
             val creator = NovelBackupCreator(
+                libraryHides = FakeLibraryHiddenRepository(),
+                tombstones = NoChapterTombstoneRepository,
+                manualOrder = FakeLibraryManualOrderRepository(),
                 novelRepository = novels,
                 novelChapterRepository = mockk(),
                 categoryRepository = mockk(),
@@ -129,7 +146,12 @@ class GroupMemberBackupConformanceTest {
                 novelHistoryRepository = NovelHistoryRepositoryImpl(database),
                 novelSourceManager = mockk(),
                 chapterNumberOverrides = NoChapterNumberOverrides,
+                copyMarks = InMemoryChapterCopyMarks(),
+                localVolumes = NoLocalVolumes,
+                volumePicks = NoVolumePicks,
                 readingLog = NoReadingLog,
+                readingPace = NoReadingPace,
+                localNovelLanguages = NoLocalNovelLanguages,
             )
             options.backupEntries(creator).toList().map { it.url to it.favorite }
         }

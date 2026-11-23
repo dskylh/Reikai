@@ -1,0 +1,85 @@
+package reikai.storage
+
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
+import com.hippo.unifile.UniFile
+import io.kotest.matchers.shouldBe
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import reikai.storage.FakeSafProvider.ChildListingFault
+import java.io.File
+
+/**
+ * The local-file rules over the picked-folder path itself: a listing the second count can catch is not trusted. One
+ * that hides the same file at every reading agrees with its count, so it is, and nothing can tell it from whole.
+ */
+@RunWith(RobolectricTestRunner::class)
+class LocalFilesOnSafTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    private val context = ApplicationProvider.getApplicationContext<Context>()
+    private lateinit var series: File
+
+    @Before
+    fun setUp() {
+        FakeSafProvider.install(context, tmp.root)
+        series = tmp.newFolder("Reikai", "Series")
+        File(series, "a.cbz").writeText("aaa")
+        File(series, "b.cbz").writeText("bbbb")
+    }
+
+    /** A failed listing reads as empty, so a tidy that took its word would set aside a folder still holding files. */
+    @Test
+    fun `a folder whose listing fails is not set aside`() {
+        val folder = FakeSafProvider.picked(context, series.parentFile!!).findFile("Series")!!
+        FakeSafProvider.childListingFaults += ChildListingFault.Throw
+
+        (folder.parkIfSpent(context) to series.exists()) shouldBe (false to true)
+    }
+
+    @Test
+    fun `a whole listing is trusted`() {
+        FakeSafProvider.picked(context, series).listOrNull(context)!!.map { it.name } shouldBe listOf("a.cbz", "b.cbz")
+    }
+
+    @Test
+    fun `a failed child query is not trusted`() {
+        FakeSafProvider.childListingFaults += ChildListingFault.Throw
+
+        FakeSafProvider.picked(context, series).listOrNull(context) shouldBe null
+    }
+
+    @Test
+    fun `a short child listing is not trusted`() {
+        FakeSafProvider.childListingFaults += ChildListingFault.Short(1)
+
+        FakeSafProvider.picked(context, series).listOrNull(context) shouldBe null
+    }
+
+    @Test
+    fun `a null cursor is not trusted`() {
+        FakeSafProvider.childListingFaults += ChildListingFault.NullCursor
+
+        FakeSafProvider.picked(context, series).listOrNull(context) shouldBe null
+    }
+
+    @Test
+    fun `a folder still loading is not trusted`() {
+        FakeSafProvider.childListingFaults += listOf(ChildListingFault.Loading, ChildListingFault.Loading)
+
+        FakeSafProvider.picked(context, series).listOrNull(context) shouldBe null
+    }
+
+    @Test
+    fun `a listing that hides one file at every reading is trusted, since no count can catch it`() {
+        FakeSafProvider.listingFault = { ChildListingFault.Without("b.cbz") }
+
+        FakeSafProvider.picked(context, series).listOrNull(context)!!.map { it.name } shouldBe listOf("a.cbz")
+    }
+}

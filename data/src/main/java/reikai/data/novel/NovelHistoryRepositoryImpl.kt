@@ -62,8 +62,10 @@ class NovelHistoryRepositoryImpl(
     override suspend fun deleteAllNovelHistory(): Boolean =
         try {
             database.novel_historyQueries.removeAll()
-            // The reading log goes with the time it adds up to, as for manga.
+            // The reading log goes with the time it adds up to, as for manga, and so does the part of that
+            // time spent read aloud.
             database.reading_sessionQueries.removeAllNovel()
+            database.reading_paceQueries.clearNovelListened()
             true
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, e) { "Failed to clear novel history" }
@@ -76,6 +78,16 @@ class NovelHistoryRepositoryImpl(
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, e) { "Failed to upsert novel history chapterId=${update.chapterId}" }
         }
+    }
+
+    override suspend fun upsertAllNovelHistory(updates: List<NovelHistoryUpdate>): Boolean = try {
+        database.transaction {
+            updates.forEach { database.novel_historyQueries.upsert(it.chapterId, it.readAt, it.sessionReadDuration) }
+        }
+        true
+    } catch (e: Exception) {
+        logcat(LogPriority.ERROR, e) { "Failed to upsert history on ${updates.size} novel chapters" }
+        false
     }
 
     override suspend fun getHistoryByNovelId(novelId: Long): List<NovelHistory> =

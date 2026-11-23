@@ -8,19 +8,29 @@ import eu.kanade.tachiyomi.data.backup.restore.RestoreOptions
 import eu.kanade.tachiyomi.data.backup.restore.restorers.CategoriesRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.MangaRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.NovelRestorer
+import eu.kanade.tachiyomi.data.backup.restore.restorers.PreferenceRestorer
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.serialization.protobuf.ProtoBuf
 import reikai.data.backup.ApprovedRepos
+import reikai.data.backup.RestoreCategoryOrder
+import reikai.data.backup.RestoreExtensionInstaller
+import reikai.data.backup.RestoreHiddenEntries
+import reikai.data.local.CombineLocalVolumes
 import reikai.domain.db.PassThroughTransactions
+import reikai.domain.library.FakeLibraryManualOrderRepository
+import reikai.domain.library.LibraryManualOrderRepository
 import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.merge.AlignGroupCategories
+import reikai.domain.merge.GatherGroupViewerFlags
 import reikai.domain.merge.ReconcileMergedChapters
+import reikai.novel.font.NovelFontManager
 import reikai.novel.source.NovelSourceManager
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.source.repository.StubSourceRepository
 import tachiyomi.domain.source.service.SourceManager
+import java.io.File
 
 /** Runs the real [BackupRestorer] over [backup] encoded as a file, every collaborator relaxed but those passed. */
 suspend fun restoreEncoded(
@@ -33,11 +43,51 @@ suspend fun restoreEncoded(
     stubSourceRepository: StubSourceRepository = mockk(relaxed = true),
     novelSourceManager: NovelSourceManager = mockk(relaxed = true),
     alignGroupCategories: AlignGroupCategories = mockk(relaxed = true),
+    gatherGroupViewerFlags: GatherGroupViewerFlags = mockk(relaxed = true),
+    manualOrder: LibraryManualOrderRepository = FakeLibraryManualOrderRepository(),
+    restoreExtensionInstaller: RestoreExtensionInstaller = mockk(relaxed = true),
+    trusted: ApprovedRepos = ApprovedRepos(),
+    combineLocalVolumes: CombineLocalVolumes = mockk(relaxed = true),
+    novelFonts: NovelFontManager = mockk(relaxed = true),
+    preferenceRestorer: PreferenceRestorer = mockk(relaxed = true),
+    restoreHiddenEntries: RestoreHiddenEntries = mockk(relaxed = true),
+    restoreCategoryOrder: RestoreCategoryOrder = mockk(relaxed = true),
+) = restoreFile(
+    ProtoBuf.encodeToByteArray(Backup.serializer(), backup), options, categoriesRestorer, mangaRestorer,
+    novelRestorer, sourceManager, stubSourceRepository, novelSourceManager, alignGroupCategories, manualOrder,
+    restoreExtensionInstaller, trusted, combineLocalVolumes, novelFonts, preferenceRestorer, gatherGroupViewerFlags,
+    restoreHiddenEntries = restoreHiddenEntries,
+    restoreCategoryOrder = restoreCategoryOrder,
+)
+
+/** Runs the real [BackupRestorer] over the backup file [file], as another app may have written it. */
+suspend fun restoreFile(
+    file: ByteArray,
+    options: RestoreOptions,
+    categoriesRestorer: CategoriesRestorer = mockk(relaxed = true),
+    mangaRestorer: MangaRestorer = mockk(relaxed = true),
+    novelRestorer: NovelRestorer = mockk(relaxed = true),
+    sourceManager: SourceManager = mockk(relaxed = true),
+    stubSourceRepository: StubSourceRepository = mockk(relaxed = true),
+    novelSourceManager: NovelSourceManager = mockk(relaxed = true),
+    alignGroupCategories: AlignGroupCategories = mockk(relaxed = true),
+    manualOrder: LibraryManualOrderRepository = FakeLibraryManualOrderRepository(),
+    restoreExtensionInstaller: RestoreExtensionInstaller = mockk(relaxed = true),
+    trusted: ApprovedRepos = ApprovedRepos(),
+    combineLocalVolumes: CombineLocalVolumes = mockk(relaxed = true),
+    novelFonts: NovelFontManager = mockk(relaxed = true),
+    preferenceRestorer: PreferenceRestorer = mockk(relaxed = true),
+    gatherGroupViewerFlags: GatherGroupViewerFlags = mockk(relaxed = true),
+    // Where the restore writes its error log; a test whose restore records an error passes a temporary folder.
+    cacheDir: File? = null,
+    restoreHiddenEntries: RestoreHiddenEntries = mockk(relaxed = true),
+    restoreCategoryOrder: RestoreCategoryOrder = mockk(relaxed = true),
 ) {
     val uri = mockk<Uri>()
     val context = mockk<Context>(relaxed = true) {
+        if (cacheDir != null) every { externalCacheDir } returns cacheDir
         every { contentResolver.openInputStream(uri) } answers {
-            ProtoBuf.encodeToByteArray(Backup.serializer(), backup).inputStream()
+            file.inputStream()
         }
     }
     BackupRestorer(
@@ -46,8 +96,7 @@ suspend fun restoreEncoded(
         context = context,
         downloadCache = mockk(relaxed = true),
         categoriesRestorer = categoriesRestorer,
-        preferenceRestorer = mockk(relaxed = true),
-        extensionStoreRestorer = mockk(relaxed = true),
+        preferenceRestorer = preferenceRestorer,
         mangaRestorer = mangaRestorer,
         parser = ProtoBuf,
         sourceManager = sourceManager,
@@ -66,7 +115,13 @@ suspend fun restoreEncoded(
         transactions = PassThroughTransactions,
         reikaiLibraryPreferences = ReikaiLibraryPreferences(InMemoryPreferenceStore()),
         alignGroupCategories = alignGroupCategories,
-        restoreExtensionInstaller = mockk(relaxed = true),
+        gatherGroupViewerFlags = gatherGroupViewerFlags,
+        restoreExtensionInstaller = restoreExtensionInstaller,
         restoreInstallSources = mockk(relaxed = true),
-    ).restore(uri, options, ApprovedRepos())
+        manualOrder = manualOrder,
+        novelFonts = novelFonts,
+        combineLocalVolumes = combineLocalVolumes,
+        restoreHiddenEntries = restoreHiddenEntries,
+        restoreCategoryOrder = restoreCategoryOrder,
+    ).restore(uri, options, trusted)
 }

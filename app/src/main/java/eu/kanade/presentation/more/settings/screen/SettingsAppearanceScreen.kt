@@ -9,31 +9,39 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLocale
 import androidx.core.app.ActivityCompat
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import com.materialkolor.PaletteStyle
 import eu.kanade.domain.ui.UiPreferences
+import eu.kanade.domain.ui.model.AppTheme
 import eu.kanade.domain.ui.model.TabletUiMode
 import eu.kanade.domain.ui.model.ThemeMode
 import eu.kanade.domain.ui.model.TimeFormat
 import eu.kanade.domain.ui.model.setAppCompatDelegateThemeMode
+import eu.kanade.domain.ui.model.shownWith
 import eu.kanade.presentation.more.settings.Preference
-import eu.kanade.presentation.more.settings.screen.appearance.AppLanguageScreen
 import eu.kanade.presentation.more.settings.widget.AppThemeModePreferenceWidget
 import eu.kanade.presentation.more.settings.widget.AppThemePreferenceWidget
+import eu.kanade.presentation.more.settings.widget.ShownContentPreferenceWidget
 import eu.kanade.presentation.util.rememberIs24HourSystem
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toJavaLocalDateTime
 import kotlinx.datetime.toLocalDateTime
+import kotlinx.serialization.Serializable
 import mihon.app.di.appGraph
+import mihon.core.navigation.AppLanguageRoute
+import mihon.core.navigation.LocalNavigator
 import reikai.domain.category.seedRecentsSurfaceFromUpdates
+import reikai.domain.details.ReadButtonSide
+import reikai.domain.stats.StatsShortcut
+import reikai.presentation.settings.appearance.CustomThemeColorRoute
+import reikai.presentation.settings.appearance.LauncherIconRoute
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
 import kotlin.time.Clock
 
-object SettingsAppearanceScreen : SearchableSettings {
+@Serializable
+data object SettingsAppearanceScreen : SearchableSettings {
 
     @ReadOnlyComposable
     @Composable
@@ -55,6 +63,7 @@ object SettingsAppearanceScreen : SearchableSettings {
         uiPreferences: UiPreferences,
     ): Preference.PreferenceGroup {
         val context = LocalContext.current
+        val navigator = LocalNavigator.current // RK
 
         val themeModePref = uiPreferences.themeMode
         val themeMode by themeModePref.collectAsState()
@@ -81,21 +90,43 @@ object SettingsAppearanceScreen : SearchableSettings {
                             value = themeMode,
                             onItemClick = {
                                 themeModePref.set(it)
-                                setAppCompatDelegateThemeMode(it)
+                                setAppCompatDelegateThemeMode(it.shownWith(appTheme)) // RK
                             },
                         )
 
                         AppThemePreferenceWidget(
                             value = appTheme,
                             amoled = amoled,
-                            onItemClick = { appThemePref.set(it) },
+                            // RK: picking or leaving Doki changes the night mode
+                            onItemClick = {
+                                appThemePref.set(it)
+                                setAppCompatDelegateThemeMode(themeMode.shownWith(it))
+                            },
                         )
                     }
                 },
+                // RK --> the Custom theme's seed color and palette style
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_custom_theme_color),
+                    subtitle = stringResource(MR.strings.pref_custom_theme_color_summary),
+                    visible = appTheme == AppTheme.CUSTOM,
+                    onClick = { navigator.push(CustomThemeColorRoute) },
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = uiPreferences.customThemeStyle,
+                    entries = PaletteStyle.entries.associateWith { it.name },
+                    title = stringResource(MR.strings.pref_custom_theme_style),
+                    visible = appTheme == AppTheme.CUSTOM,
+                    onValueChanged = {
+                        (context as? Activity)?.let { ActivityCompat.recreate(it) }
+                        true
+                    },
+                ),
+                // RK <--
                 Preference.PreferenceItem.SwitchPreference(
                     preference = amoledPref,
                     title = stringResource(MR.strings.pref_dark_theme_pure_black),
-                    visible = themeMode != ThemeMode.LIGHT,
+                    visible = themeMode.shownWith(appTheme) != ThemeMode.LIGHT, // RK
                     onValueChanged = {
                         (context as? Activity)?.let { ActivityCompat.recreate(it) }
                         true
@@ -113,6 +144,11 @@ object SettingsAppearanceScreen : SearchableSettings {
                     title = stringResource(MR.strings.pref_theme_cover_based_style),
                     visible = themeCoverBased,
                 ),
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_app_icon),
+                    subtitle = stringResource(MR.strings.pref_app_icon_summary),
+                    onClick = { navigator.push(LauncherIconRoute) },
+                ),
                 // RK <--
             ),
         )
@@ -123,11 +159,16 @@ object SettingsAppearanceScreen : SearchableSettings {
         uiPreferences: UiPreferences,
     ): Preference.PreferenceGroup {
         val context = LocalContext.current
-        val navigator = LocalNavigator.currentOrThrow
+        val navigator = LocalNavigator.current
         val locale = LocalLocale.current
         val is24HourSystem = rememberIs24HourSystem()
 
         val now = remember { Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).toJavaLocalDateTime() }
+
+        // RK -->
+        val shownContentPref = remember { context.appGraph.reikaiLibraryPreferences.shownContent }
+        val shownContent by shownContentPref.collectAsState()
+        // RK <--
 
         val dateFormat by uiPreferences.dateFormat.collectAsState()
         val formattedDateNow = remember(dateFormat) {
@@ -140,9 +181,16 @@ object SettingsAppearanceScreen : SearchableSettings {
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.pref_category_display),
             preferenceItems = listOf(
+                // RK -->
+                Preference.PreferenceItem.CustomPreference(
+                    title = stringResource(MR.strings.pref_shown_content),
+                ) {
+                    ShownContentPreferenceWidget(value = shownContent, onItemClick = shownContentPref::set)
+                },
+                // RK <--
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_app_language),
-                    onClick = { navigator.push(AppLanguageScreen()) },
+                    onClick = { navigator.push(AppLanguageRoute) },
                 ),
                 Preference.PreferenceItem.ListPreference(
                     preference = uiPreferences.tabletUiMode,
@@ -189,6 +237,17 @@ object SettingsAppearanceScreen : SearchableSettings {
                     preference = uiPreferences.imagesInDescription,
                     title = stringResource(MR.strings.pref_display_images_description),
                 ),
+                // RK -->
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = uiPreferences.detailsScrollActionsInMenu,
+                    title = stringResource(MR.strings.pref_details_scroll_actions_in_menu),
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = uiPreferences.readButtonSide,
+                    entries = ReadButtonSide.entries.associateWith { stringResource(it.titleRes) },
+                    title = stringResource(MR.strings.pref_read_button_side),
+                ),
+                // RK <--
                 // RK --> Updates and History as one Recents tab. Turning it on hands the combined
                 // surface the filter Updates was using, once, so the feed does not quietly widen.
                 Preference.PreferenceItem.SwitchPreference(
@@ -199,6 +258,12 @@ object SettingsAppearanceScreen : SearchableSettings {
                         if (enabled) sourcePreferences.seedRecentsSurfaceFromUpdates()
                         true
                     },
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = uiPreferences.statsShortcut,
+                    entries = StatsShortcut.entries
+                        .associateWith { stringResource(it.titleRes) },
+                    title = stringResource(MR.strings.pref_stats_shortcut),
                 ),
                 // RK <--
             ),

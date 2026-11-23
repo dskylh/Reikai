@@ -12,6 +12,7 @@ class NavigableChaptersTest {
         val hidden: Boolean = false,
         val origin: String? = null,
         val eligible: Boolean = true,
+        val name: String = "Chapter $number",
     )
 
     private fun List<Ch>.navigable(
@@ -25,9 +26,11 @@ class NavigableChaptersTest {
         downloadedOnlyIds = downloadedOnlyIds,
         skipDuplicates = skipDuplicates,
         numberOf = { it.number },
+        nameOf = { it.name },
         idOf = { it.id },
         originOf = { it.origin },
         ownerOf = { 1L },
+        markOf = { null },
     )
 
     /** Where a forward step from [from] lands, as both readers walk the list this returns. */

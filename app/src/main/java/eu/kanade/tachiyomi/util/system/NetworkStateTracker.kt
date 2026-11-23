@@ -1,11 +1,7 @@
 package eu.kanade.tachiyomi.util.system
 
 import android.content.Context
-import android.net.ConnectivityManager.NetworkCallback
-import android.net.Network
 import android.net.NetworkCapabilities
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.flow.callbackFlow
 
 data class NetworkState(
     val isConnected: Boolean,
@@ -23,20 +19,4 @@ fun Context.activeNetworkState(): NetworkState {
         isValidated = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ?: false,
         isWifi = wifiManager.isWifiEnabled && capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ?: false,
     )
-}
-
-fun Context.networkStateFlow() = callbackFlow {
-    val networkCallback = object : NetworkCallback() {
-        override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-            trySend(activeNetworkState())
-        }
-        override fun onLost(network: Network) {
-            trySend(activeNetworkState())
-        }
-    }
-
-    connectivityManager.registerDefaultNetworkCallback(networkCallback)
-    awaitClose {
-        connectivityManager.unregisterNetworkCallback(networkCallback)
-    }
 }

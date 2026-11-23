@@ -14,7 +14,11 @@ import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.widget.FrameLayout
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.core.view.ViewCompat
 import coil3.imageLoader
+import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation
 import eu.kanade.tachiyomi.util.system.setDefaultSettings
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +35,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import mihon.app.di.appGraph
 import org.json.JSONArray
 import org.json.JSONObject
 import reikai.data.coil.fetchNovelImage
@@ -64,9 +69,9 @@ import kotlin.math.abs
  * The light-novel adapter under [ReaderViewport], rendering chapters into a document that is
  * Reikai's own: its stylesheet and engine come from `assets/novel-web/`, not the vendored bundle.
  *
- * The volume-key preferences arrive as values rather than a preferences class, so the viewport is
- * constructible without the graph. The switch is read on each press, and the direction and distance
- * come from the last settings push.
+ * The volume-key preferences arrive as values rather than a preferences class: the switch is read on each
+ * press, and the direction and distance come from the last settings push. Building a chapter's page reads
+ * the app graph's UI preferences for its chrome colours, so the context has to be the app's.
  */
 @SuppressLint("SetJavaScriptEnabled")
 class NovelWebViewport(
@@ -92,6 +97,8 @@ class NovelWebViewport(
     autoScrollSpeed: Preference<Float>,
     /** Seconds per page while auto-scroll turns pages instead. */
     autoScrollInterval: Preference<Int>,
+    /** Two pages side by side when paged ([NovelSpreads]). A change rebuilds the viewport. */
+    spread: Boolean = false,
 ) : ReaderViewport, TextViewport, ChapterWindow {
 
     private val paged = pageLayout.isPaged
@@ -235,13 +242,14 @@ class NovelWebViewport(
             webFonts,
             scope,
             onRendererGone = ::closeReader,
-        ) { image ->
-            // The text renderer's fetch and cache, so switching modes downloads nothing again.
+        ) { image, fresh ->
+            // The text renderer's fetch and cache, so switching modes downloads nothing again. A Retry reads
+            // past the cache, as the text renderer's does, since the bytes that failed may be what it holds.
             fetchNovelImage(
                 image,
                 imageRequests,
                 context.imageLoader.diskCache,
-                readCache = true,
+                readCache = !fresh,
                 writeCache = true,
             )
         }
@@ -278,15 +286,22 @@ class NovelWebViewport(
                 onPagedMoved = ::requestSnap,
                 onPagedPicturesLanded = { id ->
                     shownPage.update { if ((it.key as? Pair<*, *>)?.first == id) it.copy(ready = true) else it }
+                    if (endWaitingOnPictures == id) reportEnd(id)
+                },
+                // Only an address this viewport routed, or inline data, so the page names nothing else to load.
+                onPictureOpened = { src, chapterId ->
+                    (webImages.imageFor(src) ?: src.takeIf(NovelChapterAddress::isDataAddress))?.let { model ->
+                        callbacks.onPictureOpened(model, held.firstOrNull { it.chapterId == chapterId }?.title)
+                    }
                 },
                 // Auto-scroll is a call into the document, so one that was not up yet dropped it.
                 onReady = { token -> mainHandler.post { onPageReady(token) } },
             ),
             NovelWebBridge.NAME,
         )
-        // Only a scroll made while a finger is down is the reader's: the page's own seek, keys, read aloud
-        // and auto-scroll move the window too. Not consumed, so selection and the page's touches still run,
-        // except under the veil, where a scroll would cancel the landing the veil is waiting on.
+        // A scroll made while a finger is down is the reader's, as is the fling after it: the page's own seek,
+        // keys, read aloud and auto-scroll move the window too. Not consumed, so selection and the page's touches
+        // still run, except under the veil, where a scroll would cancel the landing the veil is waiting on.
         setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -299,7 +314,7 @@ class NovelWebViewport(
         }
         setOnGenericMotionListener { _, _ -> resumeVeil.isUp }
         setOnScrollChangeListener { _, _, y, _, oldY ->
-            if (fingerDown) callbacks.onReaderScrolled(y - oldY)
+            callbacks.onScrolled(y - oldY, fingerDown)
             viewScrollCaughtUp()
         }
     }
@@ -307,8 +322,8 @@ class NovelWebViewport(
     /** Whether the veil is over the page. */
     internal val isVeiled: Boolean get() = veilView.visibility == View.VISIBLE
 
-    /** The WebView with the veil stacked over it, which is what the reader holds. */
-    override val view: View = FrameLayout(context).apply {
+    /** The WebView with the veil stacked over it, which is what the reader holds on one page at a time. */
+    private val frame: View = FrameLayout(context).apply {
         addView(
             webView,
             ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT),
@@ -321,11 +336,27 @@ class NovelWebViewport(
         if (textSelectable) addOnAttachStateChangeListener(SelectableWhileAttached())
         // Every layout of the view the reader lays out, because the inset is only known once the window has one
         // and it moves with the system bars; comparing first keeps an unchanged one from rewriting the page.
-        addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            val settings = documentSettings
-            if (settings != null && callbacks.cutoutTopDp() != documentInset) applySettings(settings)
+        addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> refreshTopInset() }
+        // A 180 degree flip moves the cutout with no layout at all.
+        ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
+            refreshTopInset()
+            ViewCompat.onApplyWindowInsets(view, insets)
         }
     }
+
+    /** The two-page host the frame is drawn in, null for one page at a time. The frame is two pages tall. */
+    private val spreadHost: NovelSpreadHost? = if (paged && spread) {
+        // The spread draws the frame twice. A WebView draws through a render-thread functor, which a Vulkan
+        // driver crashed in once with it drawn twice a frame; on a layer it draws once and the layer twice.
+        frame.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        NovelSpreadHost(context, frame, heightFactor = 2, rtl = pageLayout.isRtl) {
+            documentSettings?.let { readerBackgroundColorInt(it.backgroundColor) } ?: 0
+        }
+    } else {
+        null
+    }
+
+    override val view: View = spreadHost ?: frame
 
     // Below [view], which it slides: a property declared above another is built before it.
     private val slide = PageSlide(view)
@@ -377,22 +408,23 @@ class NovelWebViewport(
         (context as? Activity)?.finish()
     }
 
-    override fun handleKeyEvent(event: KeyEvent): Boolean {
-        if (!NovelVolumeKeys.isVolumeKey(event.keyCode) || !callbacks.volumeKeysActive()) return false
-        val current = documentSettings ?: return false
-        if (event.action == KeyEvent.ACTION_DOWN && !resumeVeil.isUp) {
-            val fraction = NovelVolumeKeys.scrollFraction(
-                event.keyCode,
-                current.volumeButtonsInverted,
-                current.volumeButtonsFraction,
-            )
-            if (paged) turnPage(forward = fraction > 0) else scrollByFraction(fraction)
-        }
-        // Consume the key-up too, so the system volume UI never shows during a press.
+    override fun handleKeyEvent(event: KeyEvent): Boolean = NovelVolumeKeys.handleKey(
+        event,
+        pageLayout.isRtl,
+        held = resumeVeil.isUp,
+        active = callbacks.volumeKeysActive,
+        settings = documentSettings,
+        perform = ::perform,
+    ) { fraction -> if (paged) turnPage(forward = fraction > 0) else scrollByFraction(fraction) }
+
+    @Composable
+    override fun Content(modifier: Modifier) = ViewportHost(view, modifier)
+
+    override fun handleGenericMotionEvent(event: MotionEvent): Boolean {
+        if (!paged || resumeVeil.isUp) return false
+        turnPage(forward = wheelForward(event) ?: return false)
         return true
     }
-
-    override fun handleGenericMotionEvent(event: MotionEvent): Boolean = false
 
     /**
      * The document is assembled here rather than by the host, because it is this renderer's own
@@ -401,16 +433,23 @@ class NovelWebViewport(
      * megabytes.
      */
     override suspend fun load(chapter: NovelReaderViewModel.LoadedChapter, settings: NovelReaderSettings) {
+        // The column's own settings in a spread, under the same name so no use below can take the reader's.
+        @Suppress("NAME_SHADOWING")
+        val settings = spreadHost?.columnSettings(settings) ?: settings
         visibleChapterId = chapter.chapterId
+        // A new document reports afresh, as the page's own endsSeen does.
+        reportedEnds.clear()
+        endWaitingOnPictures = null
         // A new document has no engine until it says so, and whatever the old one had queued belongs
-        // to a window that is being replaced.
+        // to a window that is being replaced. The gate first, as in destroy: a caller dropPendingCalls
+        // resumes can ask again at once, and an open gate would send that to the outgoing page.
+        val token = gate.open()
         dropPendingCalls()
         held.clear()
         held += chapter
         shownPrevious = null
         shownNext = null
         shownEnd = null
-        val token = gate.open()
         // A new page has run none of them.
         snippetsRan.clear()
         sourceStylesheets.clear()
@@ -435,13 +474,16 @@ class NovelWebViewport(
         val html = withContext(Dispatchers.Default) {
             NovelWebDocument.build(
                 context = context,
+                uiPreferences = context.appGraph.uiPreferences,
                 chapterId = chapter.chapterId,
                 documentToken = token,
                 chapterHtml = webImages.rewrite(chapter.html, chapter.baseUrl, chapter.sourceId),
                 // Carried into the document rather than scrolled to afterwards, because the page has
                 // to exist before it has anywhere to scroll and the load is asynchronous.
                 initialFraction = initialFraction,
-                initialLine = chapter.topLine,
+                // Paged, a chapter not started opens on its first line: held there, it stays on the text when
+                // the chapter before joins and brings the seam above, where the column's top would read the seam.
+                initialLine = chapter.topLine ?: 0.takeIf { paged && !chapter.progress.hasStarted },
                 settings = settings,
                 statusBarHeightPx = inset,
                 fontSource = fontSource,
@@ -449,6 +491,7 @@ class NovelWebViewport(
                 sourceCssPriority = sourceCssPriority,
                 textSelectable = textSelectable,
                 paged = paged,
+                spread = spreadHost != null,
                 sourceStylesheet = chapter.sourceStylesheet?.css,
                 baseUrl = safeBaseUrl,
             )
@@ -461,6 +504,13 @@ class NovelWebViewport(
         syncEnd()
     }
 
+    // Rewrites the page's variables when the cutout inset moved after the build, which they carry.
+    private fun refreshTopInset() {
+        val settings = documentSettings
+        // The column's settings already, which a spread must not turn into the column's again.
+        if (settings != null && callbacks.cutoutTopDp() != documentInset) writeSettings(settings)
+    }
+
     /**
      * Pushes changed display settings into the live document, so a size or colour change reflows in
      * place rather than waiting for the next chapter. The custom properties are rewritten wholesale,
@@ -469,6 +519,10 @@ class NovelWebViewport(
      * would otherwise find no engine and be dropped with no trace until the next chapter.
      */
     override fun applySettings(settings: NovelReaderSettings) {
+        writeSettings(spreadHost?.columnSettings(settings) ?: settings)
+    }
+
+    private fun writeSettings(settings: NovelReaderSettings) {
         val previous = documentSettings
         val seamsMoved = documentSettings?.alwaysShowChapterTransition != settings.alwaysShowChapterTransition
         documentSettings = settings
@@ -537,7 +591,7 @@ class NovelWebViewport(
      * destroyed WebView.
      */
     override val autoScroll: ViewportAutoScroll = if (paged) {
-        ViewportAutoScroll.Stepped(autoScrollInterval, shownPage) { turnPage(forward = true) }
+        ViewportAutoScroll.Stepped(autoScrollInterval, shownPage) { turnPage(forward = true, byReader = false) }
     } else {
         ViewportAutoScroll.Continuous(autoScrollSpeed) { pixelsPerFrame ->
             autoScrollPixelsPerFrame = pixelsPerFrame
@@ -556,30 +610,37 @@ class NovelWebViewport(
 
     /** A tap the page passed up, read through the session's tap zones as the native renderer reads one. */
     private fun onPageTap(x: Float, y: Float) {
-        when (documentSettings?.tapZones?.actionAt(x, y, pageLayout.isRtl) ?: NovelTapAction.MENU) {
-            NovelTapAction.MENU -> callbacks.onToggleMenu()
-            NovelTapAction.BACK -> if (paged) {
+        // A spread's zones are across both pages, where the page only knows the half it was touched on.
+        val (zoneX, zoneY) = spreadHost?.tapPoint() ?: (x to y)
+        NovelTapZones.tapAction(documentSettings?.tapZones, zoneX, zoneY, pageLayout.isRtl)?.let(::perform)
+    }
+
+    /** What a tap zone or a key asked for. */
+    private fun perform(action: ViewerNavigation.Action) {
+        when (action) {
+            ViewerNavigation.Action.MENU -> callbacks.onToggleMenu()
+            ViewerNavigation.Action.BACKWARD -> if (paged) {
                 turnPage(
                     forward = false,
                 )
             } else {
                 scrollByFraction(-NovelTapZones.SCROLL_FRACTION)
             }
-            NovelTapAction.FORWARD -> if (paged) {
+            ViewerNavigation.Action.FORWARD -> if (paged) {
                 turnPage(
                     forward = true,
                 )
             } else {
                 scrollByFraction(NovelTapZones.SCROLL_FRACTION)
             }
-            NovelTapAction.NONE -> Unit
         }
     }
 
-    /** Where the page's reading line is: the chapter there, how far down its item, and every held item's height. */
+    /** Where the reader is: the chapter, how far down its item, where the column stands, and every held item's height. */
     private class Where(
         val chapterId: Long,
         val y: Float,
+        val columnY: Float,
         val heights: Map<Long, Double>,
         val contentHeight: Double,
     )
@@ -592,6 +653,7 @@ class NovelWebViewport(
             Where(
                 chapterId = at.getString("id").toLong(),
                 y = at.getDouble("y").toFloat(),
+                columnY = at.getDouble("columnY").toFloat(),
                 heights = heights.keys().asSequence().associate { it.toLong() to heights.getDouble(it) },
                 contentHeight = at.getDouble("contentHeight"),
             )
@@ -626,20 +688,29 @@ class NovelWebViewport(
 
     /** Turns a page by [NovelPaging.turn], into the chapter beside this one at either end, and past the window by
      *  stepping chapters, as a scroll's swipe does. */
-    private fun turnPage(forward: Boolean) {
+    private fun turnPage(forward: Boolean, byReader: Boolean = true) {
         if (resumeVeil.isUp) return
+        if (byReader) callbacks.onReaderTurned()
         scope.launch {
             paging.withLock {
                 val at = where() ?: return@withLock
                 val pages = pagesOf(at.chapterId, at) ?: return@withLock
                 val index = NovelPaging.pageAt(pages, at.y)
                 val window = held.map { it.chapterId }
-                val turn = NovelPaging.turn(window, at.chapterId, index, pages.size, forward)
+                val turn = if (spreadHost != null) {
+                    NovelSpreads.turn(window, at.chapterId, pages, index, forward)
+                } else {
+                    NovelPaging.turn(window, at.chapterId, index, pages.size, forward)
+                }
                 if (turn is NovelPaging.Turn.Beyond) {
                     callbacks.onStepChapter(turn.forward)
                     return@withLock
                 }
                 val sliding = documentSettings?.pageTransitions == true
+                // The slide holds its own copy over the move; without one the spread's copy hides it.
+                if (!sliding && spreadHost != null) {
+                    suspendCancellableCoroutine { done -> spreadHost.hold { done.resume(Unit) } }
+                }
                 if (sliding) {
                     suspendCancellableCoroutine { done ->
                         slide.turn(leftward = forward != pageLayout.isRtl) { done.resume(Unit) }
@@ -661,15 +732,19 @@ class NovelWebViewport(
 
     private suspend fun seekPage(progress: ChapterProgress) {
         val at = where() ?: return
-        val pages = pagesOf(at.chapterId, at) ?: return
+        val shownPages = pagesOf(at.chapterId, at) ?: return
+        // On a seam's page the slider is the chapter last reported, which the reader has not left.
+        val onSeam = NovelPaging.isSeam(shownPages, NovelPaging.pageAt(shownPages, at.y))
+        val chapterId = visibleChapterId?.takeIf { onSeam && it in at.heights } ?: at.chapterId
+        val pages = pagesOf(chapterId, at) ?: return
         val index = when (progress) {
-            is ChapterProgress.Pages -> NovelPaging.indexFor(progress.fraction, pages.size)
+            is ChapterProgress.Pages -> NovelPaging.indexFor(progress.fraction, pages)
             is ChapterProgress.Percent -> {
-                val measured = measuredPages[at.chapterId] ?: return
+                val measured = measuredPages[chapterId] ?: return
                 NovelPaging.landingIndex(pages, progress, measured.textTop, measured.scrollable)
             }
         }
-        showPage(at.chapterId, pages, index)
+        showPage(chapterId, pages, index)
     }
 
     /** Puts the page holding the reading line back on screen whole, after anything but a page being shown moved
@@ -688,13 +763,20 @@ class NovelWebViewport(
                 }
                 val at = where() ?: return@withLock
                 val pages = pagesOf(at.chapterId, at) ?: return@withLock
-                val index = NovelPaging.pageAt(pages, at.y)
+                val index = leftOf(pages, NovelPaging.pageAt(pages, at.y))
                 val shown = shownPage.value.key == (at.chapterId to index)
-                if (shown && abs(at.y - pages[index].top) < 1f && pages[index].height == shownHeight) {
+                // A chapter joining above a seam's page draws it a card the spread was placed without.
+                val cardStale = spreadHost != null &&
+                    spreadHost.showsCard != (pages[index].seam && seamAbove(at.chapterId) != null)
+                if (!cardStale && shown && abs(at.columnY - pages[index].top) < 1f &&
+                    pages[index].height == shownHeight
+                ) {
+                    // A copy held over a move that left the page where it was (an eviction below it) comes down here.
+                    spreadHost?.release()
                     pageSettled(joinsSeen)
                     return@withLock
                 }
-                showPage(at.chapterId, pages, index)
+                showPage(at.chapterId, pages, index, keepLine = true)
             }
         }
     }
@@ -702,11 +784,76 @@ class NovelWebViewport(
     /** The height of the page last shown, which the page's mask was drawn for. */
     private var shownHeight = 0f
 
-    private fun showPage(chapterId: Long, pages: List<NovelPaging.Page>, index: Int, sliding: Boolean = false) {
+    /** Chapters whose end has been reported, each once per document. */
+    private val reportedEnds = mutableSetOf<Long>()
+
+    /** A chapter whose last page is shown while its pictures still land, which measure it short until they do. */
+    private var endWaitingOnPictures: Long? = null
+
+    private fun reportEnd(chapterId: Long) {
+        endWaitingOnPictures = null
+        if (reportedEnds.add(chapterId)) callbacks.onChapterEndSeen(chapterId)
+    }
+
+    /** The first page of the spread page [index] is on, which is the page shown: [index] itself without one. */
+    private fun leftOf(pages: List<NovelPaging.Page>, index: Int) =
+        if (spreadHost != null) NovelSpreads.leftOf(pages, index) else index
+
+    /** The page the reader has read to at page [index]: a spread's second page when it has one. */
+    private fun readTo(pages: List<NovelPaging.Page>, index: Int) =
+        if (spreadHost != null) NovelSpreads.readTo(pages, index) else index
+
+    /** The seam above [chapterId], as [insert] built the page's own, which a spread draws across both its pages. */
+    private fun seamAbove(chapterId: Long): NovelSeam? {
+        val at = held.indexOfFirst { it.chapterId == chapterId }
+        val finished = held.getOrNull(at - 1) ?: return null
+        return NovelSeam.between(finished, held[at]).drawn(documentSettings?.alwaysShowChapterTransition)
+    }
+
+    /**
+     * Sets the spread on [host] once the page has painted the move: the view follows the page's scroll a frame or
+     * more later, and halves set before that showed the old place beside the new one.
+     */
+    private fun placeSpread(
+        host: NovelSpreadHost,
+        chapterId: Long,
+        page: NovelPaging.Page,
+        second: NovelPaging.Page?,
+        measured: MeasuredPages,
+        marginTop: Double,
+    ) {
+        val density = context.resources.displayMetrics.density
+        oncePainted {
+            host.place(
+                (marginTop * density).toFloat(),
+                page.height * density,
+                second?.let { (it.top - page.top) * density },
+                (second?.height ?: 0f) * density,
+                card = if (page.seam) seamAbove(chapterId) else null,
+                cardColor = documentSettings?.let { readerTextColorInt(it.textColor) } ?: 0,
+                cardPage = (measured.contentHeight * density).toInt(),
+            )
+        }
+    }
+
+    private fun showPage(
+        chapterId: Long,
+        pages: List<NovelPaging.Page>,
+        picked: Int,
+        sliding: Boolean = false,
+        keepLine: Boolean = false,
+    ) {
         // Gone only once a new document cleared them, which leaves nothing of this chapter to show.
         val measured = measuredPages[chapterId] ?: return
-        val progress = NovelPaging.progressOf(pages, index, measured.textTop, measured.scrollable)
-        val page = pages[index.coerceIn(pages.indices)]
+        val index = leftOf(pages, picked.coerceIn(pages.indices))
+        // A spread is read to its second page, whose number it shows, as manga's does.
+        val readTo = readTo(pages, index)
+        val progress = NovelPaging.progressOf(pages, readTo, measured.textTop, measured.scrollable)
+        // Null on a seam's page, which reports nothing, so the number shown stays the page turned from.
+        val count = NovelPaging.countOf(pages, readTo)
+        val page = pages[index]
+        val second = spreadHost?.let { NovelSpreads.partnerOf(pages, index) }?.let(pages::get)
+        val secondJs = second?.let { "{shift: ${it.top - page.top}, height: ${it.height}}" } ?: "null"
         shownHeight = page.height
         val key = chapterId to index
         val joinsSeen = opening?.joins
@@ -715,15 +862,35 @@ class NovelWebViewport(
         // counts a page's time from then, as the native renderer does.
         runOrQueue(
             "rkReader.paged.show(${JSONObject.quote(chapterId.toString())}, ${page.top}, ${page.height}, " +
-                "${progress.hundredths.toDouble() / ChapterProgress.Percent.FULL});",
+                "${progress.hundredths.toDouble() / ChapterProgress.Percent.FULL}, $keepLine, " +
+                "${NovelPaging.isSeam(pages, index)}, $secondJs);",
         ) { answer ->
             val shown = answer?.let { runCatching { JSONObject(it) }.getOrNull() }
             shownPage.value = ShownPage(key, ready = shown?.optBoolean("landed", true) ?: true)
-            callbacks.onPageShown(index.coerceIn(pages.indices), pages.size)
+            count?.let { (shownIndex, of) -> callbacks.onPageShown(shownIndex, of) }
+            // Paged, by the page shown (NovelPaging.showsEnd), and once the chapter's pictures have landed.
+            endWaitingOnPictures = null
+            if (NovelPaging.showsEnd(pages, readTo)) {
+                if (shown?.optBoolean("landed", true) !=
+                    false
+                ) {
+                    reportEnd(chapterId)
+                } else {
+                    endWaitingOnPictures = chapterId
+                }
+            }
             // The view's own scroll follows the page's a moment later, and until it does the old place shows.
             if (shown?.optBoolean("moved") == true && webView.scrollY == viewYBefore) viewScrollBehind = true
-            // The copy stays over the old page until the new one is painted, or the old one would slide in.
-            if (sliding) oncePainted(slide::pageDrawn)
+            // The copy stays over the old page until the new one is painted, or the old one would slide in. A spread
+            // is placed once painted too, and its tiles take a few frames more.
+            spreadHost?.let { host ->
+                placeSpread(host, chapterId, page, second, measured, shown?.optDouble("marginTop") ?: 0.0)
+            }
+            when {
+                spreadHost == null -> if (sliding) oncePainted(slide::pageDrawn)
+                sliding -> oncePainted { spreadHost.afterTiles(slide::pageDrawn) }
+                else -> oncePainted(spreadHost::release)
+            }
             pageSettled(joinsSeen)
         }
     }
@@ -850,8 +1017,12 @@ class NovelWebViewport(
     override fun evict(chapterId: Long) {
         held.removeAll { it.chapterId == chapterId }
         measuredPages.remove(chapterId)
-        runOrQueue("rkReader.evictChapter(${JSONObject.quote(chapterId.toString())});")
-        syncEnd()
+        val evict = {
+            runOrQueue("rkReader.evictChapter(${JSONObject.quote(chapterId.toString())});")
+            syncEnd()
+        }
+        // Dropping a chapter above moves the column, which a spread's copy hides until the snap after it paints.
+        spreadHost?.hold(evict) ?: evict()
     }
 
     /** Runs [js] against the page, or holds it in order until the page says it has an engine. */
@@ -906,11 +1077,11 @@ class NovelWebViewport(
             }.getOrNull()
         }
 
-        override fun highlight(position: ReadAloudPosition?, range: IntRange?) {
+        override fun highlight(position: ReadAloudPosition?, range: IntRange?, follows: Boolean) {
             val id = position?.let { JSONObject.quote(it.chapterId.toString()) } ?: "null"
             val from = range?.first ?: -1
             val to = range?.let { it.last + 1 } ?: -1
-            runOrQueue("rkReader.readAloud.highlight($id, ${position?.paragraph ?: -1}, $from, $to);")
+            runOrQueue("rkReader.readAloud.highlight($id, ${position?.paragraph ?: -1}, $from, $to, $follows);")
         }
     }
 

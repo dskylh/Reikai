@@ -1,14 +1,12 @@
 package reikai.domain.novel.interactor
 
 import dev.zacsweers.metro.Inject
-import logcat.LogPriority
 import reikai.domain.entry.EntryId
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.novel.track.PushNovelUnread
 import reikai.domain.track.source.ChapterWrite
 import reikai.domain.track.source.SourceTrackerDispatcher
-import tachiyomi.core.common.util.system.logcat
 
 /**
  * Central "mark novel chapters read/unread" interactor, twin of
@@ -26,10 +24,15 @@ class SetNovelReadStatus(
     private val pushNovelUnread: PushNovelUnread,
 ) {
 
-    suspend fun await(read: Boolean, chapters: List<NovelChapter>): Result = write(read, chapters) { written ->
+    /** [keepDownloaded]: chapters the reader has open, whose text may still load from their download. */
+    suspend fun await(
+        read: Boolean,
+        chapters: List<NovelChapter>,
+        keepDownloaded: Set<Long> = emptySet(),
+    ): Result = write(read, chapters) { written ->
         if (read) {
             // As written, so a category kept from removal keeps them.
-            deleteAfterRead.await(written.map { it.copy(read = true) })
+            deleteAfterRead.await(written.filter { it.id !in keepDownloaded }.map { it.copy(read = true) })
         } else {
             // A chapter merely started was never marked on a site, so only one that was read moves it back.
             pushNovelUnread.launch(written.filter { it.read })
@@ -56,11 +59,9 @@ class SetNovelReadStatus(
         }
         if (toUpdate.isEmpty()) return Result.NoChapters
 
-        try {
-            chapterRepository.setReadBulk(toUpdate.map { it.id }, read)
-        } catch (e: Exception) {
-            logcat(LogPriority.ERROR, e)
-            return Result.InternalError(e)
+        // The repository logs and reports a failed write by returning false rather than throwing.
+        if (!chapterRepository.setReadBulk(toUpdate.map { it.id }, read)) {
+            return Result.InternalError(IllegalStateException("Failed to set read on ${toUpdate.size} novel chapters"))
         }
 
         sourceTracker.readStateWritten(read, toUpdate.map { ChapterWrite(EntryId.Novel(it.novelId), it.id, it.read) })

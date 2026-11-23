@@ -1,8 +1,11 @@
 package reikai.data.library
 
+import androidx.work.ListenableWorker
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.WorkQuery
+import eu.kanade.tachiyomi.data.library.LibraryUpdateWorker
+import exh.eh.EHentaiUpdateWorker
 import io.kotest.matchers.shouldBe
 import io.mockk.CapturingSlot
 import io.mockk.every
@@ -12,10 +15,55 @@ import io.mockk.verify
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.EnumSource
+import reikai.data.novel.update.NovelUpdateWorker
+import reikai.domain.library.ContentType
 import tachiyomi.domain.library.service.LibraryPreferences.Companion.DEVICE_ONLY_ON_WIFI
 import java.util.UUID
 
 class LibraryUpdateScheduleTest {
+
+    @Test
+    fun `each update worker runs as its own job`() {
+        listOf(
+            mockk<LibraryUpdateWorker>().libraryUpdateJob,
+            mockk<NovelUpdateWorker>().libraryUpdateJob,
+            mockk<EHentaiUpdateWorker>().libraryUpdateJob,
+        ) shouldBe listOf(LibraryUpdateJob.MANGA, LibraryUpdateJob.NOVEL, LibraryUpdateJob.GALLERY)
+    }
+
+    @ParameterizedTest
+    @EnumSource(LibraryUpdateJob::class)
+    fun `a hidden type's job finishes as a success without running`(job: LibraryUpdateJob) = runTest {
+        val shown = ContentType.entries.first { it != ContentType.ALL && it != job.contentType }
+
+        libraryUpdateGate(job, shown) { true } shouldBe ListenableWorker.Result.success()
+    }
+
+    @Test
+    fun `a gallery check stops with manga hidden`() = runTest {
+        libraryUpdateGate(LibraryUpdateJob.GALLERY, ContentType.NOVELS) { false } shouldBe
+            ListenableWorker.Result.success()
+    }
+
+    @ParameterizedTest
+    @EnumSource(LibraryUpdateJob::class)
+    fun `a job goes ahead while both types show`(job: LibraryUpdateJob) = runTest {
+        libraryUpdateGate(job, ContentType.ALL) { false } shouldBe null
+    }
+
+    @ParameterizedTest
+    @EnumSource(LibraryUpdateJob::class)
+    fun `a job goes ahead while its own type is the shown one`(job: LibraryUpdateJob) = runTest {
+        libraryUpdateGate(job, job.contentType) { false } shouldBe null
+    }
+
+    @ParameterizedTest
+    @EnumSource(LibraryUpdateJob::class)
+    fun `a job that must wait retries`(job: LibraryUpdateJob) = runTest {
+        libraryUpdateGate(job, ContentType.ALL) { true } shouldBe ListenableWorker.Result.retry()
+    }
 
     @Test
     fun `a scheduled update waits while a manual one runs`() {

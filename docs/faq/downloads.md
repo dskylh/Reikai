@@ -7,22 +7,23 @@ description: Frequently Asked Question about Downloads.
 Frequently Asked Question about Downloads.
 
 ## How do I download multiple chapters or series at the same time?
-Two settings in <nav to="downloads"> control this for manga, and both start conservative on purpose: hammering a source is how you get your IP banned from it.
+Two settings in <nav to="downloads"> control this, and both start conservative on purpose: hammering a source is how you get your IP banned from it.
 
 * **Concurrent source downloads** is how many sources are worked at once, five by default.
-* **Concurrent page downloads** is how many pages are pulled at once from each of them.
+* **Concurrent page downloads** is how many pages are pulled at once from each of them. Manga only.
 
 Raise the second one only for a source you know tolerates it. A source that starts returning errors or blank pages under load is telling you to put it back.
 
-Light novels ignore both settings: their queue downloads one chapter at a time, with a pause between chapters that you set under **Pacing · Novels**.
+Light novels follow **Concurrent source downloads** too, one chapter at a time from each source, with a pause between chapters that you set under **Download speed**.
 
-## How do I slow novel downloads down?
-Novel sources do not limit their own request rate the way manga extensions do, so a fast queue can get you blocked. The **Pacing · Novels** group in <nav to="downloads"> sets the wait between novel chapter downloads. It has no effect on manga.
+## How do I slow downloads down?
+A fast queue can get you blocked by a site. The **Download speed** group in <nav to="downloads"> sets a wait between chapter downloads, separately for manga and novels.
 
-* **Delay between chapters** applies to every novel source. It defaults to 0.5 s, and goes up to 10 s.
-* **Delay per source** lists your novel sources so you can give one its own delay. A source that declares a minimum shows **Needs at least** that much, and its choices never go below it.
+* **Delay between manga chapters** applies to every manga source. It starts at **Off**, so manga download as before until you set it. With a delay set, a source fetches its chapters one after another, with the wait in between.
+* **Delay between novel chapters** applies to every novel source. It defaults to 0.5 s.
+* **Delay per source** lists your sources of both types so you can give one its own delay. Search it from the top bar, or narrow it to manga or novels with the chips. A source that declares a minimum shows **Needs at least** that much, and its delay never goes below it.
 
-The wait also adjusts by itself: after a failed chapter it doubles, up to 30 seconds, and after a successful one it drops back towards your setting.
+Each delay is set on a slider from Off to 30 s. The wait also adjusts by itself: after a failed chapter it doubles, up to 30 seconds, and after a successful one it drops back towards your setting. At Off it never waits.
 
 ## Why did my downloads stop midway?
 Downloads stopping midway may be related to network connection issues or source problems.
@@ -34,9 +35,11 @@ Downloads might not be detected due to multiple factors:
 * Inaccessibility of the download location.
   > Ensure the SD card is properly detected if in use.
 * Source name changes.
-  > Rename the source's folder to match the new name. Light novel folders use the source's id, so a renamed novel source needs nothing.
+  > Rename the source's folder to match the new name. Reikai renames a light novel source's folder for you when the source changes its name.
 * Series title modified by the source.
   > Adjust the folder title to the updated name.
+* Chapters added or removed outside the app.
+  > Reikai checks the downloads folder for those changes on a schedule, set by **Recheck downloads folder** in <nav to="downloads">: from **Every hour**, the default, to **Daily**, or **Manual**, which checks only when you tap **Reindex downloads** in <nav to="advanced">. The setting covers manga and novels. To see a change straight away, tap **Reindex downloads**.
 
 ## How do I manage what's downloading?
 Navigate to <nav to="download-queue"> to interact with queued downloads.
@@ -59,7 +62,7 @@ Open the series and its <nav to="overflow">. Two entries show there while the se
 On a [merged series](/docs/multi-source), both follow the source you are viewing. On **All**, **Clear downloads** covers the whole group, while **Open folder** opens one folder: the series you opened if it has downloads, otherwise the first source in the group that does. If you opened a merged series through a source you have since uninstalled, both still show on **All** as long as another source in the group is installed.
 
 ## Can I search the text of a downloaded novel?
-Yes. On a novel's page, open <nav to="overflow"> and tap **Search downloaded chapters**, which shows there while the novel has downloaded chapters and its source is installed. It searches every downloaded chapter, showing each match in context, and tapping a result opens that chapter in the reader. **Find with a pattern**, **Whole words only** and **Match case** narrow the search. Only downloaded chapters are searched. The [novel reader guide](/docs/novel-reader#search-downloaded-chapters) walks through it.
+Yes. On a novel's page, open <nav to="overflow"> and tap **Search chapter text**, which shows there while the novel has downloaded chapters and its source is installed. It searches every downloaded chapter, showing each match in context, and tapping a result opens that chapter in the reader. **Find with a pattern**, **Whole words only** and **Match case** narrow the search. Only downloaded chapters are searched. The [novel reader guide](/docs/novel-reader#search-chapter-text) walks through it.
 
 **Word count** in the same menu counts the words in the downloaded chapters: the total, the words per chapter, and a density from 1 to 10 for how long the chapters run.
 
@@ -76,7 +79,7 @@ A quick solution is to create the `.nomedia` file yourself, name it as such, and
 
 ## How are downloads organized on the filesystem?
 They are stored as `downloads/Source Name (LANG)/Manga Name/Chapter Name_abcdef.cbz`, where the six characters after the underscore are a hash of the chapter's address.
-Light novels use a folder of their own, `novel_downloads/Source id/Novel Name/`, with each chapter saved as `Chapter Name_abcdef.html`. The source folder is named after the source's id, not its display name: a [plugin](/docs/faq/browse/extensions#extension-apps-and-plugins)'s id, or for a novel extension app `tachiyomi_` or `ireader_` followed by the source's number.
+Light novels use a folder of their own, `novel_downloads/Source/Novel Name/`, with each chapter saved as `Chapter Name_abcdef.html`. A novel extension app's source folder is named like a manga source's, `Source Name (EN)`. A [plugin](/docs/faq/browse/extensions#extension-apps-and-plugins)'s folder is its id followed by its name, `id (Name)`, since an update can rename a plugin but never change its id. When a source is renamed, its folder is renamed with it.
 The `abcdef` string is the first 6 hexadecimal digits of the MD5 hash of the URL of the chapter, so that if two chapters have the same name, they won't try to write to the same filename.
 **Enable chapter name hash suffix** in <nav to="advanced"> decides whether chapter names carry it, for manga and novels alike. It is off on a fresh install and stays on for an install that had it before. With it off, only the first of two chapters that share a name can be downloaded; the other counts as downloaded and opens that one's copy.
 For a manga chapter with a scanlator, it is `Scanlator Name_Chapter Name` instead of just `Chapter Name`. Novel chapters never carry a scanlator prefix.

@@ -10,16 +10,23 @@ import android.text.style.LineHeightSpan
  * A chapter picture laid out as the WebView page lays out an `img` (reader.css): a block with [topPx]
  * above and [bottomPx] below, which the reader's line spacing does not reach. `Html.fromHtml`'s own span
  * draws from the line's bottom, so the spacing the framework adds under every line moved the picture, and
- * a spacing tighter than the font pulled it into the text above. This one draws from the line's top.
+ * a spacing tighter than the font pulled it into the text above. This one draws from the line's top, centred
+ * across the [columnPx] it takes, as the page centres an `img` (`margin: 1em auto`).
  */
 internal class ChapterImageSpan(
     drawable: Drawable,
     source: String?,
     val topPx: Int,
     private val bottomPx: Int,
+    private val columnPx: Int,
 ) :
     ImageSpan(drawable, source.orEmpty()),
     LineHeightSpan {
+
+    /** Where [draw] puts the picture's top for a line whose top is at [lineTop], for every hit test and measure. */
+    fun pictureTop(lineTop: Int): Int = lineTop + topPx
+
+    fun pictureBottom(lineTop: Int): Int = pictureTop(lineTop) + drawable.bounds.height()
 
     /** The spacing the view adds under each line, taken back off this one. Set by [NovelTextStyle]. */
     @Volatile
@@ -41,6 +48,9 @@ internal class ChapterImageSpan(
         fm.bottom = fm.descent
     }
 
+    override fun getSize(paint: Paint, text: CharSequence?, start: Int, end: Int, fm: Paint.FontMetricsInt?): Int =
+        maxOf(super.getSize(paint, text, start, end, fm), columnPx)
+
     override fun draw(
         canvas: Canvas,
         text: CharSequence,
@@ -53,7 +63,7 @@ internal class ChapterImageSpan(
         paint: Paint,
     ) {
         canvas.save()
-        canvas.translate(x, (top + topPx).toFloat())
+        canvas.translate(x + ((columnPx - drawable.bounds.width()) / 2).coerceAtLeast(0), pictureTop(top).toFloat())
         drawable.draw(canvas)
         canvas.restore()
     }

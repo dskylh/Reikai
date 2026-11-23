@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch
 import kotlin.concurrent.thread
 
+// Real threads on purpose: the driver's lock is a blocking monitor, which one virtual-time thread cannot contend.
 class SerialSqliteDriverTest {
 
     // sqlite-jdbc follows a query that finds nothing with a commit of its own, which fails while another
@@ -34,17 +35,13 @@ class SerialSqliteDriverTest {
         val reader = thread {
             query = runCatching { driver.executeQuery(null, "SELECT x FROM t WHERE x < 0", { QueryResult.Unit }, 0) }
         }
-        reader.join(QUERY_HEAD_START_MS)
+        // Released once the query waits on the connection, or has already run without waiting for it.
+        while (reader.state != Thread.State.WAITING && reader.state != Thread.State.TERMINATED) Thread.onSpinWait()
         release.countDown()
         writer.join()
         reader.join()
         driver.close()
 
         query?.exceptionOrNull() shouldBe null
-    }
-
-    private companion object {
-        // Long enough for the query to reach the connection while the write still holds it.
-        const val QUERY_HEAD_START_MS = 300L
     }
 }

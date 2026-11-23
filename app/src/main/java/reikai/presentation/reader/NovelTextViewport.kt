@@ -21,12 +21,15 @@ import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.core.view.ViewCompat
 import androidx.core.view.children
 import androidx.core.view.isVisible
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,14 +46,20 @@ import reikai.novel.font.NovelFontManager
 import reikai.presentation.reader.text.AnchorSpan
 import reikai.presentation.reader.text.CHAPTER_IMAGE_WAIT_MS
 import reikai.presentation.reader.text.CHAPTER_SWIPE_MIN_DP
+import reikai.presentation.reader.text.ChapterImageSpan
 import reikai.presentation.reader.text.ChapterScrollProgress
 import reikai.presentation.reader.text.ChapterTextBlock
 import reikai.presentation.reader.text.ChunkParagraph
+import reikai.presentation.reader.text.DrawableWrapper
+import reikai.presentation.reader.text.FailedPictureAccessibility
+import reikai.presentation.reader.text.ImageFailureDrawable
+import reikai.presentation.reader.text.ImageLoadingDrawable
 import reikai.presentation.reader.text.LinkOnlyMovementMethod
 import reikai.presentation.reader.text.MarkForegroundSpan
 import reikai.presentation.reader.text.MarkUnderlineSpan
 import reikai.presentation.reader.text.NovelBoundaryFailureView
 import reikai.presentation.reader.text.NovelChapterSeamView
+import reikai.presentation.reader.text.NovelPictureGesture
 import reikai.presentation.reader.text.NovelSeam
 import reikai.presentation.reader.text.NovelTextRenderer
 import reikai.presentation.reader.text.NovelTextStyle
@@ -61,6 +70,7 @@ import reikai.presentation.reader.text.ReadAloudBoxDecoration
 import reikai.presentation.reader.text.ReadAloudMark
 import reikai.presentation.reader.text.ReaderControlSpan
 import reikai.presentation.reader.text.ResumeVeil
+import reikai.presentation.reader.text.WebSearchSelection
 import reikai.presentation.reader.text.chapterSwipeStep
 import reikai.presentation.reader.text.chunkRange
 import reikai.presentation.reader.text.hasTravelled
@@ -93,6 +103,8 @@ class NovelTextViewport(
     autoScrollSpeed: Preference<Float>,
     /** Seconds per page while auto-scroll turns pages instead. */
     autoScrollInterval: Preference<Int>,
+    /** Two pages side by side when paged ([NovelSpreads]). A change rebuilds the viewport. */
+    spread: Boolean = false,
 ) : ReaderViewport, TextViewport, ChapterWindow {
 
     private val paged = pageLayout.isPaged
@@ -248,6 +260,9 @@ class NovelTextViewport(
      *  has any and reads zero. */
     private var topInsetPx = 0
 
+    /** The page height the seam markers were last fitted to, in paged reading. */
+    private var markedPageHeight = 0
+
     /** What the chrome covers from each edge ([setObscured]), which only read-aloud's choices read. */
     private var obscuredTopPx = 0
     private var obscuredBottomPx = 0
@@ -263,8 +278,12 @@ class NovelTextViewport(
     /** Whether the touch on screen has had a second finger down ([chapterSwipeStep]). */
     private var multiTouch = false
 
-    /** Whether the touch on screen went down under the page mask, which keeps it from the text there. */
-    private var maskedTouch = false
+    /** Whether the touch on screen is kept from the text: it went down under the page mask, or paged on a picture,
+     *  whose long press must not select ([NovelPictureGesture]). */
+    private var takenTouch = false
+
+    /** Whether the touch on screen opened a picture, which leaves it no tap. */
+    private var pictureOpened = false
 
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
 
@@ -286,6 +305,22 @@ class NovelTextViewport(
         cancel.recycle()
         true
     }
+
+    /** A long press on a picture opens it ([NovelPictureGesture]), and the rest of the touch is kept from the text. */
+    private val pictureLongPress: GestureDetector = GestureDetector(
+        context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            override fun onLongPress(e: MotionEvent) {
+                val (model, chapterTitle) = pictureAt(e.x, e.y) ?: return
+                pictureOpened = true
+                takenTouch = true
+                recycler.findChildViewUnder(e.x, e.y)?.cancelLongPress()
+                // The Editor's own long press can land first and select the picture's character.
+                if (textSelectable) recycler.findFocus()?.clearFocus()
+                callbacks.onPictureOpened(model, chapterTitle)
+            }
+        },
+    )
 
     /** Only consulted for selectable text, where the Editor takes the touch and no click follows. */
     private val selectableTaps = GestureDetector(
@@ -313,6 +348,9 @@ class NovelTextViewport(
                 pagedLayoutManager?.fingerDown = false
                 return true
             }
+            if (e.actionMasked == MotionEvent.ACTION_DOWN) pictureOpened = false
+            pictureLongPress.onTouchEvent(e)
+            if (pictureOpened) return true
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     touchDownX = e.x
@@ -322,8 +360,8 @@ class NovelTextViewport(
                     pagedLayoutManager?.fingerDown = true
                     // Under the mask the column holds the pages either side, and a link there must not take a
                     // tap meant for the page: the gesture is kept here and read as the page's ([onTouchEvent]).
-                    maskedTouch = underPageMask(e.y)
-                    if (maskedTouch) return true
+                    takenTouch = underPageMask(e.y) || (paged && pictureAt(e.x, e.y) != null)
+                    if (takenTouch) return true
                 }
                 MotionEvent.ACTION_CANCEL -> pagedLayoutManager?.fingerDown = false
                 // Before the child under the finger is handed the same move, so its press ends on it.
@@ -350,19 +388,20 @@ class NovelTextViewport(
         }
 
         override fun onTouchEvent(rv: RecyclerView, e: MotionEvent) {
-            if (!maskedTouch) return
+            if (!takenTouch) return
+            pictureLongPress.onTouchEvent(e)
             when (e.actionMasked) {
                 MotionEvent.ACTION_MOVE ->
                     if (hasTravelled(e.x - touchDownX, e.y - touchDownY, touchSlop)) dragging = true
                 MotionEvent.ACTION_POINTER_DOWN -> multiTouch = true
                 MotionEvent.ACTION_UP -> {
-                    maskedTouch = false
+                    takenTouch = false
                     pagedLayoutManager?.fingerDown = false
                     onPointerUp(e.x, e.y)
-                    if (!dragging && !multiTouch) onTap(e.x, e.y)
+                    if (!dragging && !multiTouch && !pictureOpened) onTap(e.x, e.y)
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    maskedTouch = false
+                    takenTouch = false
                     pagedLayoutManager?.fingerDown = false
                 }
             }
@@ -396,6 +435,7 @@ class NovelTextViewport(
     private val pageMask = object : RecyclerView.ItemDecoration() {
         override fun onDrawOver(c: Canvas, parent: RecyclerView, state: RecyclerView.State) {
             val height = shownPageHeight ?: return
+            if (spreadHost != null) return
             val current = settings ?: return
             maskPaint.color = readerBackgroundColorInt(current.backgroundColor)
             val top = readingTop().toFloat()
@@ -406,10 +446,12 @@ class NovelTextViewport(
     }
 
     private val recycler = RecyclerView(context).apply {
-        layoutManager = pagedLayoutManager ?: LinearLayoutManager(context)
+        layoutManager = pagedLayoutManager ?: ScrollLayoutManager(context)
         addItemDecoration(readAloudBox)
         if (paged) {
             addItemDecoration(pageMask)
+            // The spread's second page is drawn from below the list's bottom, which the list must not clip off.
+            if (spread) clipChildren = false
             // The finger never scrolls a page, so the lift that ends a tap must not fling one either.
             onFlingListener = object : RecyclerView.OnFlingListener() {
                 override fun onFling(velocityX: Int, velocityY: Int) = true
@@ -423,6 +465,15 @@ class NovelTextViewport(
                 if (paddingBottom != bottom - top || paddingTop != readingTop()) {
                     setPadding(paddingLeft, readingTop(), paddingRight, bottom - top)
                     requestSnap()
+                }
+                // A seam fits the page it is on, so a page of another height refits every marker.
+                val page = pageContentHeight().toInt()
+                if (page != markedPageHeight) {
+                    markedPageHeight = page
+                    // Only with a marker drawn: the refresh holds the reader still, which a reflow is settling.
+                    val adapter = this@NovelTextViewport.adapter
+                    if (adapter.drawsMarkers()) post { adapter.refreshMarkers() }
+                    post { redrawIfPageHeightMoved() }
                 }
             }
         }
@@ -438,7 +489,7 @@ class NovelTextViewport(
             override fun onScrolled(view: RecyclerView, dx: Int, dy: Int) {
                 scrolled += dy
                 requestSnap()
-                if (view.scrollState == RecyclerView.SCROLL_STATE_DRAGGING) callbacks.onReaderScrolled(dy)
+                callbacks.onScrolled(dy, view.scrollState == RecyclerView.SCROLL_STATE_DRAGGING)
                 showTallPictures()
                 reportVisibleChapter()
                 report(callbacks.onProgressChanged)
@@ -466,13 +517,25 @@ class NovelTextViewport(
         }
     }
 
-    override val view: View get() = recycler
+    /** The two-page host the column is drawn in, null for one page at a time. */
+    private val spreadHost: NovelSpreadHost? = if (paged && spread) {
+        NovelSpreadHost(context, recycler, heightFactor = 1, rtl = pageLayout.isRtl) {
+            settings?.let { readerBackgroundColorInt(it.backgroundColor) } ?: 0
+        }.apply { onResized = ::redrawIfColumnMoved }
+    } else {
+        null
+    }
 
-    private val slide = PageSlide(recycler)
+    override val view: View get() = spreadHost ?: recycler
+
+    private val slide = PageSlide(view)
 
     override val isRtl: Boolean get() = pageLayout.isRtl
 
     override suspend fun load(chapter: NovelReaderViewModel.LoadedChapter, settings: NovelReaderSettings) {
+        // The column's own settings in a spread, under the same name so no use below can take the reader's.
+        @Suppress("NAME_SHADOWING")
+        val settings = spreadHost?.columnSettings(settings) ?: settings
         // Before the suspension below, so a change that lands during it is not overwritten with this.
         this.settings = settings
         warmFont()
@@ -508,11 +571,11 @@ class NovelTextViewport(
             firstParagraphOnScreen()
         }
 
-        override fun highlight(position: ReadAloudPosition?, range: IntRange?) {
+        override fun highlight(position: ReadAloudPosition?, range: IntRange?, follows: Boolean) {
             spokenParagraph = position
             spokenRange = range
             drawSpokenParagraph()
-            position?.let(::followSpokenParagraph)
+            if (follows) position?.let(::followSpokenParagraph)
         }
     }
 
@@ -523,6 +586,7 @@ class NovelTextViewport(
 
     /** Whether [y] is in the margin above the page shown or below its last whole line, where [pageMask] draws. */
     private fun underPageMask(y: Float): Boolean {
+        spreadHost?.let { return it.landedUnderMask() }
         val height = shownPageHeight ?: return false
         val top = readingTop()
         return y < top || y > top + height
@@ -533,6 +597,8 @@ class NovelTextViewport(
     private fun uncoveredTop() = maxOf(topInsetPx, obscuredTopPx, readingTop())
 
     private fun uncoveredBottom(): Int {
+        // Both pages of a spread are on screen, the second below the list's bottom in the column.
+        spreadHost?.let { return it.shownBottom.toInt() }
         val bottom = recycler.height - obscuredBottomPx
         val page = shownPageHeight ?: return bottom
         return minOf(bottom, readingTop() + page.toInt())
@@ -569,8 +635,11 @@ class NovelTextViewport(
             val (top, height) = boundsOf(slot) ?: return@forEach
             if (top + height <= visibleTop || top >= visibleBottom) return@forEach
             slot.paragraphs.forEachIndexed { index, paragraph ->
-                val (paragraphTop, paragraphBottom) = boundsOf(slot, paragraph) ?: return@forEachIndexed
-                if (paragraphBottom > visibleTop && paragraphTop < visibleBottom) {
+                val (paragraphTop, _) = boundsOf(slot, paragraph) ?: return@forEachIndexed
+                val lastLine = lineTopOf(slot.block.chunkViews[paragraph.chunk], paragraph.end - 1)
+                    ?: return@forEachIndexed
+                // A paragraph counts while its last line can be read whole, as firstVisible says in reader.js.
+                if (lastLine >= visibleTop && paragraphTop < visibleBottom) {
                     return ReadAloudPosition(slot.chapter.chapterId, index)
                 }
             }
@@ -668,6 +737,7 @@ class NovelTextViewport(
         val bounds = boundsOf(spoken.view, spoken.start, spoken.end)
         if (bounds == null) {
             val item = adapter.positionOf(slot).takeIf { it >= 0 && retry } ?: return
+            pageLine = null
             (recycler.layoutManager as LinearLayoutManager).scrollToPositionWithOffset(item, 0)
             recycler.post { if (spokenParagraph == position) followSpokenParagraph(position, retry = false) }
             return
@@ -679,6 +749,7 @@ class NovelTextViewport(
             // By page: text starting on this one stays, since the snap would only show it again. Otherwise it goes to the
             // reading line, where the snap that follows shows the page holding it.
             if (top >= visibleTop && top < visibleBottom) return
+            pageLine = null
             scrollColumnBy(top - readingTop())
             return
         }
@@ -773,18 +844,30 @@ class NovelTextViewport(
     private fun readerTextColor() = readerTextColorInt(checkNotNull(settings).textColor)
 
     override fun applySettings(settings: NovelReaderSettings) {
+        val columnBefore = spreadColumnWidth()
+
+        @Suppress("NAME_SHADOWING")
+        val settings = spreadHost?.columnSettings(settings) ?: settings
         val previous = this.settings
         this.settings = settings
+        // A spread pins the column's own margins, so its pictures, bound to the column's width, see the
+        // reader's margins move only through that width.
+        val columnMoved = spreadColumnWidth() != columnBefore
         // The markers are views of their own, so showing, hiding or recolouring them re-measures no text.
         val recoloured = previous != null && previous.textColor != settings.textColor
         val seamsToggled =
             previous != null && previous.alwaysShowChapterTransition != settings.alwaysShowChapterTransition
         if (recoloured || seamsToggled) adapter.refreshMarkers()
         if (previous?.markShape() != settings.markShape()) drawSpokenParagraph()
+        if (previous != null && columnMoved) {
+            startRedraw()
+            return
+        }
         if (previous != null && previous.renderShape() == settings.renderShape()) return
         // A chapter still rendering built its pictures at the old size and joins with a restyle.
         val holdsPictures = slots.any { !it.rendered || it.block.holdsPictures() }
-        if (previous != null && previous.paragraphShape().needsRedrawFor(settings.paragraphShape(), holdsPictures)) {
+        val reshaped = previous?.paragraphShape(paged)?.needsRedrawFor(settings.paragraphShape(paged), holdsPictures)
+        if (reshaped == true) {
             startRedraw()
             return
         }
@@ -836,6 +919,8 @@ class NovelTextViewport(
                     land(slot)
                     (slot.landing as? Landing.Line)?.let { holdShort(slot, it) }
                 }
+                // A landing that moved nothing reports no scroll, and the pages were recut all the same.
+                requestSnap()
             }
         }
     }
@@ -934,8 +1019,21 @@ class NovelTextViewport(
 
     private class LineAnchor(val view: TextView, val offset: Int, val y: Int)
 
+    /** The line the reader's page started on. A reflow recuts the pages, and the page shown after one starts
+     *  above this line, so holding that start instead walks the reader back a page on every reflow. */
+    private class PageLine(val chapterId: Long, val chunk: Int, val offset: Int)
+
+    private var pageLine: PageLine? = null
+
+    private val PageLine.slot get() = slots.firstOrNull { it.chapter.chapterId == chapterId }
+
+    private fun pageLineTop(): Int? = pageLine?.let { line ->
+        line.slot?.block?.chunkViews?.getOrNull(line.chunk)?.let { lineTopOf(it, line.offset) }
+    }
+
     /** The line at the top of the screen ([readingTop]), or the last one above it when that falls below the
-     *  text. Null when the chapter's text starts below it, where the item's own anchor already holds it. */
+     *  text. Null when the chapter's text starts below it, where the item's own anchor already holds it, and
+     *  when paged and the page starts inside a picture: the line above is an earlier page's. */
     private fun lineAtTop(): LineAnchor? {
         val slot = visibleSlot() ?: return null
         val probe = readingTop()
@@ -944,6 +1042,7 @@ class NovelTextViewport(
         val top = (topInRecycler(view) ?: return null) + view.totalPaddingTop
         val offset = layout.getLineStart(layout.getLineForVertical(probe - top))
         val y = lineTopOf(view, offset) ?: return null
+        if (paged && y < probe - 1) return null
         return LineAnchor(view, offset, y)
     }
 
@@ -977,13 +1076,15 @@ class NovelTextViewport(
         slots.forEach { slot ->
             slot.block.tiledPictures.forEach { anchor ->
                 // A chapter scrolled out of the recycler draws nothing, so its pictures let their slices go.
-                val top = lineTopOf(anchor.view, anchor.offset)?.plus(anchor.topPx)
+                val top = lineTopOf(anchor.view, anchor.offset)?.let(anchor.span::pictureTop)
                 if (top ==
                     null
                 ) {
                     anchor.picture.onVisible(0, 0)
                 } else {
-                    anchor.picture.onVisible(-top, recycler.height - top)
+                    // A spread's second page shows the column below the list's bottom too.
+                    val bottom = spreadHost?.let { maxOf(recycler.height, it.shownBottom.toInt()) } ?: recycler.height
+                    anchor.picture.onVisible(-top, bottom - top)
                 }
             }
         }
@@ -1009,15 +1110,63 @@ class NovelTextViewport(
         holdingReader {
             slots.forEach { NovelTextStyle.applyMargins(it.block.container, current, context, topInsetPx) }
         }
+        redrawIfPageHeightMoved()
     }
 
     /** The text column: what is left of the reader once the page's side margins are taken off. The
-     *  recycler answers for its own width once laid out, and the display stands in before that. */
+     *  recycler answers for its own width once laid out, and the display stands in before that. A spread answers
+     *  itself, since it has just moved the reader's margins and the recycler still has the width from before. */
     private fun columnWidthPx(settings: NovelReaderSettings): Int {
         val density = context.resources.displayMetrics.density
         val sides = ((settings.margins.left + settings.margins.right) * density).toInt()
-        val available = recycler.width.takeIf { it > 0 } ?: context.resources.displayMetrics.widthPixels
+        val available = spreadColumnWidth()
+            ?: recycler.width.takeIf { it > 0 }
+            ?: context.resources.displayMetrics.widthPixels
         return (available - sides).coerceAtLeast(1)
+    }
+
+    /** The width the window's pictures were last sized to; null before any. */
+    private var builtColumnWidth: Int? = null
+
+    /**
+     * A spread measured its column before its first layout from the display's size, which can differ from its own:
+     * once it has a size, a window whose pictures were sized to another width is drawn again.
+     */
+    private fun redrawIfColumnMoved() {
+        val settings = settings ?: return
+        val built = builtColumnWidth ?: return
+        if (slots.isNotEmpty() && columnWidthPx(settings) != built) startRedraw()
+    }
+
+    /** The column's width in a spread, which the reader's side margins set there; null outside one. */
+    private fun spreadColumnWidth(): Int? = spreadHost?.let {
+        it.columnWidth(it.width.takeIf { width -> width > 0 } ?: context.resources.displayMetrics.widthPixels)
+    }
+
+    /** The measured page height the window's paged pictures were last capped at; null before any was measured. */
+    private var builtPageHeight: Int? = null
+
+    /**
+     * A paged picture is capped at the page it was built for, so a page the cutout inset or the list's own height
+     * changed draws a window holding pictures again. Only against a measured height: before the first layout
+     * [pageHeightPx] answers from the screen, and comparing that would redraw every open.
+     */
+    private fun redrawIfPageHeightMoved() {
+        val settings = settings ?: return
+        val built = builtPageHeight ?: return
+        if (!paged || recycler.height <= 0) return
+        val page = pageHeightPx(settings)
+        if (page == built || slots.none { !it.rendered || it.block.holdsPictures() }) return
+        // The redraw records it again as it adds, and a second report before then is the same change
+        builtPageHeight = page
+        startRedraw()
+    }
+
+    /** A page's height for [settings], as [pageContentHeight] measures it, from the screen while the list has none. */
+    private fun pageHeightPx(settings: NovelReaderSettings): Int {
+        val (top, bottom) = NovelTextStyle.verticalMarginsPx(settings, context, topInsetPx)
+        val available = recycler.height.takeIf { it > 0 } ?: context.resources.displayMetrics.heightPixels
+        return (available - top - bottom).coerceAtLeast(1)
     }
 
     /**
@@ -1065,7 +1214,12 @@ class NovelTextViewport(
             paragraphIndent = settings.paragraphIndent,
             selectable = textSelectable,
             bionic = settings.bionicReading,
-            contentWidth = columnWidthPx(settings),
+            contentWidth = columnWidthPx(settings).also { builtColumnWidth = it },
+            maxPictureHeight = if (paged) {
+                pageHeightPx(settings).also { builtPageHeight = it.takeIf { recycler.height > 0 } }
+            } else {
+                null
+            },
             baseUrl = chapter.baseUrl,
             sourceId = chapter.sourceId,
             // A landing still waiting on the pictures is re-applied once they land, and a correction for the
@@ -1107,7 +1261,9 @@ class NovelTextViewport(
         if (progress is ChapterProgress.Pages && !paged) return
         // A seek names a place of its own, which a short line landing again would take the reader from.
         slots.forEach { it.shortLanding = null }
-        val slot = visibleSlot() ?: slots.firstOrNull() ?: return
+        // On a seam's page the slider is the chapter last reported, which the reader has not left.
+        val slot =
+            reportedVisibleId?.takeIf { onSeam() }?.let(::slotOf) ?: visibleSlot() ?: slots.firstOrNull() ?: return
         // Held for the chapter's own landing to apply when it has one still to come, which is also where
         // one waits that has not rendered yet. Nothing reads it on a chapter already settled.
         if (slot.rendered &&
@@ -1123,7 +1279,7 @@ class NovelTextViewport(
     override fun onChapterStepped() = Unit
 
     override val autoScroll: ViewportAutoScroll = if (paged) {
-        ViewportAutoScroll.Stepped(autoScrollInterval, shownPage) { turnPage(forward = true) }
+        ViewportAutoScroll.Stepped(autoScrollInterval, shownPage) { turnPage(forward = true, byReader = false) }
     } else {
         ViewportAutoScroll.Continuous(autoScrollSpeed, autoScroller::run)
     }
@@ -1136,61 +1292,78 @@ class NovelTextViewport(
         evictAll()
     }
 
-    /** The same contract [NovelWebViewport] answers, so a volume press behaves the same in either. */
-    override fun handleKeyEvent(event: KeyEvent): Boolean {
-        if (!NovelVolumeKeys.isVolumeKey(event.keyCode) || !callbacks.volumeKeysActive()) return false
-        val current = settings ?: return false
-        if (event.action == KeyEvent.ACTION_DOWN && !resumeVeil.isUp) {
+    /** The same contract [NovelWebViewport] answers, so a key behaves the same in either. */
+    override fun handleKeyEvent(event: KeyEvent): Boolean = NovelVolumeKeys.handleKey(
+        event,
+        pageLayout.isRtl,
+        held = resumeVeil.isUp,
+        active = callbacks.volumeKeysActive,
+        settings = settings,
+        perform = ::perform,
+    ) { fraction ->
+        // A turn says the reader moved once it happens: one a redraw refuses must keep the landing it carries.
+        if (paged) {
+            turnPage(forward = fraction > 0)
+        } else {
             readerMoved()
-            val fraction = NovelVolumeKeys.scrollFraction(
-                event.keyCode,
-                current.volumeButtonsInverted,
-                current.volumeButtonsFraction,
-            )
-            if (paged) {
-                turnPage(forward = fraction > 0)
-            } else {
-                val step = (recycler.height * abs(fraction)).roundToInt()
-                recycler.smoothScrollBy(0, if (fraction > 0) step else -step)
-            }
+            val step = (recycler.height * abs(fraction)).roundToInt()
+            recycler.smoothScrollBy(0, if (fraction > 0) step else -step)
         }
-        // Consume the key-up too, so the system volume UI never shows during a press.
-        return true
     }
 
-    override fun handleGenericMotionEvent(event: MotionEvent): Boolean = false
+    @Composable
+    override fun Content(modifier: Modifier) = ViewportHost(view, modifier)
+
+    override fun handleGenericMotionEvent(event: MotionEvent): Boolean {
+        if (!paged || resumeVeil.isUp) return false
+        turnPage(forward = wheelForward(event) ?: return false)
+        return true
+    }
 
     /**
      * A tap read through the session's tap zones, which the WebView renderer asks too, with a
      * three-quarter-screen step. Read from the live settings, so a layout change takes effect at once.
      */
     private fun onTap(x: Float, y: Float) {
+        if (NovelPictureGesture.opensOnTap(paged)) {
+            pictureAt(x, y)?.let { (model, chapterTitle) ->
+                callbacks.onPictureOpened(model, chapterTitle)
+                return
+            }
+        }
         val width = recycler.width
         val height = recycler.height
-        val zones = settings?.tapZones
-        if (zones == null || width <= 0 || height <= 0) {
+        // Unmeasured, there is no fraction of the page to read a zone at.
+        if (width <= 0 || height <= 0) {
             callbacks.onToggleMenu()
             return
         }
-        val step = (height * NovelTapZones.SCROLL_FRACTION).roundToInt()
-        when (zones.actionAt(x / width, y / height, pageLayout.isRtl)) {
-            NovelTapAction.MENU -> callbacks.onToggleMenu()
-            NovelTapAction.BACK -> {
-                readerMoved()
-                if (paged) turnPage(forward = false) else recycler.smoothScrollBy(0, -step)
-            }
-            NovelTapAction.FORWARD -> {
-                readerMoved()
-                if (paged) turnPage(forward = true) else recycler.smoothScrollBy(0, step)
-            }
-            NovelTapAction.NONE -> Unit
+        // A spread's zones are across both pages, where the column only knows the half it was touched on.
+        val (zoneX, zoneY) = spreadHost?.tapPoint() ?: (x / width to y / height)
+        NovelTapZones.tapAction(settings?.tapZones, zoneX, zoneY, pageLayout.isRtl)?.let(::perform)
+    }
+
+    /** What a tap zone or a key asked for, with a three-quarter-screen step. */
+    private fun perform(action: ViewerNavigation.Action) {
+        val step = (recycler.height * NovelTapZones.SCROLL_FRACTION).roundToInt()
+        when (action) {
+            ViewerNavigation.Action.MENU -> callbacks.onToggleMenu()
+            // A turn says the reader moved itself, once it happens (see handleKeyEvent).
+            ViewerNavigation.Action.BACKWARD -> if (paged) turnPage(forward = false) else scrollByReader(-step)
+            ViewerNavigation.Action.FORWARD -> if (paged) turnPage(forward = true) else scrollByReader(step)
         }
     }
 
+    private fun scrollByReader(dy: Int) {
+        readerMoved()
+        recycler.smoothScrollBy(0, dy)
+    }
+
     /**
-     * A tap on a boundary failure is that box's, as the WebView page treats it. The watcher sees a
-     * tap on its Retry as well as the button does, so without this one tap retried and also scrolled
-     * or toggled the chrome; a tap beside the button falls through to the item's click the same way.
+     * A tap on a boundary failure or a failed picture is that box's, as the WebView page treats every
+     * `.rk-failure`. The watcher sees a tap on its Retry as well as the button does, so without this one tap
+     * retried and also scrolled or toggled the chrome; a tap beside the button, or on a box with no Retry,
+     * is the box's the same way.
      */
     private fun onReaderTap(x: Float, y: Float) {
         val item = recycler.findChildViewUnder(x, y) as? ViewGroup
@@ -1199,7 +1372,8 @@ class NovelTextViewport(
                 x - item.left in it.left.toFloat()..it.right.toFloat() &&
                 y - item.top in it.top.toFloat()..it.bottom.toFloat()
         } == true
-        if (!onFailure) onTap(x, y)
+        val onFailedPicture = pictureSpanAt(x, y)?.second?.drawnPicture() is ImageFailureDrawable
+        if (!onFailure && !onFailedPicture) onTap(x, y)
     }
 
     /**
@@ -1208,22 +1382,54 @@ class NovelTextViewport(
      * with selection on, as its setting's summary says. Returns whether one took the tap.
      */
     private fun tapReaderControl(x: Float, y: Float): Boolean {
-        val (chunk, bounds) = slots.asSequence()
-            .flatMap { it.block.chunkViews }
-            .filter { topInRecycler(it) != null }
-            .map { view ->
-                val bounds = Rect(0, 0, view.width, view.height)
-                recycler.offsetDescendantRectToMyCoords(view, bounds)
-                view to bounds
-            }
-            .firstOrNull { (_, bounds) -> bounds.contains(x.toInt(), y.toInt()) }
-            ?: return false
+        val (_, chunk, bounds) = chunkAt(x, y) ?: return false
         val text = chunk.text as? Spanned ?: return false
         val control = chunk.linksAt(text, x - bounds.left, y - bounds.top).firstOrNull { it is ReaderControlSpan }
             ?: return false
         control.onClick(chunk)
         return true
     }
+
+    private data class ChunkAt(val slot: ChapterSlot, val view: TextView, val bounds: Rect)
+
+    /** The chunk under [x], [y] in the recycler, with its chapter and its bounds there. */
+    private fun chunkAt(x: Float, y: Float): ChunkAt? = slots.asSequence()
+        .flatMap { slot -> slot.block.chunkViews.map { slot to it } }
+        .filter { (_, view) -> topInRecycler(view) != null }
+        .map { (slot, view) ->
+            val bounds = Rect(0, 0, view.width, view.height)
+            recycler.offsetDescendantRectToMyCoords(view, bounds)
+            ChunkAt(slot, view, bounds)
+        }
+        .firstOrNull { it.bounds.contains(x.toInt(), y.toInt()) }
+
+    /**
+     * What coil loads for the loaded block picture drawn under [x], [y], with the title of the chapter it is
+     * in, which names a saved copy; null for anything else there.
+     */
+    private fun pictureAt(x: Float, y: Float): Pair<Any, String>? {
+        val (slot, picture) = pictureSpanAt(x, y) ?: return null
+        val drawn = picture.drawnPicture()
+        if (drawn == null || drawn is ImageLoadingDrawable || drawn is ImageFailureDrawable) return null
+        val model = NovelPictureGesture.modelOf(picture.source, slot.chapter.sourceId) ?: return null
+        return model to slot.chapter.title
+    }
+
+    /** The chapter picture under [x], [y], hit where it is drawn, with the chapter it is in. */
+    private fun pictureSpanAt(x: Float, y: Float): Pair<ChapterSlot, ChapterImageSpan>? {
+        val (slot, chunk, bounds) = chunkAt(x, y) ?: return null
+        val text = chunk.text as? Spanned ?: return null
+        val layout = chunk.layout ?: return null
+        val inChunk = y - bounds.top - chunk.totalPaddingTop
+        val line = layout.getLineForVertical(inChunk.toInt())
+        val picture = text.getSpans(layout.getLineStart(line), layout.getLineEnd(line), ChapterImageSpan::class.java)
+            .firstOrNull() ?: return null
+        val lineTop = layout.getLineTop(line)
+        if (inChunk < picture.pictureTop(lineTop) || inChunk > picture.pictureBottom(lineTop)) return null
+        return slot to picture
+    }
+
+    private fun ChapterImageSpan.drawnPicture() = (drawable as? DrawableWrapper)?.innerDrawable
 
     /** A swipe: paged it turns a page, else it steps chapters, by the rules both renderers take from `ChapterSwipe.kt`. */
     private fun onPointerUp(x: Float, y: Float) {
@@ -1254,7 +1460,7 @@ class NovelTextViewport(
      */
     private fun report(sink: (Long, ChapterProgress.Percent) -> Unit) {
         val slot = visibleSlot() ?: return
-        if (slot.landing == null) {
+        if (slot.landing == null && !onSeam()) {
             sink(slot.chapter.chapterId, progressOf(slot))
             reportTopLine(slot)
         }
@@ -1265,14 +1471,18 @@ class NovelTextViewport(
     private var reportedTopLine: Triple<Long, Int, Int>? = null
 
     private fun reportTopLine(slot: ChapterSlot) {
-        val anchor = lineAtTop()
-        val chunk = anchor?.let { slot.block.chunkViews.indexOf(it.view) } ?: -1
-        val key = Triple(slot.chapter.chapterId, chunk, anchor?.offset ?: -1)
+        // Paged, the line the page holds, which a rebuild lands on again. The page's own first line sits above it
+        // after a reflow, and reporting that walked the reader back a page on every rotation.
+        val held = pageLine?.takeIf { it.chapterId == slot.chapter.chapterId && pageLineTop() != null }
+        val at = held?.let { it.chunk to it.offset }
+            ?: lineAtTop()?.let { slot.block.chunkViews.indexOf(it.view) to it.offset }
+        val chunk = at?.first ?: -1
+        val key = Triple(slot.chapter.chapterId, chunk, at?.second ?: -1)
         if (key == reportedTopLine) return
         reportedTopLine = key
-        val line = anchor?.takeIf { chunk >= 0 }?.let {
+        val line = at?.takeIf { chunk >= 0 }?.let { (_, offset) ->
             val prefix = slot.shownPrefixes[chunk]
-            (0 until chunk).sumOf(slot::shownCount) + prefix[it.offset.coerceIn(0, prefix.lastIndex)]
+            (0 until chunk).sumOf(slot::shownCount) + prefix[offset.coerceIn(0, prefix.lastIndex)]
         }
         callbacks.onTopLine(slot.chapter.chapterId, line)
     }
@@ -1295,6 +1505,7 @@ class NovelTextViewport(
      * behalf, and a seek names a landing of its own.
      */
     private fun readerMoved() {
+        pageLine = null
         slots.forEach {
             it.landing = null
             it.shortLanding = null
@@ -1347,6 +1558,7 @@ class NovelTextViewport(
     /** The WebView page's `reportEnds`: held while a chapter's images load, since until they land it
      *  measures short and would be read the moment it opened. */
     private fun reportEnds() {
+        if (paged) return reportPagedEnd()
         slots.forEach { slot ->
             val id = slot.chapter.chapterId
             if (!slot.rendered || slot.block.imagesLoading || id in reportedEnds) return@forEach
@@ -1355,6 +1567,16 @@ class NovelTextViewport(
             reportedEnds += id
             callbacks.onChapterEndSeen(id)
         }
+    }
+
+    /** Paged, by the page shown rather than the screen (NovelPaging.showsEnd). */
+    private fun reportPagedEnd() {
+        val at = pageAt() ?: return
+        val id = at.slot.chapter.chapterId
+        if (!at.slot.rendered || at.slot.block.imagesLoading || id in reportedEnds) return
+        if (!NovelPaging.showsEnd(at.pages, readTo(at.pages, at.index))) return
+        reportedEnds += id
+        callbacks.onChapterEndSeen(id)
     }
 
     /**
@@ -1366,7 +1588,7 @@ class NovelTextViewport(
         if (!slot.rendered) return none
         if (paged) {
             val (pages, itemTop) = pagesOf(slot) ?: return none
-            val index = NovelPaging.pageAt(pages, (readingTop() - itemTop).toFloat())
+            val index = readTo(pages, NovelPaging.pageAt(pages, (readingTop() - itemTop).toFloat()))
             return NovelPaging.progressOf(pages, index, slot.block.container.top.toFloat(), scrollableOf(slot))
         }
         val (top, height) = boundsOf(slot) ?: return none
@@ -1378,6 +1600,7 @@ class NovelTextViewport(
 
     /** Only a change is announced, because the scroll listener runs on every frame. */
     private fun reportVisibleChapter() {
+        if (onSeam()) return
         val id = visibleSlot()?.chapter?.chapterId ?: return
         if (id == reportedVisibleId) return
         reportedVisibleId = id
@@ -1397,6 +1620,18 @@ class NovelTextViewport(
         }
         val position = manager.findFirstVisibleItemPosition()
         return adapter.slotAt(position)
+    }
+
+    /**
+     * Whether a seam's page is on screen. As Mihon's transition page, it never moves the reader: nothing is
+     * reported there, so the chapter, page, line and number stay those of the page the reader turned from, and a
+     * rebuild returns there. Turning stays on [visibleSlot], which the seam's page belongs to.
+     */
+    private fun onSeam(): Boolean {
+        if (!paged) return false
+        val slot = visibleSlot() ?: return false
+        val (pages, itemTop) = pagesOf(slot) ?: return false
+        return NovelPaging.isSeam(pages, NovelPaging.pageAt(pages, (readingTop() - itemTop).toFloat()))
     }
 
     /**
@@ -1423,7 +1658,7 @@ class NovelTextViewport(
         if (paged) {
             showPage(slot) { pages ->
                 when (progress) {
-                    is ChapterProgress.Pages -> NovelPaging.indexFor(progress.fraction, pages.size)
+                    is ChapterProgress.Pages -> NovelPaging.indexFor(progress.fraction, pages)
                     is ChapterProgress.Percent ->
                         NovelPaging.landingIndex(
                             pages,
@@ -1481,11 +1716,20 @@ class NovelTextViewport(
         slot.block.chunkViews.forEach { chunk ->
             val layout = chunk.layout ?: return@forEach
             val base = container.top + chunk.top + chunk.totalPaddingTop
+            // A picture's band is the picture alone, as the page measures an img without its margins, so one
+            // drawn a page tall fits a page.
+            val pictures = (chunk.text as? Spanned)?.let { text ->
+                text.getSpans(0, text.length, ChapterImageSpan::class.java)
+                    .associateBy { layout.getLineForOffset(text.getSpanStart(it)) }
+            }.orEmpty()
             for (line in 0..<layout.lineCount) {
-                bands += NovelPaging.Band(
-                    (base + layout.getLineTop(line)).toFloat(),
-                    (base + layout.getLineBottom(line)).toFloat(),
-                )
+                val top = base + layout.getLineTop(line)
+                val picture = pictures[line]
+                bands += if (picture == null) {
+                    NovelPaging.Band(top.toFloat(), (base + layout.getLineBottom(line)).toFloat())
+                } else {
+                    NovelPaging.Band(picture.pictureTop(top).toFloat(), picture.pictureBottom(top).toFloat())
+                }
             }
         }
         val pages = NovelPaging.cut(bands, height).also { slot.cut = geometry to it }
@@ -1496,16 +1740,18 @@ class NovelTextViewport(
     private class PageAt(val slot: ChapterSlot, val pages: List<NovelPaging.Page>, val index: Int, val itemTop: Int)
 
     private fun pageAt(): PageAt? {
-        val slot = visibleSlot() ?: return null
+        val line = pageLineTop()
+        val slot = (if (line != null) pageLine?.slot else visibleSlot()) ?: return null
         val (pages, itemTop) = pagesOf(slot) ?: return null
         if (pages.isEmpty()) return null
-        return PageAt(slot, pages, NovelPaging.pageAt(pages, (readingTop() - itemTop).toFloat()), itemTop)
+        return PageAt(slot, pages, NovelPaging.pageAt(pages, ((line ?: readingTop()) - itemTop).toFloat()), itemTop)
     }
 
     /** Turns a page by [NovelPaging.turn], into the chapter beside this one at either end, and past the window by
      *  stepping chapters, as a scroll's swipe does. */
-    private fun turnPage(forward: Boolean) {
+    private fun turnPage(forward: Boolean, byReader: Boolean = true) {
         if (resumeVeil.isUp || redraw != null) return
+        if (byReader) callbacks.onReaderTurned()
         if (settings?.pageTransitions == true) {
             slide.turn(leftward = forward != pageLayout.isRtl) { turnPageNow(forward) }
         } else {
@@ -1517,7 +1763,13 @@ class NovelTextViewport(
         readerMoved()
         val at = pageAt() ?: return slide.finish()
         val window = joined().map { it.chapter.chapterId }
-        when (val turn = NovelPaging.turn(window, at.slot.chapter.chapterId, at.index, at.pages.size, forward)) {
+        val id = at.slot.chapter.chapterId
+        val turn = if (spreadHost != null) {
+            NovelSpreads.turn(window, id, at.pages, at.index, forward)
+        } else {
+            NovelPaging.turn(window, id, at.index, at.pages.size, forward)
+        }
+        when (turn) {
             is NovelPaging.Turn.Within -> showPage(at.slot, turned = true) { turn.index }
             is NovelPaging.Turn.FirstOf -> slotOf(turn.chapterId)?.let { showPage(it, turned = true) { 0 } }
             is NovelPaging.Turn.LastOf -> slotOf(turn.chapterId)?.let { slot ->
@@ -1531,6 +1783,30 @@ class NovelTextViewport(
     }
 
     private fun slotOf(chapterId: Long) = joined().firstOrNull { it.chapter.chapterId == chapterId }
+
+    /** The first page of the spread page [index] is on, which is the page shown: [index] itself without one. */
+    private fun leftOf(pages: List<NovelPaging.Page>, index: Int) =
+        if (spreadHost != null) NovelSpreads.leftOf(pages, index) else index
+
+    /** The page the reader has read to at page [index]: a spread's second page when it has one. */
+    private fun readTo(pages: List<NovelPaging.Page>, index: Int) =
+        if (spreadHost != null) NovelSpreads.readTo(pages, index) else index
+
+    /** Sets the spread whose first page is [left] on the host, with the card drawn across it on a seam's page. */
+    private fun placeSpread(slot: ChapterSlot, pages: List<NovelPaging.Page>, left: Int) {
+        val host = spreadHost ?: return
+        val page = pages[left]
+        val second = NovelSpreads.partnerOf(pages, left)?.let(pages::get)
+        host.place(
+            readingTop().toFloat(),
+            page.height,
+            second?.let { it.top - page.top },
+            second?.height ?: 0f,
+            card = if (page.seam) adapter.seamAbove(slot) else null,
+            cardColor = readerTextColor(),
+            cardPage = pageContentHeight().toInt(),
+        )
+    }
 
     /**
      * Shows the page [pick] chooses from [slot]'s pages, its first line at [readingTop]. A chapter the list has
@@ -1566,7 +1842,9 @@ class NovelTextViewport(
         pick: (List<NovelPaging.Page>) -> Int,
     ) {
         if (pages.isEmpty()) return
-        val page = pages[pick(pages).coerceIn(pages.indices)]
+        val index = leftOf(pages, pick(pages).coerceIn(pages.indices))
+        val page = pages[index]
+        placeSpread(slot, pages, index)
         recycler.stopScroll()
         pageJumpPending = true
         shownPageHeight = page.height
@@ -1580,6 +1858,8 @@ class NovelTextViewport(
     /** Says where the reader now is: a jump to a position lays the list out without the scroll that reports. */
     private fun pageShown(slot: ChapterSlot, turned: Boolean) {
         pageJumpPending = false
+        // Before the reports, which name the held line: the one from before a jump is still laid out.
+        holdPageLine()
         reportVisibleChapter()
         report(callbacks.onProgressChanged)
         report(callbacks.onProgressSettled)
@@ -1594,9 +1874,28 @@ class NovelTextViewport(
     }
 
     private fun markShownPage() {
+        holdPageLine()
         val at = pageAt() ?: return
-        shownPage.value = ShownPage(at.slot.chapter.chapterId to at.index, ready = !at.slot.block.imagesLoading)
-        callbacks.onPageShown(at.index, at.pages.size)
+        val index = leftOf(at.pages, at.index)
+        shownPage.value = ShownPage(at.slot.chapter.chapterId to index, ready = !at.slot.block.imagesLoading)
+        // A seam's page has no number, so the one shown stays the page turned from (onSeam). A spread's is its
+        // second page's, as manga's is.
+        NovelPaging.countOf(at.pages, readTo(at.pages, at.index))?.let { (page, of) -> callbacks.onPageShown(page, of) }
+    }
+
+    /** Takes the page's first line, unless the line already held is still on this page. */
+    private fun holdPageLine() {
+        // A redraw takes the views down and builds them again, so a line it cannot measure yet has not gone.
+        if (redraw != null) return
+        val top = pageLineTop()
+        // A spread's second page is on screen too, so a line held there has not gone.
+        val bottom = spreadHost?.shownBottom ?: (readingTop() + (shownPageHeight ?: 0f))
+        val onPage = top != null && top >= readingTop() - 1 && top < bottom
+        if (onPage) return
+        val slot = visibleSlot()
+        pageLine = lineAtTop()?.let { line ->
+            slot?.let { PageLine(it.chapter.chapterId, it.block.chunkViews.indexOf(line.view), line.offset) }
+        }
     }
 
     /**
@@ -1623,16 +1922,19 @@ class NovelTextViewport(
             return
         }
         val at = pageAt() ?: return
-        val page = at.pages[at.index]
+        val index = leftOf(at.pages, at.index)
+        val page = at.pages[index]
         if (abs(at.itemTop + page.top - readingTop()) >= 1f) {
             // The same jump from the same place did not land last time, and would not this time either.
-            val attempt = Triple(at.slot.chapter.chapterId, at.index, at.itemTop)
+            val attempt = Triple(at.slot.chapter.chapterId, index, at.itemTop)
             if (attempt == failedSnap) return
             failedSnap = attempt
-            showPage(at.slot) { at.index }
+            showPage(at.slot) { index }
             return
         }
         failedSnap = null
+        // A landing settles here without a page being shown, so the spread is set here too.
+        placeSpread(at.slot, at.pages, index)
         if (shownPageHeight != page.height) {
             shownPageHeight = page.height
             recycler.invalidate()
@@ -1712,6 +2014,9 @@ class NovelTextViewport(
                 }
                 val top = lineTopOf(view, offset) ?: return
                 slot.landing = null
+                // Held, or the next page shown takes its first line, which is above this one, and a rebuilt
+                // renderer holds no line of its own: each rotation walked the reader back a page.
+                if (paged) pageLine = PageLine(slot.chapter.chapterId, slot.block.chunkViews.indexOf(view), offset)
                 val before = scrolled
                 scrollColumnBy(top - readingTop())
                 if (lineTopOf(view, offset) != readingTop()) holdShort(slot, landing)
@@ -1756,12 +2061,14 @@ class NovelTextViewport(
             )
             NovelTextStyle.apply(this, settings, context, fontManager)
             setTextIsSelectable(textSelectable)
+            customSelectionActionModeCallback = WebSearchSelection(this)
             // Selectable text has one tap owner, the watcher, so a click listener here would double
             // every tap: the Editor swallows a click on the text but not one past its last line.
             // Without selection the click is the owner instead, because LinkOnlyMovementMethod
             // cancels the click a tap on a link queued and lets every other tap through to here.
             if (!textSelectable) setOnClickListener { onTap(touchDownX, touchDownY) }
             setOnTouchListener(dragEndsPress)
+            accessibilityDelegate = FailedPictureAccessibility
             // Off on both branches: the click is dispatched by the movement method below, so leaving
             // it on would let the framework fire its own unchecked intent for the same tap.
             linksClickable = false
@@ -1782,6 +2089,18 @@ class NovelTextViewport(
         } finally {
             paged?.scrollingItself = false
         }
+    }
+
+    /** Selectable text takes focus on a tap, and a list scrolls a newly focused child's top into view, which
+     *  moved the reader by however far that chunk's top was off screen. A selection drag still scrolls, as it
+     *  asks for its rectangle rather than for focus. */
+    private class ScrollLayoutManager(context: Context) : LinearLayoutManager(context) {
+        override fun onRequestChildFocus(
+            parent: RecyclerView,
+            state: RecyclerView.State,
+            child: View,
+            focused: View?,
+        ) = true
     }
 
     /** Refuses a finger's scroll, so paged reading moves only a page at a time. The viewport's own scrolls go
@@ -1952,12 +2271,19 @@ class NovelTextViewport(
          * chapter opened on its own has nothing above it, and a later prepend gives it one.
          */
         private fun bindSeam(holder: Holder, position: Int) {
-            val finished = shown.getOrNull(position - 1)?.chapter
-            val seam = finished?.let { NovelSeam.between(it, shown[position].chapter) }
-                ?.drawn(settings?.alwaysShowChapterTransition)
+            val seam = seamAt(position)
             val color = readerTextColor()
-            if (seam == holder.seam.seam && color == holder.seam.textColor) return
-            holder.seam = holder.root.replace(holder.seam, NovelChapterSeamView(holder.root.context, seam, color))
+            val page = seamPageHeight()
+            if (seam == holder.seam.seam && color == holder.seam.textColor && holder.seam.fits(page)) return
+            holder.seam = holder.root.replace(holder.seam, NovelChapterSeamView(holder.root.context, seam, color, page))
+        }
+
+        /** The seam drawn above [slot]'s text, which a spread also draws across both its pages. */
+        fun seamAbove(slot: ChapterSlot): NovelSeam? = seamAt(shown.indexOf(slot))
+
+        private fun seamAt(position: Int): NovelSeam? {
+            val finished = shown.getOrNull(position - 1)?.chapter ?: return null
+            return NovelSeam.between(finished, shown[position].chapter).drawn(settings?.alwaysShowChapterTransition)
         }
 
         /** The marker below the novel's last chapter, which depends on that chapter and the text colour
@@ -1965,9 +2291,13 @@ class NovelTextViewport(
         private fun bindEnd(holder: Holder, position: Int) {
             val end = NovelSeam.end(shown[position].chapter)?.drawn(settings?.alwaysShowChapterTransition)
             val color = readerTextColor()
-            if (end == holder.end.seam && color == holder.end.textColor) return
-            holder.end = holder.root.replace(holder.end, NovelChapterSeamView(holder.root.context, end, color))
+            val page = seamPageHeight()
+            if (end == holder.end.seam && color == holder.end.textColor && holder.end.fits(page)) return
+            holder.end = holder.root.replace(holder.end, NovelChapterSeamView(holder.root.context, end, color, page))
         }
+
+        /** The page a marker fits whole on, null while scrolling and before the list has a height. */
+        private fun seamPageHeight(): Int? = pageContentHeight().toInt().takeIf { paged && it > 0 }
 
         /**
          * Only the two ends of the window can have run out of text, so only they draw a failure.
@@ -2012,6 +2342,9 @@ class NovelTextViewport(
          *  that is taken back. */
         fun refreshMarkers() = keepingReaderStill { notifyItemRangeChanged(0, shown.size, MARKERS_CHANGED) }
 
+        /** Whether any chapter held draws a seam or the end marker, the two views fitted to a page. */
+        fun drawsMarkers(): Boolean = shown.size > 1 || shown.any { it.chapter.isLast }
+
         override fun getItemCount(): Int = shown.size
     }
 
@@ -2030,5 +2363,12 @@ class NovelTextViewport(
     }
 }
 
-private fun NovelReaderSettings.paragraphShape() =
-    ParagraphShape(paragraphIndent, paragraphSpacing, fontSize, bionicReading, margins.left + margins.right)
+private fun NovelReaderSettings.paragraphShape(paged: Boolean) = ParagraphShape(
+    paragraphIndent,
+    paragraphSpacing,
+    fontSize,
+    bionicReading,
+    margins.left + margins.right,
+    fontFamily,
+    pageMargins = if (paged) margins.top + margins.bottom else null,
+)

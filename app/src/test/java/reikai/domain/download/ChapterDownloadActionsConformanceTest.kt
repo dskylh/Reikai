@@ -29,25 +29,23 @@ import io.mockk.unmockkObject
 import io.mockk.unmockkStatic
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.MethodSource
+import reikai.domain.manga.MangaPreferences
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRepository
@@ -61,7 +59,11 @@ import reikai.novel.download.NovelDownloadWorker
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.presentation.recents.EmittingPreferenceStore
+import reikai.util.resetVirtualDispatchers
+import reikai.util.restubDefaultDispatcher
+import reikai.util.sourceContacts
 import reikai.util.testAppScope
+import reikai.util.virtualDispatchers
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.chapter.model.Chapter
 import tachiyomi.domain.download.service.DownloadPreferences
@@ -88,19 +90,22 @@ class ChapterDownloadActionsConformanceTest {
         mockkObject(DownloadWorker.Companion)
         mockkStatic(Context::activeNetworkState)
         every { any<Context>().activeNetworkState() } returns NetworkState(true, true, true)
-        // Mihon's Downloader restores its saved queue on the main dispatcher as it is built.
-        Dispatchers.setMain(UnconfinedTestDispatcher())
+        // Mihon's Downloader restores its saved queue on the main dispatcher as it is built, so Main is unconfined.
+        virtualDispatchers(UnconfinedTestDispatcher())
     }
 
     @AfterEach
     fun tearDown() {
-        Dispatchers.resetMain()
+        resetVirtualDispatchers()
         unmockkObject(NovelDownloadWorker.Companion)
         unmockkObject(DownloadWorker.Companion)
         unmockkStatic(Context::activeNetworkState)
     }
 
     private fun conformance(half: DownloadActionsHalf, body: suspend TestScope.() -> Unit) = runTest {
+        half.open(testScheduler)
+        // Undoes what the halves' coEverys did to Default, as restubDefaultDispatcher says
+        restubDefaultDispatcher()
         try {
             body()
         } finally {
@@ -202,6 +207,9 @@ class ChapterDownloadActionsConformanceTest {
 }
 
 interface DownloadActionsHalf {
+    /** Builds the engine on the test's virtual dispatchers, its source contacts timed on [scheduler]. */
+    fun open(scheduler: TestCoroutineScheduler)
+
     /** Queues [ids] in that order. */
     suspend fun queue(ids: List<Long>)
 
@@ -273,6 +281,8 @@ class MangaDownloadActionsHalf : DownloadActionsHalf {
     // The downloader waits on its parallel-source setting, which an in-memory preference never emits.
     private val downloadPreferences = DownloadPreferences(EmittingPreferenceStore())
 
+    private lateinit var scheduler: TestCoroutineScheduler
+
     // Built inside the test: its constructor launches on the main dispatcher the test installs.
     private val downloader by lazy {
         every { DownloadWorker.start(any()) } answers { startAsked = true }
@@ -295,6 +305,8 @@ class MangaDownloadActionsHalf : DownloadActionsHalf {
                 // A stop with nothing paused posts the done notice; the worker ends on that stop.
                 every { onComplete() } answers { stopped.complete(Unit) }
             },
+            mangaPreferences = MangaPreferences(InMemoryPreferenceStore()),
+            sourceContacts = scheduler.sourceContacts(),
         )
     }
     private val downloadManager by lazy {
@@ -325,6 +337,11 @@ class MangaDownloadActionsHalf : DownloadActionsHalf {
         )
     }
 
+    override fun open(scheduler: TestCoroutineScheduler) {
+        this.scheduler = scheduler
+        actions
+    }
+
     override suspend fun queue(ids: List<Long>) = downloadManager.downloadChapters(manga, ids.map(::chapter))
 
     override suspend fun queueFailed(id: Long, busy: Long?, scope: CoroutineScope) {
@@ -333,15 +350,15 @@ class MangaDownloadActionsHalf : DownloadActionsHalf {
         // The worker's part, which WorkManager would run.
         downloader.start()
         val download = downloadManager.queueState.value.first { it.chapter.id == id }
-        awaitOnRealThreads { download.statusFlow.first { it == Download.State.ERROR } }
-        if (busy == null) awaitOnRealThreads { stopped.await() } else awaitFetches(busy, times = 1)
+        awaitProgress { download.statusFlow.first { it == Download.State.ERROR } }
+        if (busy == null) awaitProgress { stopped.await() } else awaitFetches(busy, times = 1)
         failing -= "u$id"
         startAsked = false
     }
 
     /** Whether the source was asked for chapter [id]'s pages [times] times, waiting for it if need be. */
     suspend fun awaitFetches(id: Long, times: Int): Boolean {
-        awaitOnRealThreads { fetches.first { urls -> urls.count { it == "u$id" } >= times } }
+        awaitProgress { fetches.first { urls -> urls.count { it == "u$id" } >= times } }
         return fetches.value.count { it == "u$id" } == times
     }
 
@@ -358,14 +375,14 @@ class MangaDownloadActionsHalf : DownloadActionsHalf {
 
     override suspend fun close() = downloader.pause()
 
-    /** The downloader runs on its own IO threads, so its progress is awaited in real time, bounded. */
-    private suspend fun awaitOnRealThreads(block: suspend () -> Unit) {
-        withContext(Dispatchers.Default) { withTimeoutOrNull(WAIT) { block() } }
+    /** The downloader's progress, awaited in virtual time; a stall fails by name. */
+    private suspend fun awaitProgress(block: suspend () -> Unit) {
+        withTimeout(WAIT) { block() }
     }
 
     private companion object {
         const val ERROR_NOTICE_MS = 200L
-        val WAIT = 5.seconds
+        val WAIT = 30.seconds
     }
 }
 
@@ -405,7 +422,13 @@ class NovelDownloadActionsHalf : DownloadActionsHalf {
     }
     private val sourceManager = mockk<NovelSourceManager>().also { coEvery { it.get("src") } returns failingSource }
 
-    private val manager = spyk(
+    private lateinit var manager: NovelDownloadManager
+
+    override fun open(scheduler: TestCoroutineScheduler) {
+        manager = manager(scheduler)
+    }
+
+    private fun manager(scheduler: TestCoroutineScheduler) = spyk(
         NovelDownloadManager(
             scope = testAppScope(),
             context = context,
@@ -423,6 +446,7 @@ class NovelDownloadActionsHalf : DownloadActionsHalf {
             adultChecker = mockk { coEvery { adultNovelIdsAmong(any()) } returns emptySet() },
             sourceTitles = mockk(),
             getEntryCustomInfo = mockk { coEvery { await(any()) } returns null },
+            sourceContacts = scheduler.sourceContacts(),
         ),
     ).also { spy ->
         every { spy.deleteChapters(any()) } answers { deleted += firstArg<List<NovelChapter>>().map { it.id } }

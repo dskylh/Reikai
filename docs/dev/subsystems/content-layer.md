@@ -8,15 +8,15 @@ Reikai serves manga and light novels from one Reikai-owned layer over a neutral 
 
 ### Three layers
 
-- **Engines, separate and unequal.** Mihon's manga engine (the `Manga` model, its repositories, sources, library and download machinery) stays upstream-tracked and minimally patched. Reikai's novel engine (`Novel` and `NovelChapter`, the `novel*` tables, `NovelSource` over LN plugins and the two APK kinds) is fully Reikai-owned. Interactors and repositories stay with their engine.
+- **Engines, separate and unequal.** Mihon's manga engine (the `Manga` model, its repositories, sources, library and download machinery) stays upstream-tracked and minimally patched. Reikai's novel engine (`Novel` and `NovelChapter`, the `novel*` tables, `NovelSource` over LN plugins, the two APK kinds and the built-in local source) is fully Reikai-owned. Interactors and repositories stay with their engine.
 - **Adapters (or providers), the only seam.** The shared layer talks to each engine through one adapter per content type. On most surfaces the manga adapter wraps a live Mihon model (`MangaViewModel`, `LibraryViewModel`, `ReaderViewModel`, the two feed models), which stays on the render path and keeps syncing; a renamed upstream field breaks the adapter at compile time rather than in a pixel hunt. The novel adapter wraps the novel model, which is reshaped behind it rather than deleted.
 - **The shared layer**, under `reikai.presentation.*` and `reikai.domain.*`: a neutral state, a behaviour contract or an engine that owns assembly, selection and the action verbs, and the `Entry*` composables that render both types.
 
 ### Identity: `EntryId`
 
-Every entry in shared code is a sealed `EntryId` (`EntryId.Manga(rawId)` or `EntryId.Novel(rawId)`), never a raw `Long`. The two id spaces overlap (manga 12 and novel 12 both exist), so any map, set or key over a mixed list keys on `EntryId`, or it cross-wires silently. `EntryId` is code-only: novel rows carry real positive ids, and backups and the merge tables key on those, so it needed no schema or backup change. Two projections exist for caches that are not `EntryId`-typed: `customCoverKey` names the custom-cover file (manga `"12"`, novels `"novel:12"`), and `signedKey` negates a novel id for Mihon's `Long`-keyed `MangaCover.vibrantCoverColorMap`, a cache that rebuilds itself.
+Every entry in shared code is a sealed `EntryId` (`EntryId.Manga(rawId)` or `EntryId.Novel(rawId)`), never a raw `Long`. The two id spaces overlap (manga 12 and novel 12 both exist), so any map, set or key over a mixed list keys on `EntryId`, or it cross-wires silently. `EntryId` is code-only: novel rows carry real positive ids, and backups and the merge tables key on those, so it needed no schema or backup change. Two projections exist for caches that are not `EntryId`-typed: `customCoverKey` names the custom-cover file (manga `"12"`, novels `"novel:12"`), and `signedKey` negates a novel id for the `Long`-keyed cover colour store `CoverColors` (behind Mihon's `MangaCover.vibrantCoverColor`), which `MangaCoverMetadata` stores to preferences by that key, so the encoding is a stored format. A library entry's colour is kept while it is in the library; any other's, browse covers included, only for the most recently used up to a cap, with each colour's recency stored so a restart evicts in the same order. Whether an entry is in the library comes from the writer (the cover's favourite flag), never a read. The store is restored and saved on the app scope, the save only when a colour came, went or changed, so reads that only reorder it write nothing.
 
-`ContentType` (`ALL`, `MANGA`, `NOVEL`) is the chip value and the category discriminator; `ContentType.labelRes` is the one place a content type is named in the UI.
+`ContentType` (`ALL`, `MANGA`, `NOVELS`) is the chip value, and `CategoryContentType` (`UNIVERSAL`, `MANGA`, `NOVEL`) the category discriminator; `ContentType.labelRes` is the one place a content type is named in the UI.
 
 ### Surfaces
 
@@ -29,7 +29,7 @@ Each surface is at a different depth; the depth table in [.claude/rules/content-
 | Reader | `ReaderEngine` over two providers inside one `ReaderActivity` host | [reader.md](reader.md) |
 | History, Updates | `RecentsEngine` over four feed models, one shared screen | [recents.md](recents.md) |
 | Downloads | One queue engine (`EntryDownloadQueueViewModel`) over the two download managers | [downloads.md](downloads.md) |
-| Browse, sources | One engine for the four multi-source lists, one catalogue screen, `NovelSource` over three kinds | [browse-and-sources.md](browse-and-sources.md) |
+| Browse, sources | One engine for the four multi-source lists, one catalogue screen, `NovelSource` over four kinds | [browse-and-sources.md](browse-and-sources.md) |
 | Migrate | One flow (`EntryMigrationListViewModel` and the config screen) over two adapters | [migrate.md](migrate.md) |
 | Merged series | One group store and stitch over both types | [merged-series.md](merged-series.md) |
 
@@ -48,6 +48,10 @@ A rule that must hold for both types lives once, as a pure function both sides c
 - Library: `librarySortComparator`, `libraryFilterMatches`, `libraryQueryMatches`, `libraryDynamicGroupingFeed`.
 - Updates: `smartUpdateSkip`, `isUpdateScope`, `keptDetail`, the `NewChaptersSummary` and `NewChaptersDescription` notification rules.
 - Backup: `backupEntries` over `BackupEntryParts` (`reikai/data/backup/BackupEntryDriver.kt`) decides which series are backed up and gates chapters, categories, tracks, history and custom info once, while each type keeps its frozen wire fields.
+
+### The Content shown setting
+
+`shownContent` (`ShownContent.kt`) says which content types the app shows, as a `ContentType`, so `ALL` shows both. Every persisted chip is a `ShownContentPreference`, which reads as the shown type while the other is hidden, so an engine that reads its chip follows the setting without asking. A chip held in memory, or a type passed in, goes through `within` once. `LocalShownContent` lets the chip row, the type badge and the settings rows leave themselves out. Lists that are not behind a chip filter by `includes`: the Feed, the widget, the extension badges and notices.
 
 ### Conformance tests
 
@@ -83,6 +87,17 @@ A pure-UI Mihon file fully replaced by a shared component is deleted and given a
 - **The manga model stays live behind its adapter; the novel model is reshaped, not deleted.** The manga model is the sync surface; the novel model's engine work has nowhere else to go, so "dissolve" means the UI body and behaviour contract collapsed while both models remain.
 - **Takeovers stop at orchestration.** Library, recents, browse, migrate, reader and downloads own assembly, selection and verbs above live per-type models, because a mixed list or a mixed selection cannot be computed by either model alone.
 - **Scanlator filtering is a content-type-gated capability.** Novels store a chapter's translator group, but the novel filter is parked ([parked.md](../parked.md)); it is not a Tsundoku port, which gets it only through novels-as-manga.
+
+- **Hiding a type never writes.** The stored chips, categories and positions stay as they were, so All brings every choice back.
+- **Every update worker goes through `libraryUpdateGate`**, so a hidden type's run ends as a success from any start, and its schedule stays in place for when the type shows again.
+- **The download queue keeps a hidden type's running downloads.** The queue is the only place to cancel them, and hiding stops new ones through the skipped update.
+- **Mihon's own updates widget stays manga.** The user placed it, and it has no setting to read; the combined widget follows Show.
+- **Details, deep links and backups ignore Show.** Opening an entry by link is an explicit act, and a backup stays complete.
+- **Refresh library covers and tracker refresh ignore Show.** Both change stored data rather than what a user sees, and the first is a deliberate tap.
+- **The bottom nav and More stay as they are.** Neither has a per-type entry; Downloads and Statistics (in More, or the optional Statistics tab) serve whichever type shows.
+- **A repo card stays while it serves a shown type or its contents are unknown.** A store listing both types stays, and the Repos count in settings can still include a store that only serves the hidden type, since that count is read before any fetch. The Repos screen counts what it leaves out under the list, so a repo added for a hidden type does not just vanish, and its Add dialog still refuses that address.
+- **What Show hides takes no room and keeps its place.** A hidden Feed row takes no slot of the cap, since it can be neither seen nor removed; a restore counts every row, because backups ignore Show. A drag writes the visible rows back into the slots they held (`withShownOrder`), and a name only a hidden category holds stays free.
+- **A seed that must outlast Show writes the stored chip.** `ShownContentPreference.stored` is for a one-off copy like the Recents seed, which would otherwise be dropped and run again.
 
 ## Extending
 

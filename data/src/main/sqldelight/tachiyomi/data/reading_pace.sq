@@ -1,0 +1,64 @@
+-- What reading pace is learned from: a finished chapter's time in history against its length. Manga
+-- keeps its length as chapter.page_count, written with progress; a novel chapter's word count is kept
+-- here, written when the reader opens it, since nothing else counts its words. listened_ms is the part
+-- of its history time spent read aloud (69.sqm), which tells a listened chapter from a read one.
+CREATE TABLE novel_chapter_words(
+    chapter_id INTEGER NOT NULL PRIMARY KEY,
+    words INTEGER NOT NULL,
+    listened_ms INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY(chapter_id) REFERENCES novel_chapters (_id)
+    ON DELETE CASCADE
+);
+
+setNovelWords:
+INSERT INTO novel_chapter_words(chapter_id, words)
+VALUES (:chapterId, :words)
+ON CONFLICT(chapter_id) DO UPDATE SET words = excluded.words;
+
+-- Backup restore: a chapter's word count is at least [words], the larger of the two, as a restored manga
+-- chapter keeps the larger page count.
+keepNovelWords:
+INSERT INTO novel_chapter_words(chapter_id, words)
+VALUES (:chapterId, :words)
+ON CONFLICT(chapter_id) DO UPDATE SET words = MAX(words, excluded.words);
+
+addNovelListened:
+INSERT INTO novel_chapter_words(chapter_id, words, listened_ms)
+VALUES (:chapterId, 0, :ms)
+ON CONFLICT(chapter_id) DO UPDATE SET listened_ms = listened_ms + excluded.listened_ms;
+
+-- Backup restore and migration: a chapter's listened time is at least [ms], the longer of the two, as
+-- novel_history.sq restoreUpsert keeps the longer time_read, so restoring twice adds nothing.
+keepNovelListened:
+INSERT INTO novel_chapter_words(chapter_id, words, listened_ms)
+VALUES (:chapterId, 0, :ms)
+ON CONFLICT(chapter_id) DO UPDATE SET listened_ms = MAX(listened_ms, excluded.listened_ms);
+
+-- Clearing all novel history clears the listened share of the time it removed; the word counts stay,
+-- as manga's page counts do.
+clearNovelListened:
+UPDATE novel_chapter_words SET listened_ms = 0;
+
+-- Each kept chapter of these novels, keyed by url as a backup carries chapters.
+novelChapterPace:
+SELECT C.novel_id, C._id, C.url, W.words, W.listened_ms
+FROM novel_chapters C
+JOIN novel_chapter_words W ON W.chapter_id = C._id
+WHERE C.novel_id IN :novelIds;
+
+mangaSamples:
+SELECT C.manga_id, H.read_duration, C.page_count, 0 AS listened_ms
+FROM history H
+JOIN chapter C ON C.id = H.chapter_id
+WHERE C.user_read = 1 AND C.page_count > 0 AND H.read_duration > 0 AND H.read_at IS NOT NULL
+ORDER BY H.read_at DESC
+LIMIT :limit;
+
+novelSamples:
+SELECT C.novel_id, H.time_read, W.words, W.listened_ms
+FROM novel_history H
+JOIN novel_chapters C ON C._id = H.chapter_id
+JOIN novel_chapter_words W ON W.chapter_id = C._id
+WHERE C.read = 1 AND W.words > 0 AND H.time_read > 0 AND H.last_read IS NOT NULL
+ORDER BY H.last_read DESC
+LIMIT :limit;

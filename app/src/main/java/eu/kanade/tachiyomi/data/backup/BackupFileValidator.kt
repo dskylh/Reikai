@@ -10,10 +10,10 @@ import eu.kanade.tachiyomi.data.backup.models.BackupNovelSource
 import eu.kanade.tachiyomi.data.backup.models.BackupPreference
 import eu.kanade.tachiyomi.data.backup.models.BackupSource
 import eu.kanade.tachiyomi.data.backup.models.PreferenceValue
-import eu.kanade.tachiyomi.data.backup.models.novelSourceName
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.protobuf.ProtoBuf
+import reikai.data.backup.FOREIGN_MERGED_SOURCE_ID
 import reikai.data.backup.RestoreInstallPlan
 import reikai.data.backup.RestoreInstallSources
 import reikai.data.backup.mangaTrackScores
@@ -53,7 +53,8 @@ class BackupFileValidator(
 
         val sources = backupSources.associate { it.sourceId to it.name } // RK: streamed
         val missingSources = sources
-            .filterKeys { sourceManager.get(it) == null }
+            // RK: a TachiyomiSY or Komikku merged series' source, which no install provides and the restore leaves out
+            .filterKeys { it != FOREIGN_MERGED_SOURCE_ID && sourceManager.get(it) == null }
             .map { (id, name) ->
                 // Some backups store the id as the name, and sources without a stub were backed up with no name
                 if (name.isBlank() || name.toLongOrNull() != null) {
@@ -72,11 +73,10 @@ class BackupFileValidator(
             .sorted()
 
         // RK --> fold in novel sources the restore can't satisfy, so the pre-restore warning covers
-        // novels too. A missing novel source shows by the name the backup recorded, or by its id in a
-        // backup older than that list.
+        // novels too. Named as manga's are: the backup's name, else this device's record, else the id.
         val missingNovelSources = novelSources
             .filter { novelSourceManager.get(it) == null }
-            .map(novelSourceNames::novelSourceName)
+            .map { id -> novelSourceNames[id]?.takeIf { it.isNotBlank() && it != id } ?: novelSourceManager.nameOf(id) }
 
         return Results(
             (missingSources + missingNovelSources).distinct().sorted(),

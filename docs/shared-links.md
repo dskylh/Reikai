@@ -6,6 +6,8 @@ description: Share a series or chapter link to Reikai from your browser and it o
 
 # Opening shared links
 
+_Dev records: [browse-and-sources.md](dev/subsystems/browse-and-sources.md), [adult-sources.md](dev/subsystems/adult-sources.md). Doc map: [README.md](README.md)._
+
 Found a series in your browser? Share the link to **Reikai** and it opens that series' page, manga or novel, so you can read it or add it to your library.
 
 1. In your browser or any other app, open its share menu on the link.
@@ -25,7 +27,7 @@ The link's source has to be installed. A link to a site you have no source for e
 
 There is nothing to turn on. Tapping a web link does not open Reikai by itself, because the app does not register to open most web addresses, so use the share menu. Two kinds of link are the exception and can open in Reikai when tapped:
 
-- **MangaDex title and chapter links** open the series, or the chapter in the reader, and add the series to your library. This needs the MangaDex extension installed and [**Enable delegated sources**](built-in-sources.md) on in <nav to="browse"> (on by default). With it off, the extension takes the link and opens a MangaDex search for it instead. Without the extension, Reikai says it could not open the link.
+- **MangaDex title and chapter links** open the series, or the chapter in the reader, and add the series to your library. This needs the MangaDex extension installed and [**Use enhanced sources**](built-in-sources.md) on in <nav to="browse"> (on by default). With it off, the extension takes the link and opens a MangaDex search for it instead. Without the extension, Reikai says it could not open the link.
 - **Gallery links** from the sites the [gallery import](adult-sources.md#adding-many-galleries-at-once) accepts open the gallery, or the chapter in the reader, and add it to your library, the same way.
 
 Android may ask which app to open such a link with, or keep opening it in your browser until you allow Reikai to open supported links in its app info (**Open by default**). Shared instead of tapped, these links go through the same lookup as any other link.

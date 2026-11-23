@@ -15,14 +15,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.core.screen.Screen
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metrox.viewmodel.metroViewModel
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.TabContent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.automirroredrounded.Sort
 import mihon.icons.materialsymbols.rounded.Add
@@ -33,13 +31,13 @@ import reikai.presentation.browse.MixedBulkSelection
 import reikai.presentation.browse.SearchResultSection
 import reikai.presentation.browse.catalogue.EntryBrowseListing
 import reikai.presentation.browse.catalogue.EntryBrowseRow
-import reikai.presentation.browse.catalogue.EntryCatalogueScreen
+import reikai.presentation.browse.catalogue.EntryCatalogueRoute
 import reikai.presentation.browse.components.BulkSelectionToolbar
-import reikai.presentation.browse.detailsScreen
 import reikai.presentation.browse.globalsearch.EntrySearchState
 import reikai.presentation.browse.rememberEntryGestures
 import reikai.presentation.browse.rememberMixedBulkSelection
 import reikai.presentation.browse.startAdd
+import reikai.presentation.details.rememberDetailsOpener
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.PullRefresh
 import tachiyomi.presentation.core.i18n.stringResource
@@ -51,7 +49,7 @@ import tachiyomi.presentation.core.screens.LoadingScreen
  * One screen for both content types, over the same row fill the global search uses.
  */
 @Composable
-fun Screen.reikaiFeedTab(): TabContent {
+fun reikaiFeedTab(): TabContent {
     val model = metroViewModel<FeedViewModel>()
     val state by model.state.collectAsStateWithLifecycle()
 
@@ -133,13 +131,14 @@ fun Screen.reikaiFeedTab(): TabContent {
 }
 
 @Composable
-private fun Screen.FeedContent(
+private fun FeedContent(
     state: FeedState,
     model: FeedViewModel,
     contentPadding: PaddingValues,
     selection: MixedBulkSelection,
 ) {
-    val navigator = LocalNavigator.currentOrThrow
+    val navigator = LocalNavigator.current
+    val opener = rememberDetailsOpener()
 
     // Held by hand rather than derived from the rows: the rows only turn to loading a frame after the
     // gesture ends, by which time the indicator has already retracted. Cleared once they settle, with
@@ -174,7 +173,7 @@ private fun Screen.FeedContent(
                     val gestures = rememberEntryGestures(
                         choose = { result: EntryBrowseRow -> selection.toggle(result, entry.row.key) }
                             .takeIf { selection.selectionMode },
-                        open = { result: EntryBrowseRow -> navigator.push(result.detailsScreen(entry.row.key)) },
+                        open = { result: EntryBrowseRow -> opener.open(result, entry.row.key) },
                         add = { result: EntryBrowseRow ->
                             result.startAdd(entry.row.key, model.mangaAddFlow, model.novelAddFlow)
                         },
@@ -189,7 +188,7 @@ private fun Screen.FeedContent(
                         selectedKeys = selection.selectedKeys,
                         onClickSource = {
                             navigator.push(
-                                EntryCatalogueScreen(
+                                EntryCatalogueRoute(
                                     sourceKey = entry.row.key,
                                     // Where the row's own results came from, so opening it shows
                                     // more of the same rather than an unrelated listing.

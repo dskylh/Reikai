@@ -21,21 +21,20 @@ import eu.kanade.tachiyomi.data.backup.models.BackupExtension
 import eu.kanade.tachiyomi.data.backup.models.BackupExtensionStore
 import eu.kanade.tachiyomi.data.backup.models.BackupFeedRow
 import eu.kanade.tachiyomi.data.backup.models.BackupFields
-import eu.kanade.tachiyomi.data.backup.models.BackupKitsuNativeScale
 import eu.kanade.tachiyomi.data.backup.models.BackupManga
 import eu.kanade.tachiyomi.data.backup.models.BackupMangaMergeGroup
 import eu.kanade.tachiyomi.data.backup.models.BackupMangaSourceRef
-import eu.kanade.tachiyomi.data.backup.models.BackupMergeGroupsStored
 import eu.kanade.tachiyomi.data.backup.models.BackupNovel
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelCategory
+import eu.kanade.tachiyomi.data.backup.models.BackupNovelFont // RK
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelMergeGroup
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelSource
 import eu.kanade.tachiyomi.data.backup.models.BackupPreference
 import eu.kanade.tachiyomi.data.backup.models.BackupSavedSearch
-import eu.kanade.tachiyomi.data.backup.models.BackupSortOverridesStored
 import eu.kanade.tachiyomi.data.backup.models.BackupSource
 import eu.kanade.tachiyomi.data.backup.models.BackupSourcePreferences
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.yield
 import kotlinx.serialization.SerializationStrategy
 import kotlinx.serialization.protobuf.ProtoBuf
@@ -44,10 +43,13 @@ import okio.BufferedSink
 import okio.buffer
 import okio.gzip
 import okio.sink
+import reikai.data.backup.backedUpAppPreferences
 import reikai.data.backup.backupEntries
 import reikai.data.backup.mergeGroupRefs
 import reikai.domain.library.ContentType
 import reikai.domain.merge.MergeGroupRepository
+import reikai.domain.novel.NovelPreferences
+import reikai.novel.font.NovelFontManager // RK
 import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.system.logcat
@@ -82,6 +84,8 @@ class BackupCreator(
     private val novelBackupCreator: NovelBackupCreator,
     private val extensionBackupCreator: ExtensionBackupCreator,
     private val feedBackupCreator: FeedBackupCreator,
+    private val novelPreferences: NovelPreferences,
+    private val novelFonts: NovelFontManager,
     // RK <--
 ) {
     @AssistedFactory
@@ -162,6 +166,17 @@ class BackupCreator(
                     }
                 }
 
+                // RK: streamed too, since a reader font runs to megabytes
+                if (options.appSettings) {
+                    writeEntries(
+                        out,
+                        gzipOut,
+                        BackupFields.NOVEL_FONTS,
+                        BackupNovelFont.serializer(),
+                        novelFonts.backedUp().map { (name, bytes) -> BackupNovelFont(name, bytes) },
+                    ) {}
+                }
+
                 // Remaining fields are small (no per-entry chapter payload), so they are gathered and
                 // written after the streamed entries. Field order is irrelevant to the decoder.
                 writeEach(out, BackupFields.CATEGORIES, BackupCategory.serializer(), backupCategories(options))
@@ -196,7 +211,7 @@ class BackupCreator(
                         out,
                         BackupFields.MANGA_MERGES,
                         BackupMangaMergeGroup.serializer(),
-                        backupMangaMergeGroups(options),
+                        backupMangaMergeGroups(),
                     )
                 }
                 // Novel categories ride the Categories option alone, like manga's field 2: a
@@ -213,7 +228,7 @@ class BackupCreator(
                         out,
                         BackupFields.NOVEL_MERGES,
                         BackupNovelMergeGroup.serializer(),
-                        novelBackupCreator.novelMerges(options),
+                        novelBackupCreator.novelMerges(),
                     )
                 }
                 if (options.savedSearches) {
@@ -226,21 +241,7 @@ class BackupCreator(
                     writeEach(out, BackupFields.FEED_ROWS, BackupFeedRow.serializer(), feedBackupCreator.feedRows())
                 }
                 // Not through writeEach: a marker alone is not content, so the empty-backup guard ignores it.
-                BackupProtoWriter.writeField(
-                    out,
-                    BackupFields.MERGE_GROUPS_STORED,
-                    parser.encodeToByteArray(BackupMergeGroupsStored.serializer(), BackupMergeGroupsStored()),
-                )
-                BackupProtoWriter.writeField(
-                    out,
-                    BackupFields.SORT_OVERRIDES_STORED,
-                    parser.encodeToByteArray(BackupSortOverridesStored.serializer(), BackupSortOverridesStored()),
-                )
-                BackupProtoWriter.writeField(
-                    out,
-                    BackupFields.KITSU_NATIVE_SCALE,
-                    parser.encodeToByteArray(BackupKitsuNativeScale.serializer(), BackupKitsuNativeScale()),
-                )
+                BackupProtoWriter.writeFormatMarkers(out, parser)
 
                 gzipOut.flush()
             } finally {
@@ -290,7 +291,7 @@ class BackupCreator(
         fieldNumber: Int,
         serializer: SerializationStrategy<T>,
         entries: Flow<T>,
-        onEntry: (T) -> Unit = {},
+        onEntry: (T) -> Unit,
     ) {
         var written = 0
         entries.collect { entry ->
@@ -324,17 +325,16 @@ class BackupCreator(
     }
 
     private fun backupAppPreferences(options: BackupOptions): List<BackupPreference> {
-        if (!options.appSettings) return emptyList()
+        if (!options.appSettings && !options.extensionStores) return emptyList() // RK: plugins ride Extension stores
 
         return preferenceBackupCreator.createApp(includePrivatePreferences = options.privateSettings)
+            .let { novelPreferences.backedUpAppPreferences(options, it) } // RK
     }
 
     // RK --> serialize the persisted manga merge groups as stable {url, source} refs, through the kernel
     // NovelBackupCreator.serializeGroups also calls. Reads the merge_group tables, not the retired prefs;
-    // any member resolves by id (not favorites-only). Gated by libraryEntries (merges are meaningless
-    // without the library).
-    private suspend fun backupMangaMergeGroups(options: BackupOptions): List<BackupMangaMergeGroup> {
-        if (!options.libraryEntries) return emptyList()
+    // any member resolves by id (not favorites-only).
+    private suspend fun backupMangaMergeGroups(): List<BackupMangaMergeGroup> {
         return mergeGroupRefs(mergeGroupRepository.getAllMemberships(ContentType.MANGA)) { id ->
             mangaOrNull(id)?.let { BackupMangaSourceRef(url = it.url, source = it.source) }
         }.map { BackupMangaMergeGroup(refs = it) }
@@ -352,7 +352,8 @@ class BackupCreator(
         return extensionStoresBackupCreator()
     }
 
-    // RK: installed manga and novel extension apps, gated by the same toggle as their repos.
+    // RK: installed manga and novel extension apps, gated by the same toggle as their repos, as the LN
+    // plugins are (backedUpAppPreferences).
     private suspend fun backupExtensions(options: BackupOptions): List<BackupExtension> {
         if (!options.extensionStores) return emptyList()
 

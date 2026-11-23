@@ -4,6 +4,7 @@ import reikai.domain.entry.withCustomInfo
 import reikai.domain.novel.model.CustomNovelInfo
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.withCustomInfo
+import reikai.presentation.library.seriesGenres
 import tachiyomi.domain.manga.model.CustomMangaInfo
 import tachiyomi.domain.manga.model.Manga
 
@@ -14,14 +15,27 @@ import tachiyomi.domain.manga.model.Manga
 fun headerNamesWholeGroup(sourceCount: Int, selectedSource: Long?): Boolean = sourceCount > 1 && selectedSource == null
 
 /**
- * The one entry the details page describes, feeding its header, synopsis and tags alike: the selected
- * [sibling] chip's own entry (never the anchor's own chip), else the [anchor], with the custom-info
- * [overlay] applied either way, since Edit info writes the anchor's row. A sibling keeps its own cover
- * through [ownCover], with its own row's cover address: the image its cover viewer opens. Library state
- * (favourite, notes) and every write stay on the anchor.
+ * The one entry the details page describes, feeding its header, synopsis, tags and notes alike: the
+ * selected [sibling] chip's own entry (never the anchor's own chip), else the [anchor], with the
+ * custom-info [overlay] applied either way, since Edit info writes the anchor's row. A sibling keeps its
+ * own cover through [ownCover], with its own row's cover address: the image its cover viewer opens.
+ * Library state (favourite, categories) and every other write stay on the anchor.
  */
 fun <T> shownEntry(anchor: T, sibling: T?, overlay: (T) -> T, ownCover: (shown: T, sibling: T) -> T): T =
     sibling?.let { ownCover(overlay(it), it) } ?: overlay(anchor)
+
+/**
+ * The tags the details page shows. Under All ([wholeGroup], [headerNamesWholeGroup]) they are the series'
+ * as the library reads them ([seriesGenres]): the anchor's [custom] Edit info tags, else every member's,
+ * the [anchor]'s first and [members] in group order. A source chip shows its [shown] entry's own.
+ */
+fun shownTags(
+    wholeGroup: Boolean,
+    shown: List<String>?,
+    custom: List<String>?,
+    anchor: List<String>?,
+    members: List<List<String>?>,
+): List<String>? = if (wholeGroup) seriesGenres(custom, listOf(anchor) + members) else shown
 
 /** [shownEntry] for manga. [siblingInfo] counts only when read for that sibling, never a chip left behind. */
 fun shownManga(anchor: Manga, sibling: Manga?, anchorInfo: CustomMangaInfo?, siblingInfo: CustomMangaInfo?): Manga =
@@ -42,3 +56,10 @@ fun shownNovel(anchor: Novel, sibling: Novel?, anchorInfo: CustomNovelInfo?, sib
  */
 fun <T> unifiedViewMember(anchor: T, group: List<T>, isInstalled: (T) -> Boolean): T =
     if (isInstalled(anchor)) anchor else group.firstOrNull(isInstalled) ?: anchor
+
+/**
+ * The members whose raw titles the header lists as other titles: every one of a merged [group] under
+ * All, else the [viewed] one, which a standalone entry is.
+ */
+fun <T> altTitleMembers(sourceCount: Int, selectedSource: Long?, group: List<T>, viewed: T): List<T> =
+    if (headerNamesWholeGroup(sourceCount, selectedSource)) group else listOf(viewed)

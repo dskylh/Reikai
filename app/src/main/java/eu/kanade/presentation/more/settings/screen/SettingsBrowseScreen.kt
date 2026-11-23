@@ -8,21 +8,24 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.fragment.app.FragmentActivity
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.Navigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.tachiyomi.source.AndroidSourceManager
 import eu.kanade.tachiyomi.util.system.AuthenticatorUtil.authenticate
+import kotlinx.serialization.Serializable
 import mihon.app.di.appGraph
+import mihon.core.navigation.ExtensionStoresRoute
+import mihon.core.navigation.LocalNavigator
 import mihon.domain.extension.model.ContentWarning
-import reikai.presentation.browse.repos.RepositoriesScreen
+import reikai.domain.library.ContentType
+import reikai.presentation.components.LocalShownContent
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.pluralStringResource
 import tachiyomi.presentation.core.i18n.stringResource
+import tachiyomi.presentation.core.util.collectAsState
 
-object SettingsBrowseScreen : SearchableSettings {
+@Serializable
+data object SettingsBrowseScreen : SearchableSettings {
 
     @ReadOnlyComposable
     @Composable
@@ -31,7 +34,7 @@ object SettingsBrowseScreen : SearchableSettings {
     @Composable
     override fun getPreferences(): List<Preference> {
         val context = LocalContext.current
-        val navigator = LocalNavigator.currentOrThrow
+        val navigator = LocalNavigator.current
 
         val sourcePreferences = remember { context.appGraph.sourcePreferences }
         // RK: the adult-sources gate, moved here from Advanced so it sits above the settings group it
@@ -42,16 +45,13 @@ object SettingsBrowseScreen : SearchableSettings {
         val novelPreferences = remember { context.appGraph.novelPreferences }
         // RK --> the Feed tab's own switches, which the rest of its group hangs off
         val reikaiSourcePreferences = remember { context.appGraph.reikaiSourcePreferences }
-        val showFeedTab by reikaiSourcePreferences.showFeedTab.changes()
-            .collectAsState(reikaiSourcePreferences.showFeedTab.get())
+        val showFeedTab by reikaiSourcePreferences.showFeedTab.collectAsState()
         // RK <--
 
-        val adultSourcesEnabled by exhPreferences.isHentaiEnabled().changes()
-            .collectAsState(exhPreferences.isHentaiEnabled().get())
+        val adultSourcesEnabled by exhPreferences.isHentaiEnabled().collectAsState() // RK
         // RK --> the delegated-sources switch, which also decides whether MangaDex's settings exist
         val delegateSourcePreferences = remember { context.appGraph.delegateSourcePreferences }
-        val delegateSources by delegateSourcePreferences.delegateSources().changes()
-            .collectAsState(delegateSourcePreferences.delegateSources().get())
+        val delegateSources by delegateSourcePreferences.delegateSources().collectAsState()
         // RK <--
 
         // RK: resolved once per delegated-sources flip, since the gate awaits the extension scan.
@@ -64,8 +64,8 @@ object SettingsBrowseScreen : SearchableSettings {
         val uiPreferences = remember { context.appGraph.uiPreferences }
 
         val reposCount by getExtensionStoreCountAsFlow().collectAsState(0)
-        val novelRepoUrls by novelPreferences.addedRepoUrls().changes()
-            .collectAsState(novelPreferences.addedRepoUrls().get())
+        val novelRepoUrls by novelPreferences.addedRepoUrls().collectAsState() // RK
+        val novelRepoCount = if (showsContent(ContentType.NOVELS)) novelRepoUrls.size else 0
 
         return listOfNotNull(
             Preference.PreferenceGroup(
@@ -86,16 +86,17 @@ object SettingsBrowseScreen : SearchableSettings {
                         valueRange = 0..10,
                         title = stringResource(MR.strings.pref_previews_row_count),
                         subtitle = stringResource(MR.strings.pref_previews_row_count_summary),
+                        visible = showsContent(ContentType.MANGA), // RK
                     ),
                     // RK <--
                     // RK --> one Repos screen for extension stores and LN plugin repos, so one count of both
                     Preference.PreferenceItem.TextPreference(
                         title = stringResource(MR.strings.repos),
-                        subtitle = (reposCount.toInt() + novelRepoUrls.size).let {
+                        subtitle = (reposCount.toInt() + novelRepoCount).let {
                             pluralStringResource(MR.plurals.repo_count, it, it)
                         },
                         onClick = {
-                            navigator.push(RepositoriesScreen())
+                            navigator.push(ExtensionStoresRoute)
                         },
                     ),
                     // RK <--
@@ -174,11 +175,13 @@ object SettingsBrowseScreen : SearchableSettings {
                         preference = exhPreferences.isHentaiEnabled(),
                         title = stringResource(MR.strings.pref_enable_adult_sources),
                         subtitle = stringResource(MR.strings.pref_enable_adult_sources_summary),
+                        visible = showsContent(ContentType.MANGA), // RK
                     ),
                     // RK --> Komikku's delegated-sources switch, beside the gate for the same subsystem
                     Preference.PreferenceItem.SwitchPreference(
                         preference = delegateSourcePreferences.delegateSources(),
                         title = stringResource(MR.strings.toggle_delegated_sources),
+                        visible = showsContent(ContentType.MANGA), // RK
                         subtitle = stringResource(
                             MR.strings.toggle_delegated_sources_summary,
                             stringResource(MR.strings.app_name),
@@ -192,17 +195,17 @@ object SettingsBrowseScreen : SearchableSettings {
             // RK --> settings owned by the app rather than by an installed extension, so they have
             // nowhere to live on the source itself. Each row appears only while its source is on, and
             // the group disappears entirely when neither is, which is why it is built conditionally.
-            getSourceSettingsGroup(navigator, adultSourcesEnabled, mangaDexEnabled),
+            getSourceSettingsGroup(adultSourcesEnabled, mangaDexEnabled),
             // RK <--
         )
     }
 
     @Composable
     private fun getSourceSettingsGroup(
-        navigator: Navigator,
         adultSourcesEnabled: Boolean,
         mangaDexEnabled: Boolean,
     ): Preference.PreferenceGroup? {
+        val navigator = LocalNavigator.current
         val rows = listOfNotNull(
             // Both gates are passed in as observed state: isEnabled() is a one-shot read, so the first
             // row would not appear until the screen was recreated, even though the switch that reveals
@@ -211,12 +214,12 @@ object SettingsBrowseScreen : SearchableSettings {
                 title = stringResource(MR.strings.pref_category_eh),
                 subtitle = stringResource(MR.strings.pref_ehentai_summary),
                 onClick = { navigator.push(SettingsEhScreen) },
-            ).takeIf { adultSourcesEnabled },
+            ).takeIf { adultSourcesEnabled && LocalShownContent.current.showsScreen(SettingsEhScreen) }, // RK
             Preference.PreferenceItem.TextPreference(
                 title = stringResource(MR.strings.pref_category_mangadex),
                 subtitle = stringResource(MR.strings.pref_mangadex_summary),
                 onClick = { navigator.push(SettingsMangaDexScreen) },
-            ).takeIf { mangaDexEnabled },
+            ).takeIf { mangaDexEnabled && LocalShownContent.current.showsScreen(SettingsMangaDexScreen) }, // RK
         )
         return if (rows.isEmpty()) {
             null

@@ -7,7 +7,10 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
+import reikai.data.novel.NovelChapterSyncRules
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstones
 import reikai.domain.entry.EntryId
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
@@ -65,7 +68,8 @@ class NovelMigrationFlowAdapterTest {
         migrateNovel = mockk(),
         mergeManager = mockk(),
         installer = mockk(),
-        chapterNumberOverrides = NoChapterNumberOverrides,
+        getEntryCustomInfo = mockk { coEvery { await(any()) } returns null },
+        syncRules = NovelChapterSyncRules(NoChapterNumberOverrides, InMemoryChapterCopyMarks(), NoChapterTombstones),
     )
 
     private val adapter = adapter()
@@ -150,12 +154,12 @@ class NovelMigrationFlowAdapterTest {
     }
 
     @Test
-    fun `the count peek counts a repeated, entity-encoded listing as a sync would`() = runTest {
+    fun `the count peek counts a repeated listing as a sync would`() = runTest {
         coEvery { source.parseNovel("/repeats") } returns SourceNovel(
             path = "/repeats",
             chapters = listOf(
-                ChapterItem(name = "Chapter&#160;12", path = "/c12"),
-                ChapterItem(name = "Chapter&#160;12", path = "/c12"),
+                ChapterItem(name = "Chapter 12", path = "/c12"),
+                ChapterItem(name = "Chapter 12", path = "/c12"),
                 ChapterItem(name = "Chapter 13", path = "/c13"),
             ),
         )

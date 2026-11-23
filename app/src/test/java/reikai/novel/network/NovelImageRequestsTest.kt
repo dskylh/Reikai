@@ -6,9 +6,11 @@ import eu.kanade.tachiyomi.extension.model.Extension
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.online.HttpSource
+import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
 import io.ktor.client.HttpClient
 import io.ktor.client.request.HttpRequestBuilder
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.awaitCancellation
@@ -19,8 +21,12 @@ import okhttp3.Headers
 import okhttp3.Headers.Companion.headersOf
 import okhttp3.OkHttpClient
 import org.junit.jupiter.api.Test
+import reikai.data.coil.NovelImage
+import reikai.data.coil.fetchNovelImage
 import reikai.domain.novel.LnSourceIdentity
 import reikai.domain.novel.NovelPreferences
+import reikai.novel.local.LocalNovelPicture
+import reikai.novel.local.LocalNovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.novel.source.ireader.IReaderSourceHolder
 import reikai.novel.source.novelApp
@@ -28,6 +34,8 @@ import reikai.util.testAppScope
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.core.common.preference.InMemoryPreferenceStore.InMemoryPreference
 import ireader.core.source.HttpSource as IReaderHttpSource
+
+private const val ON_SITE = "https://apk.example/x"
 
 /** Every novel picture is fetched with its own source's client and headers, whatever format it comes in. */
 class NovelImageRequestsTest {
@@ -148,8 +156,17 @@ class NovelImageRequestsTest {
 
     @Test
     fun `the WebView gets an APK source's own headers`() = runTest {
-        requests(loaded = listOf(apkWithToken())).webViewHeaders("tachiyomi:42") shouldBe
+        requests(loaded = listOf(apkWithToken())).webViewHeaders("tachiyomi:42", ON_SITE) shouldBe
             mapOf("X-Token" to "secret")
+    }
+
+    /** A failed page's address is whatever the site named, so a login goes no further than the source's own site. */
+    @Test
+    fun `a WebView on another host gets no login`() = runTest {
+        val apk = novelApp(apkSource(headersOf("Authorization", "secret", "User-Agent", "agent", "Referer", "site")))
+
+        requests(loaded = listOf(apk)).webViewHeaders("tachiyomi:42", "https://elsewhere.example/1.jpg") shouldBe
+            mapOf("User-Agent" to "agent", "Referer" to "site")
     }
 
     /** A WebView whose request names an Origin other than its own kills its renderer, as manga's does. */
@@ -157,34 +174,40 @@ class NovelImageRequestsTest {
     fun `the WebView never gets a source's Origin header`() = runTest {
         val apk = novelApp(apkSource(headersOf("Origin", "https://apk.example", "X-Token", "secret")))
 
-        requests(loaded = listOf(apk)).webViewHeaders("tachiyomi:42") shouldBe mapOf("X-Token" to "secret")
+        requests(loaded = listOf(apk)).webViewHeaders("tachiyomi:42", ON_SITE) shouldBe mapOf("X-Token" to "secret")
     }
 
     @Test
     fun `the WebView gets the headers an IReader source's cover request carries`() = runTest {
-        requests(loaded = listOf(iReaderApp())).webViewHeaders("ireader:42") shouldBe
+        requests(loaded = listOf(iReaderApp())).webViewHeaders("ireader:42", "https://ir.example/x") shouldBe
             mapOf("Referer" to "https://ir.example/")
     }
 
     @Test
     fun `an LNReader source's WebView headers come without waiting for the extension scan`() = runTest {
-        (requests(scanDone = false).webViewHeaders("p").keys - "user-agent") shouldBe emptySet()
+        (requests(scanDone = false).webViewHeaders("p", ON_SITE).keys - "user-agent") shouldBe emptySet()
     }
 
     /** A Cloudflare clearance is tied to the agent that earned it, so the WebView must pass as the fetches. */
     @Test
     fun `an LNReader source's WebView sends the user agent its fetches send`() {
-        pluginWebViewHeaders("p") { "Device UA" } shouldBe mapOf("user-agent" to "Device UA")
+        pluginWebViewHeaders("p", emptyMap()) { "Device UA" } shouldBe mapOf("user-agent" to "Device UA")
+    }
+
+    @Test
+    fun `a plugin that sets its own user agent has its WebView send that one`() {
+        pluginWebViewHeaders("p", mapOf("user-agent" to "Plugin UA")) { "Device UA" } shouldBe
+            mapOf("user-agent" to "Plugin UA")
     }
 
     @Test
     fun `an app source's WebView takes no plugin user agent`() {
-        pluginWebViewHeaders("tachiyomi:42") { "Device UA" } shouldBe emptyMap()
+        pluginWebViewHeaders("tachiyomi:42", emptyMap()) { "Device UA" } shouldBe emptyMap()
     }
 
     @Test
     fun `an unknown device user agent sends none rather than an empty one`() {
-        pluginWebViewHeaders("p") { "" } shouldBe emptyMap()
+        pluginWebViewHeaders("p", emptyMap()) { "" } shouldBe emptyMap()
     }
 
     private fun apkWithToken() = novelApp(apkSource(headersOf("X-Token", "secret")))
@@ -215,10 +238,35 @@ class NovelImageRequestsTest {
         return novelApp(IReaderSourceHolder(catalogue)).copy(kind = Extension.Kind.IREADER)
     }
 
+    private val plate = byteArrayOf(-119, 80, 78, 71, 1, 2, 3)
+    private val plateAddress = LocalNovelSource.pictureAddress("Saga", "Book.epub", "OEBPS/plate.png", 1)
+    private val localBooks = mockk<LocalNovelSource> {
+        coEvery { picture(plateAddress) } returns LocalNovelPicture(plate, "image/png")
+    }
+
+    @Test
+    fun `a local chapter's picture is read from its book through the chapter-picture fetch`() = runTest {
+        val result = fetchNovelImage(
+            NovelImage(plateAddress, LocalNovelSource.ID),
+            requests(local = localBooks),
+            diskCache = null,
+            readCache = true,
+            writeCache = true,
+        )
+
+        result.source.source().readByteArray().toList() shouldBe plate.toList()
+    }
+
+    @Test
+    fun `another source's chapter naming a local picture never reads the user's books`() = runTest {
+        requests(local = localBooks).localPicture(plateAddress, "lnreader.some-plugin").shouldBeNull()
+    }
+
     private fun requests(
         seen: Map<String, LnSourceIdentity> = emptyMap(),
         loaded: List<Extension.Loaded> = emptyList(),
         scanDone: Boolean = true,
+        local: LocalNovelSource? = null,
     ): NovelImageRequests {
         val preferences = NovelPreferences(
             InMemoryPreferenceStore(sequenceOf(InMemoryPreference("ln_seen_novel_sources", seen, emptyMap()))),
@@ -236,6 +284,7 @@ class NovelImageRequestsTest {
                 },
                 prefs = preferences,
             ),
+            localNovels = { local ?: error("read a local book") },
         )
     }
 }

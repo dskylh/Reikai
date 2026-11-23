@@ -15,6 +15,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalView
@@ -23,15 +24,17 @@ import dev.icerock.moko.resources.StringResource
 import eu.kanade.presentation.components.TabbedDialog
 import eu.kanade.presentation.components.TabbedDialogPaddings
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
-import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderSettingsViewModel
+import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
 import eu.kanade.tachiyomi.util.system.hasDisplayCutout
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.LocalLibrary
 import mihon.icons.materialsymbols.rounded.Palette
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.reader.ChapterTitleFormat
+import reikai.domain.reader.ReaderProgressSize
 import reikai.novel.font.NovelFont
 import reikai.presentation.icons.Contrast
 import reikai.presentation.icons.RecordVoiceOver
@@ -53,6 +56,7 @@ import tachiyomi.presentation.core.components.SliderItem
 import tachiyomi.presentation.core.i18n.pluralStringResource
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
+import eu.kanade.presentation.more.settings.Preference as SettingsPreference
 
 /**
  * What the in-reader settings sheet edits, answered per content type so the compiler makes both
@@ -64,6 +68,8 @@ sealed interface ReaderSettingsPages {
     data class Manga(
         val viewModel: ReaderSettingsViewModel,
         override val filters: ReaderDisplayFilters,
+        /** The running viewer, which outlives no Activity, so the retained [viewModel] cannot hold it. */
+        val viewer: StateFlow<Viewer?>,
     ) : ReaderSettingsPages
 
     data class Novel(
@@ -142,26 +148,26 @@ fun ReaderSettingsSheet(
             ) {
                 when (tabs[page]) {
                     ReaderSettingsTab.Reading -> when (pages) {
-                        is ReaderSettingsPages.Manga -> MangaReadingPage(pages.viewModel)
+                        is ReaderSettingsPages.Manga -> MangaReadingPage(pages.viewModel, pages.viewer)
                         is ReaderSettingsPages.Novel -> NovelReadingPage(pages)
                     }
                     ReaderSettingsTab.Appearance -> when (pages) {
-                        is ReaderSettingsPages.Manga -> MangaAppearancePage(pages.viewModel)
+                        is ReaderSettingsPages.Manga -> MangaAppearancePage(pages.viewModel, pages.viewer)
                         is ReaderSettingsPages.Novel -> NovelAppearancePage(pages)
                     }
                     ReaderSettingsTab.Controls -> {
                         AutoScrollRows(autoScrollRunning, onToggleAutoScroll, autoScroll)
                         when (pages) {
-                            is ReaderSettingsPages.Manga -> MangaControlsPage(pages.viewModel)
-                            is ReaderSettingsPages.Novel -> NovelControlsPage(pages.preferences)
+                            is ReaderSettingsPages.Manga -> MangaControlsPage(pages.viewModel, pages.viewer)
+                            is ReaderSettingsPages.Novel -> NovelControlsPage(pages)
                         }
                     }
                     ReaderSettingsTab.ReadAloud -> if (pages is ReaderSettingsPages.Novel) {
                         NovelReadAloudPage(pages.preferences)
                     }
                     ReaderSettingsTab.Filters -> {
-                        ReaderFiltersPage(pages.filters)
-                        if (pages is ReaderSettingsPages.Manga) MangaShaderFilters(pages.viewModel)
+                        ReaderFiltersPage(filters = pages.filters)
+                        if (pages is ReaderSettingsPages.Manga) MangaShaderFilters(pages.viewModel, pages.viewer)
                     }
                 }
             }
@@ -225,6 +231,9 @@ internal fun ColumnScope.ReaderPageRows(
     titleFormat: Preference<ChapterTitleFormat>,
     progressLabel: StringResource,
     showProgress: Preference<Boolean>,
+    showTimeLeft: Preference<Boolean>,
+    progressSize: Preference<ReaderProgressSize>,
+    progressBacked: Preference<Boolean>,
     fullscreen: Preference<Boolean>,
     drawUnderCutout: Preference<Boolean>,
     keepScreenOn: Preference<Boolean>,
@@ -240,12 +249,70 @@ internal fun ColumnScope.ReaderPageRows(
         }
     }
     CheckboxItem(label = stringResource(progressLabel), pref = showProgress)
+    CheckboxItem(label = stringResource(MR.strings.pref_show_time_left), pref = showTimeLeft)
+    if (progressBarShown(showProgress, showTimeLeft)) {
+        val selectedSize by progressSize.collectAsState()
+        SettingsChipRow(MR.strings.pref_progress_size) {
+            ReaderProgressSize.entries.forEach {
+                FilterChip(
+                    selected = selectedSize == it,
+                    onClick = { progressSize.set(it) },
+                    label = { Text(progressSizeLabel(it)) },
+                )
+            }
+        }
+        CheckboxItem(label = stringResource(MR.strings.pref_progress_backed), pref = progressBacked)
+    }
     CheckboxItem(label = stringResource(MR.strings.pref_fullscreen), pref = fullscreen)
     val isFullscreen by fullscreen.collectAsState()
     if (LocalActivity.current?.hasDisplayCutout() == true && isFullscreen) {
         CheckboxItem(label = stringResource(MR.strings.pref_cutout_short), pref = drawUnderCutout)
     }
     CheckboxItem(label = stringResource(MR.strings.pref_keep_screen_on), pref = keepScreenOn)
+}
+
+/**
+ * The settings screens' progress rows, fed what [ReaderPageRows] is fed, so the size and the backing
+ * show only while something draws the progress bar, as in the sheet.
+ */
+@Composable
+internal fun readerProgressPreferenceItems(
+    progressLabel: StringResource,
+    showProgress: Preference<Boolean>,
+    showTimeLeft: Preference<Boolean>,
+    progressSize: Preference<ReaderProgressSize>,
+    progressBacked: Preference<Boolean>,
+): List<SettingsPreference.PreferenceItem<out Any, out Any>> {
+    val barShown = progressBarShown(showProgress, showTimeLeft)
+    return listOf(
+        SettingsPreference.PreferenceItem.SwitchPreference(
+            preference = showProgress,
+            title = stringResource(progressLabel),
+        ),
+        SettingsPreference.PreferenceItem.SwitchPreference(
+            preference = showTimeLeft,
+            title = stringResource(MR.strings.pref_show_time_left),
+        ),
+        SettingsPreference.PreferenceItem.ListPreference(
+            preference = progressSize,
+            entries = ReaderProgressSize.entries.associateWith { progressSizeLabel(it) },
+            title = stringResource(MR.strings.pref_progress_size),
+            visible = barShown,
+        ),
+        SettingsPreference.PreferenceItem.SwitchPreference(
+            preference = progressBacked,
+            title = stringResource(MR.strings.pref_progress_backed),
+            visible = barShown,
+        ),
+    )
+}
+
+/** Whether the progress bar draws, which the progress size and backing apply to. */
+@Composable
+private fun progressBarShown(showProgress: Preference<Boolean>, showTimeLeft: Preference<Boolean>): Boolean {
+    val isProgressShown by showProgress.collectAsState()
+    val isTimeLeftShown by showTimeLeft.collectAsState()
+    return isProgressShown || isTimeLeftShown
 }
 
 /** The e-ink flash after a page turn, the same rows for either reader. */
@@ -256,11 +323,11 @@ internal fun ColumnScope.ReaderFlashRows(flash: ReaderFlash) {
     if (!flashPageState) return
     val flashMillis by flash.durationMillis.collectAsState()
     SliderItem(
-        value = flashMillis / ReaderPreferences.MILLI_CONVERSION,
+        value = flashMillis / ReaderRanges.FLASH_STEP_MILLIS,
         valueRange = ReaderRanges.flashDurationSteps,
         label = stringResource(MR.strings.pref_flash_duration),
         valueString = stringResource(MR.strings.pref_flash_duration_summary, flashMillis),
-        onChange = { flash.durationMillis.set(it * ReaderPreferences.MILLI_CONVERSION) },
+        onChange = { flash.durationMillis.set(it * ReaderRanges.FLASH_STEP_MILLIS) },
         pillColor = MaterialTheme.colorScheme.surfaceContainerHighest,
     )
     val flashInterval by flash.pageInterval.collectAsState()
@@ -297,4 +364,39 @@ internal fun ColumnScope.ReaderRailRows(onLeft: Preference<Boolean>, height: Pre
         onChange = height::set,
         pillColor = MaterialTheme.colorScheme.surfaceContainerHighest,
     )
+}
+
+/**
+ * Volume-key paging and its direction, the same rows for either reader, plus how far a press moves
+ * where the running viewer [scrolls]: a paged one turns a whole page, so there is no distance to choose.
+ */
+@Composable
+internal fun ColumnScope.VolumeKeyRows(
+    enabled: Preference<Boolean>,
+    inverted: Preference<Boolean>,
+    scrollFraction: Preference<Float>,
+    scrolls: Boolean,
+) {
+    val volumeKeys by enabled.collectAsState()
+    CheckboxItem(label = stringResource(MR.strings.pref_read_with_volume_keys), pref = enabled)
+    if (!volumeKeys) return
+    CheckboxItem(label = stringResource(MR.strings.pref_read_with_volume_keys_inverted), pref = inverted)
+    if (!scrolls) return
+    val percentPref = remember(scrollFraction) { scrollFraction.scaled(ReaderRanges.PERCENT) }
+    val percent by percentPref.collectAsState()
+    SliderItem(
+        value = percent,
+        valueRange = ReaderRanges.volumeKeyScrollPercent,
+        label = stringResource(MR.strings.pref_volume_keys_scroll_amount),
+        valueString = "$percent%",
+        onChange = percentPref::set,
+        pillColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+    )
+}
+
+/** A size by its multiple of the default, which says exactly how much larger each step draws. */
+@Composable
+internal fun progressSizeLabel(size: ReaderProgressSize): String = when (size) {
+    ReaderProgressSize.DEFAULT -> stringResource(MR.strings.label_default)
+    else -> stringResource(MR.strings.pref_progress_size_scale, size.scale.toString().removeSuffix(".0"))
 }

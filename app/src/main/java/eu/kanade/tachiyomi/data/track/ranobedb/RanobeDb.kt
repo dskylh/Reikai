@@ -1,22 +1,26 @@
 package eu.kanade.tachiyomi.data.track.ranobedb
 
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.database.models.Track
-import eu.kanade.tachiyomi.data.track.BaseTracker
-import eu.kanade.tachiyomi.data.track.CookieLoginTracker
 import eu.kanade.tachiyomi.data.track.DeletableTracker
 import eu.kanade.tachiyomi.data.track.ReplacingWriteTracker
+import eu.kanade.tachiyomi.data.track.TrackerDependencies
+import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.data.track.model.TrackMangaMetadata
 import eu.kanade.tachiyomi.data.track.model.TrackSearch
 import eu.kanade.tachiyomi.data.track.ranobedb.dto.RDBSeries
 import eu.kanade.tachiyomi.data.track.ranobedb.dto.RDBSeriesListEntry
 import eu.kanade.tachiyomi.data.track.ranobedb.dto.RDBStaff
 import eu.kanade.tachiyomi.util.lang.toLocalDate
+import kotlinx.serialization.json.Json
 import reikai.data.track.MetadataAccess
 import reikai.data.track.NovelStatusTracker
 import reikai.data.track.NovelTrackerStatuses
 import reikai.data.track.TenPointScore
-import reikai.data.track.storeCheckedCredential
+import reikai.data.track.TokenTracker
 import tachiyomi.domain.track.model.Track as DomainTrack
 
 /**
@@ -27,10 +31,13 @@ import tachiyomi.domain.track.model.Track as DomainTrack
  * local row stays authoritative for status and score, and a write cannot preserve fields it does not
  * send. See docs/dev/subsystems/tracking.md.
  */
-class RanobeDb(id: Long) :
-    BaseTracker(id, "RanobeDB"),
+@Inject
+@SingleIn(AppScope::class)
+class RanobeDb(
+    dependencies: TrackerDependencies,
+    private val json: Json,
+) : TokenTracker(TrackerManager.RANOBEDB, "RanobeDB", dependencies),
     DeletableTracker,
-    CookieLoginTracker,
     ReplacingWriteTracker,
     NovelStatusTracker {
 
@@ -53,7 +60,7 @@ class RanobeDb(id: Long) :
 
     private val interceptor by lazy { RanobeDbInterceptor(this) }
 
-    private val api by lazy { RanobeDbApi(interceptor, client) }
+    private val api by lazy { RanobeDbApi(interceptor, client, json) }
 
     /**
      * The last body accepted for a series, so an identical one is not sent again. A repeat here is
@@ -154,10 +161,6 @@ class RanobeDb(id: Long) :
         )
     }
 
-    override suspend fun login(username: String, password: String) = login(password)
-
-    suspend fun login(token: String) = storeCredential(token.trim())
-
     // RanobeDB's session cookie authenticates `/api/v0/user` just as a token does: the request hook
     // resolves the cookie into the caller before it looks for an Authorization header, and only
     // rejects a request that has neither. So both logins reach the same routes with the same bodies.
@@ -172,23 +175,14 @@ class RanobeDb(id: Long) :
             ?.takeIf { it.isNotBlank() }
             ?.let { SESSION_COOKIE_PREFIX + it }
 
-    override suspend fun loginWithCookie(credential: String) = storeCredential(credential)
+    override fun useCredential(credential: String?) = interceptor.newAuth(credential)
 
-    // Both logins land here, checked against `/user/me` before the credential is stored.
-    private suspend fun storeCredential(credential: String) =
-        storeCheckedCredential(credential, interceptor::newAuth) { api.getCurrentUser().username }
-
-    override suspend fun updateUserConfig() {
-        saveDisplayUsername(api.getCurrentUser().username)
-    }
+    override suspend fun currentUsername(): String = api.getCurrentUser().username
 
     override fun logout() {
         super.logout()
-        interceptor.newAuth(null)
         lastWrite = null
     }
-
-    fun restoreToken(): String? = trackPreferences.trackPassword(this).get().ifBlank { null }
 
     // `this@RanobeDb.id` is the tracker id: a bare `id` here would resolve to the series' own.
     //

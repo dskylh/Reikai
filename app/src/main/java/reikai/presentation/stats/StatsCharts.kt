@@ -24,18 +24,12 @@ data class StatsCharts(
     val groups: Map<StatsDimension, List<StatsRow>>,
     /** The series read longest, most first; one never read is left out. */
     val mostRead: List<ReadTitle>,
+    /** The overall reading pace of each type shown, one entry per type. */
+    val paces: List<StatsPace>,
 )
 
 /** The groupings the overview shows a card of rows for; status and score have charts of their own. */
-val OVERVIEW_GROUPINGS = listOf(
-    StatsDimension.SOURCE,
-    StatsDimension.TAG,
-    StatsDimension.CATEGORY,
-    StatsDimension.TRACKER,
-    StatsDimension.LANGUAGE,
-    StatsDimension.LENGTH,
-    StatsDimension.START_YEAR,
-)
+val OVERVIEW_GROUPINGS = StatsCardKind.entries.mapNotNull { it.grouping }
 
 /** How many rows an overview card shows before its See all. */
 const val OVERVIEW_ROWS = 5
@@ -44,6 +38,7 @@ fun statsCharts(
     titles: List<StatsTitle>,
     sessions: List<TitleReadingSession>,
     mostRead: List<ReadTitle>,
+    paces: List<StatsPace>,
     groups: Map<StatsDimension, List<StatsRow>>,
     today: LocalDate,
     timeZone: TimeZone,
@@ -59,5 +54,6 @@ fun statsCharts(
             ?.toLocalDateTime(timeZone)?.date,
         groups = groups.mapValues { (_, rows) -> rows.take(OVERVIEW_ROWS) },
         mostRead = mostRead.take(OVERVIEW_ROWS),
+        paces = paces,
     )
 }

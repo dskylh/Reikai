@@ -19,6 +19,9 @@ interface MangaRepository {
 
     suspend fun getFavorites(): List<Manga>
 
+    // RK: the stored manga among [ids], in one read rather than one per id.
+    suspend fun getMangaByIds(ids: List<Long>): List<Manga>
+
     // RK: favorited adult-source galleries with captured metadata (EHentai update checker).
     suspend fun getExhFavoriteMangaWithMetadata(sources: List<Long>): List<Manga>
 
@@ -39,6 +42,9 @@ interface MangaRepository {
     ): Flow<List<Manga>>
 
     suspend fun resetViewerFlags(): Boolean
+
+    // RK: writes [flag] into the [mask] bits of one manga's viewer flags in one statement; false when it failed
+    suspend fun setViewerFlags(id: Long, flag: Long, mask: Long): Boolean
 
     suspend fun deleteNonLibraryManga(sourceIds: List<Long>, keepReadManga: Boolean)
 

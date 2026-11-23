@@ -11,13 +11,15 @@ import dev.zacsweers.metro.AssistedInject
 import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
-import mihon.domain.manga.model.toDomainManga
+import kotlinx.coroutines.launch
+import mihon.core.metro.AppCoroutineScope
+import reikai.domain.entry.withCustomInfo
 import reikai.domain.recommendation.PrepareRecommendationAssembly
-import reikai.domain.recommendation.RECOMMENDS_SOURCE
 import reikai.domain.recommendation.RecommendationOrigin
 import reikai.domain.recommendation.RelatedLibraryKeys
 import reikai.domain.recommendation.RelatedMangaCache
@@ -25,6 +27,7 @@ import reikai.domain.recommendation.RelatedMangaCandidate
 import reikai.domain.recommendation.RelatedPool
 import reikai.domain.recommendation.isInLibrary
 import reikai.domain.recommendation.localIdOf
+import reikai.domain.recommendation.storedOf
 import reikai.presentation.browse.AddOutcome
 import reikai.presentation.browse.BatchCategories
 import reikai.presentation.browse.MangaLibraryAdder
@@ -38,14 +41,15 @@ import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.library.service.LibraryPreferences
+import tachiyomi.domain.manga.interactor.GetCustomMangaInfo
+import tachiyomi.domain.manga.interactor.GetManga
 import tachiyomi.domain.manga.interactor.NetworkToLocalManga
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.i18n.MR
 
 /**
  * "See all" browse grid for the related-mangas carousel. Re-reads the whole pool from
- * [RelatedMangaCache] by manga id (never passed through the Voyager constructor, which only takes
- * serializable args) and offers multi-select bulk add-to-library + an origin-grouping toggle.
+ * [RelatedMangaCache] by manga id (never passed through the route, which carries identity only) and offers multi-select bulk add-to-library + an origin-grouping toggle.
  *
  * The pool is in-memory only, so after process death the cache is empty and the screen shows an
  * empty state (the user reopens the manga to repopulate it).
@@ -62,6 +66,9 @@ class RelatedMangasBrowseViewModel(
     private val networkToLocalManga: NetworkToLocalManga,
     private val libraryPreferences: LibraryPreferences,
     private val prepareRecommendationAssembly: PrepareRecommendationAssembly,
+    private val getManga: GetManga,
+    private val getCustomMangaInfo: GetCustomMangaInfo,
+    @AppCoroutineScope private val appScope: CoroutineScope,
 ) : ViewModel() {
 
     val state: StateFlow<RelatedMangasBrowseViewModel.State>
@@ -81,6 +88,12 @@ class RelatedMangasBrowseViewModel(
 
     init {
         libraryPreferences.trackBrowseColumns(viewModelScope) { columns -> state.update { it.copy(columns = columns) } }
+        // Read by id with Edit info applied, as the details page shows it, on a restored page as on an open one.
+        viewModelScope.launchIO {
+            getManga.subscribe(mangaId).combine(getCustomMangaInfo.subscribe(mangaId)) { manga, custom ->
+                manga.withCustomInfo(custom).title
+            }.collect { title -> state.update { it.copy(title = title) } }
+        }
         viewModelScope.launchIO {
             val assembly = prepareRecommendationAssembly.await()
             // Live off the cache, so a grid opened mid-load (the menu placement opens it before the load
@@ -151,20 +164,19 @@ class RelatedMangasBrowseViewModel(
         val selected = picked.filterNot { it.inLibrary }.map { it.candidate }
 
         viewModelScope.launchIO {
-            // Tracker-origin candidates resolve to no installed source, so they can't be favorited.
-            val (trackerOrigin, addable) = selected.partition { it.sourceId == RECOMMENDS_SOURCE }
-            val resolved = addable
-                .map { networkToLocalManga(it.manga.toDomainManga(it.sourceId)) }
-                .filterNot { it.favorite }
+            // A tracker's card resolves to no installed source, so it can't be favorited.
+            val stored = selected.map { networkToLocalManga.storedOf(it) }
+            val skipped = stored.count { it == null }
+            val resolved = stored.filterNotNull().filterNot { it.favorite }
             if (resolved.isEmpty()) {
-                finishAdd(added = 0, skipped = trackerOrigin.size)
+                finishAdd(added = 0, skipped = skipped)
                 return@launchIO
             }
 
             when (val batch = libraryAdder.resolveBatchCategories()) {
-                is BatchCategories.Default -> addAndReport(resolved, batch.categoryIds, skipped = trackerOrigin.size)
+                is BatchCategories.Default -> addAndReport(resolved, batch.categoryIds, skipped = skipped)
                 is BatchCategories.Ask -> state.update {
-                    it.copy(dialog = Dialog.ChangeCategory(resolved, batch.initialSelection, trackerOrigin.size))
+                    it.copy(dialog = Dialog.ChangeCategory(resolved, batch.initialSelection, skipped))
                 }
             }
         }
@@ -175,8 +187,13 @@ class RelatedMangasBrowseViewModel(
     }
 
     private suspend fun addAndReport(mangas: List<Manga>, categoryIds: List<Long>, skipped: Int) {
-        // Per entry, so one failing favorite write skips only that entry, and it reports as skipped.
-        val added = mangas.count { libraryAdder.addToBatch(it.id, categoryIds) == AddOutcome.Added }
+        // Per entry, so one failing favorite write skips only that entry, and it reports as skipped. On
+        // the app scope, so leaving See all mid-batch neither drops the rest nor stops one entry between
+        // its favorite and its filing. A launch, so a failure reaches the scope's handler.
+        var added = 0
+        appScope.launch {
+            mangas.forEach { if (libraryAdder.addToBatch(it.id, categoryIds) == AddOutcome.Added) added++ }
+        }.join()
         finishAdd(added, skipped + mangas.size - added)
     }
 
@@ -199,6 +216,7 @@ class RelatedMangasBrowseViewModel(
     )
 
     data class State(
+        val title: String? = null,
         val items: List<BrowseItem> = emptyList(),
         val selectedUrls: Set<String> = emptySet(),
         val grouped: Boolean = false,

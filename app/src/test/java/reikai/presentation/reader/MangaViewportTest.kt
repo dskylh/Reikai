@@ -1,16 +1,27 @@
 package reikai.presentation.reader
 
+import android.content.res.Resources
+import android.util.DisplayMetrics
 import android.view.KeyEvent
-import android.view.MotionEvent
-import android.view.View
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
+import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences.TappingInvertMode
 import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
+import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation
+import eu.kanade.tachiyomi.ui.reader.viewer.navigation.RightAndLeftNavigation
+import eu.kanade.tachiyomi.ui.reader.viewer.pager.PagerViewer
 import eu.kanade.tachiyomi.ui.reader.viewer.webgpu.WebGpuViewer
+import eu.kanade.tachiyomi.ui.reader.viewer.webgpu.WebGpuViewerContinuous
+import eu.kanade.tachiyomi.ui.reader.viewer.webtoon.WebtoonViewer
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
 import io.mockk.verify
 import kotlinx.coroutines.flow.flowOf
 import org.junit.jupiter.api.Test
@@ -20,7 +31,8 @@ import tachiyomi.domain.chapter.model.Chapter
 
 /**
  * The adapter is all delegation, and a member that silently stops delegating breaks the reader in a
- * way only a device pass would catch, so each one is pinned here instead.
+ * way only a device pass would catch, so each one is pinned here instead, the auto-scroll kind each
+ * viewer gets among them.
  *
  * `isRtl` is the exception: it reads the concrete viewer classes, which cannot be built without an
  * Activity, so it is verified on device by the chapter navigator changing direction.
@@ -37,30 +49,102 @@ class MangaViewportTest {
     }
 
     @Test
-    fun `a key event reaches the viewer and its answer comes back`() {
-        val viewer = RecordingViewer(handlesKeys = true)
+    fun `a volume key moves on key up`() {
+        val viewer = RecordingViewer()
 
-        val handled = viewport(viewer).handleKeyEvent(KEY_EVENT)
+        viewport(viewer).handleKeyEvent(key(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.ACTION_UP))
 
-        handled shouldBe true
-        viewer.keyEvents shouldBe 1
+        viewer.forward shouldBe 1
     }
 
     @Test
-    fun `a key event the viewer declines is reported as unhandled`() {
-        val viewer = RecordingViewer(handlesKeys = false)
+    fun `a key down takes the key without moving`() {
+        val viewer = RecordingViewer()
 
-        viewport(viewer).handleKeyEvent(KEY_EVENT) shouldBe false
+        val handled = viewport(viewer).handleKeyEvent(key(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.ACTION_DOWN))
+
+        (handled to viewer.forward) shouldBe (true to 0)
     }
 
     @Test
-    fun `a motion event reaches the viewer and its answer comes back`() {
-        val viewer = RecordingViewer(handlesMotion = true)
+    fun `inverted volume keys swap direction`() {
+        val viewer = RecordingViewer()
 
-        val handled = viewport(viewer).handleGenericMotionEvent(MOTION_EVENT)
+        viewport(viewer, input = FakeInput(inverted = true))
+            .handleKeyEvent(key(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.ACTION_UP))
 
-        handled shouldBe true
-        viewer.motionEvents shouldBe 1
+        viewer.backward shouldBe 1
+    }
+
+    @Test
+    fun `a volume key is left to the system with the setting off`() {
+        val viewer = RecordingViewer()
+
+        val handled = viewport(viewer, input = FakeInput(volumeKeysEnabled = false))
+            .handleKeyEvent(key(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.ACTION_UP))
+
+        (handled to viewer.forward) shouldBe (false to 0)
+    }
+
+    @Test
+    fun `a volume key is left to the system while the menu is open`() {
+        val handled = viewport(RecordingViewer(), input = FakeInput(menuVisible = true))
+            .handleKeyEvent(key(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.ACTION_UP))
+
+        handled shouldBe false
+    }
+
+    @Test
+    fun `the right arrow goes back in a right to left book`() {
+        val viewer = RecordingViewer()
+
+        viewport(viewer, input = FakeInput(RightAndLeftNavigation(TappingInvertMode.NONE, isReversed = true)))
+            .handleKeyEvent(key(KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.ACTION_UP))
+
+        viewer.backward shouldBe 1
+    }
+
+    @Test
+    fun `ctrl and an arrow reads on whatever way the pages run`() {
+        val viewer = RecordingViewer()
+
+        viewport(viewer, input = FakeInput(RightAndLeftNavigation(TappingInvertMode.NONE, isReversed = true)))
+            .handleKeyEvent(key(KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.ACTION_UP, KeyEvent.META_CTRL_ON))
+
+        viewer.forward shouldBe 1
+    }
+
+    @Test
+    fun `the menu key toggles the menu`() {
+        val input = FakeInput()
+
+        viewport(RecordingViewer(), input = input).handleKeyEvent(key(KeyEvent.KEYCODE_MENU, KeyEvent.ACTION_UP))
+
+        input.toggled shouldBe 1
+    }
+
+    @Test
+    fun `a key the reader has no use for is left to the system`() {
+        val handled = viewport(RecordingViewer()).handleKeyEvent(key(KeyEvent.KEYCODE_A, KeyEvent.ACTION_UP))
+
+        handled shouldBe false
+    }
+
+    @Test
+    fun `a volume key on a strip scrolls by the set distance`() {
+        val viewer = mockk<WebtoonViewer>(relaxed = true)
+
+        viewport(viewer).handleKeyEvent(key(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.ACTION_UP))
+
+        verify { viewer.moveByVolumeKey(false) }
+    }
+
+    @Test
+    fun `no key is read before the viewer's zones exist`() {
+        val handled = viewport(RecordingViewer(), input = FakeInput(navigation = null))
+            .handleKeyEvent(key(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.ACTION_UP))
+
+        handled shouldBe false
     }
 
     /**
@@ -151,6 +235,20 @@ class MangaViewportTest {
         viewer.movedTo shouldBe activePages[2]
     }
 
+    /** The classic pager selects a page at its old index as it rebuilds, which overwrites requestedPage. */
+    @Test
+    fun `a picked chapter lands on its own page though the viewer selected another as it took the chapter`() {
+        val activePages = pages(30)
+        val active = chapterOf(activePages, requestedPage = 3)
+        val viewer = RecordingViewer(onSetChapters = { it.currChapter.requestedPage = 14 })
+        val viewport = viewport(viewer, active = active)
+
+        viewport.setChapters(ViewerChapters(active, null, null))
+        viewport.onChapterOpened()
+
+        viewer.movedTo shouldBe activePages[3]
+    }
+
     @Test
     fun `a picked chapter with no pages loaded moves nothing`() {
         val viewer = RecordingViewer()
@@ -169,8 +267,8 @@ class MangaViewportTest {
     fun `R2L WebGPU auto-scroll turns toward the left, which is forward`() {
         val viewer = mockk<WebGpuViewer>(relaxed = true) {
             every { isReversed } answers { callOriginal() }
-            every { moveToNext() } answers { callOriginal() }
-            every { moveToPrevious() } answers { callOriginal() }
+            every { moveForward() } answers { callOriginal() }
+            every { moveBackward() } answers { callOriginal() }
         }
         // A mock skips the constructor, so the field the real getter and verbs read is set here.
         WebGpuViewer::class.java.getDeclaredField("isReversed").apply { isAccessible = true }.setBoolean(viewer, true)
@@ -180,11 +278,38 @@ class MangaViewportTest {
         verify { viewer["moveLeft"]() }
     }
 
+    /** The high quality strip is a WebGpuViewer too, so the paged branch must not claim it first. */
     @Test
-    fun `the wrapped viewer stays reachable for the questions the contract does not answer`() {
-        val viewer = RecordingViewer()
+    fun `the high quality long strip auto-scrolls smoothly`() = withDisplay {
+        viewport(
+            mockk<WebGpuViewerContinuous>(relaxed = true),
+        ).autoScroll.shouldBeInstanceOf<ViewportAutoScroll.Continuous>()
+    }
 
-        viewport(viewer).viewer shouldBe viewer
+    @Test
+    fun `the classic long strip auto-scrolls smoothly`() = withDisplay {
+        viewport(mockk<WebtoonViewer>(relaxed = true)).autoScroll.shouldBeInstanceOf<ViewportAutoScroll.Continuous>()
+    }
+
+    @Test
+    fun `the classic pager auto-scrolls a page at a time`() = withDisplay {
+        viewport(mockk<PagerViewer>(relaxed = true)).autoScroll.shouldBeInstanceOf<ViewportAutoScroll.Stepped>()
+    }
+
+    @Test
+    fun `the high quality pager auto-scrolls a page at a time`() = withDisplay {
+        viewport(mockk<WebGpuViewer>(relaxed = true)).autoScroll.shouldBeInstanceOf<ViewportAutoScroll.Stepped>()
+    }
+
+    /** A strip's scroller reads the screen density, which a JVM test has no screen to give. */
+    private fun withDisplay(block: () -> Unit) {
+        mockkStatic(Resources::class)
+        try {
+            every { Resources.getSystem() } returns mockk { every { displayMetrics } returns mockk<DisplayMetrics>() }
+            block()
+        } finally {
+            unmockkStatic(Resources::class)
+        }
     }
 }
 
@@ -192,6 +317,7 @@ private fun viewport(
     viewer: Viewer,
     visible: ReaderChapter? = null,
     active: ReaderChapter? = null,
+    input: MangaViewportInput = FakeInput(),
 ) = MangaViewport(
     viewer,
     visibleChapter = { visible },
@@ -199,7 +325,29 @@ private fun viewport(
     interval = EmittingPreferenceStore().getInt("interval", 5),
     speed = EmittingPreferenceStore().getFloat("speed", 1f),
     shownPage = flowOf(ShownPage(Unit, ready = true)),
+    input = input,
 )
+
+private class FakeInput(
+    override val navigation: ViewerNavigation? = RightAndLeftNavigation(TappingInvertMode.NONE, isReversed = false),
+    inverted: Boolean = false,
+    override val menuVisible: Boolean = false,
+    override val volumeKeysEnabled: Boolean = true,
+) : MangaViewportInput {
+    override val volumeKeysInverted = inverted
+    var toggled = 0
+        private set
+
+    override fun toggleMenu() {
+        toggled++
+    }
+}
+
+private fun key(code: Int, keyAction: Int, meta: Int = 0): KeyEvent = mockk {
+    every { keyCode } returns code
+    every { action } returns keyAction
+    every { metaState } returns meta
+}
 
 // Pages are stand-ins: their real constructor reaches Android through Page, and the adapter only
 // passes them through to the viewer.
@@ -212,43 +360,34 @@ private fun chapterOf(pages: List<ReaderPage>, requestedPage: Int = 0): ReaderCh
     }
 }
 
-// Both are framework value objects whose real constructors throw outside Android, and the adapter
-// only passes them through, so a stand-in at that boundary is what the test needs.
-private val KEY_EVENT: KeyEvent = mockk()
-private val MOTION_EVENT: MotionEvent = mockk()
-
-private class RecordingViewer(
-    private val handlesKeys: Boolean = false,
-    private val handlesMotion: Boolean = false,
-) : Viewer {
+private class RecordingViewer(private val onSetChapters: (ViewerChapters) -> Unit = {}) : Viewer {
     var destroyed = false
         private set
-    var keyEvents = 0
+    var forward = 0
+        private set
+    var backward = 0
         private set
     var movedTo: ReaderPage? = null
         private set
-    var motionEvents = 0
-        private set
 
-    override fun getView(): View = error("no view in a unit test")
+    @Composable
+    override fun Content(modifier: Modifier) = Unit
 
     override fun destroy() {
         destroyed = true
     }
 
-    override fun setChapters(chapters: ViewerChapters) = Unit
+    override fun setChapters(chapters: ViewerChapters) = onSetChapters(chapters)
 
     override fun moveToPage(page: ReaderPage) {
         movedTo = page
     }
 
-    override fun handleKeyEvent(event: KeyEvent): Boolean {
-        keyEvents++
-        return handlesKeys
+    override fun moveForward() {
+        forward++
     }
 
-    override fun handleGenericMotionEvent(event: MotionEvent): Boolean {
-        motionEvents++
-        return handlesMotion
+    override fun moveBackward() {
+        backward++
     }
 }

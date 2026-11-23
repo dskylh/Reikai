@@ -15,10 +15,17 @@ import exh.metadata.sql.models.SearchTag
 import exh.metadata.sql.models.SearchTitle
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import reikai.data.backup.backupCategoryIds
+import reikai.data.backup.restoreLocalVolumes
+import reikai.data.backup.restoredManualOrder
 import reikai.domain.backup.restoredNextUpdate
 import reikai.domain.category.CategoryContentType
-import reikai.domain.category.byNamePreferring
+import reikai.domain.chapter.LocalVolumeRepository
+import reikai.domain.chapter.LooseFiles
+import reikai.domain.chapter.VolumePickRepository
+import reikai.domain.chapter.backedUpCopyMarks
 import reikai.domain.chapter.backedUpOverrides
+import reikai.domain.entry.toCustomMangaInfo
 import reikai.domain.library.ContentType
 import reikai.domain.merge.PrefEraGrouping
 import reikai.domain.merge.RestoreMergeGroups
@@ -29,7 +36,6 @@ import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.manga.interactor.FetchInterval
 import tachiyomi.domain.manga.interactor.GetMangaByUrlAndSourceId
 import tachiyomi.domain.manga.interactor.SetCustomMangaInfo
-import tachiyomi.domain.manga.model.CustomMangaInfo
 import kotlin.time.Clock
 
 @Inject
@@ -41,6 +47,8 @@ class MangaRestorer(
     private val getMangaByUrlAndSourceId: GetMangaByUrlAndSourceId,
     private val restoreMergeGroups: RestoreMergeGroups,
     private val setCustomMangaInfo: SetCustomMangaInfo,
+    private val localVolumes: LocalVolumeRepository,
+    private val volumePicks: VolumePickRepository,
     // RK <--
 ) {
 
@@ -55,19 +63,19 @@ class MangaRestorer(
         backupMangas: List<BackupManga>,
         backupCategories: List<BackupCategory>,
     ) {
-        // RK: a universal row may share a manga row's name
-        val dbCategoriesByName = getCategories.await().byNamePreferring(CategoryContentType.MANGA)
-        val backupCategoriesByOrder = backupCategories.associateBy { it.order }
+        // RK --> through the kernel the novel restore calls, since a universal row may share a manga row's name
+        val categoryIdOf = backupCategoryIds(
+            backupCategories.associate { it.order to it.name },
+            getCategories.await(),
+            CategoryContentType.MANGA,
+        )
+        // RK <--
 
         val entries = backupMangas.map { backupManga ->
             RestoredManga(
                 manga = backupManga.getMangaImpl(),
                 chapters = backupManga.chapters.map { it.toChapterImpl() },
-                categoryIds = backupManga.categories.mapNotNull { backupCategoryOrder ->
-                    backupCategoriesByOrder[backupCategoryOrder]?.let { backupCategory ->
-                        dbCategoriesByName[backupCategory.name]?.id
-                    }
-                },
+                categoryIds = backupManga.categories.mapNotNull(categoryIdOf), // RK
                 history = backupManga.history.map {
                     val history = it.getHistoryImpl()
                     RestoredHistory(it.url, history.readAt, history.readDuration)
@@ -75,7 +83,8 @@ class MangaRestorer(
                 tracks = backupManga.tracking.map { it.getTrackImpl() },
                 excludedScanlators = backupManga.excludedScanlators,
                 // RK --> adult gallery metadata and custom info, keyed to the restored id in the repository
-                searchMetadata = backupManga.searchMetadata?.toFlatMetadata(),
+                searchMetadata = (backupManga.searchMetadata ?: backupManga.flatMetadata?.toSearchMetadata())
+                    ?.toFlatMetadata(),
                 customInfo = backupManga.customInfo?.toCustomMangaInfo(mangaId = 0L),
                 chapterNumberOverrides = backedUpOverrides(
                     backupManga.chapters,
@@ -83,7 +92,10 @@ class MangaRestorer(
                     numberOf = { it.chapterNumber.toDouble() },
                     sourceNumberOf = { it.sourceChapterNumber },
                 ),
+                copyMarks = backedUpCopyMarks(backupManga.chapters, { it.url }, { it.copyMark }),
                 readingSessions = backupManga.readingSessions.map { it.toUrlReadingSession() },
+                manualOrder = backupManga.restoredManualOrder(categoryIdOf),
+                chapterTombstones = backupManga.chapterTombstones.map { it.toChapterTombstone() },
                 // RK <--
             )
         }
@@ -94,6 +106,11 @@ class MangaRestorer(
                 nextUpdate = restoredNextUpdate(manga.nextUpdate, nextUpdate, currentFetchWindow)
             }
         }
+        // RK: a local series' volume order and names, by its folder, as the novel restore keeps them
+        backupMangas.forEach {
+            it.restoreLocalVolumes(ContentType.MANGA, localVolumes, volumePicks, it.url)
+            it.looseFiles?.let { mode -> localVolumes.setLooseFiles(it.url, LooseFiles.of(mode)) }
+        }
     }
 
     // RK --> merge groups and custom info restore
@@ -102,33 +119,25 @@ class MangaRestorer(
      * RK: materialize the backup's manga merge groups into the merge_group tables once the manga have
      * been restored (their ids differ from the source device). Members resolve from the backup's stable
      * {url, source} refs; the shared [RestoreMergeGroups] decides the rest. Call this AFTER the manga
-     * loop completes.
+     * loop completes. [ranked] groups, another app's merges, keep their member order as the user's own.
      */
     suspend fun restoreMerges(
         merges: List<BackupMangaMergeGroup>,
         prefEra: PrefEraGrouping<BackupMangaSourceRef>?,
+        ranked: List<List<BackupMangaSourceRef>> = emptyList(),
     ) {
-        restoreMergeGroups.fromBackup(ContentType.MANGA, merges.map { it.refs }, prefEra) {
+        restoreMergeGroups.fromBackup(ContentType.MANGA, merges.map { it.refs }, prefEra, ranked) {
             getMangaByUrlAndSourceId.await(it.url, it.source)?.id
         }
     }
 
+    // RK: the restored row a backup ref names, for the steps that run once every entry is back
+    suspend fun restoredId(source: Long, url: String): Long? = getMangaByUrlAndSourceId.await(url, source)?.id
+
     // RK: an older root-list row for a series the backup does not list, applied when the device has it
     suspend fun restoreCustomInfo(source: Long, url: String, info: BackupCustomInfo) {
-        getMangaByUrlAndSourceId.await(url, source)?.let { setCustomMangaInfo.set(info.toCustomMangaInfo(it.id)) }
+        getMangaByUrlAndSourceId.await(url, source)?.let { setCustomMangaInfo.restore(info.toCustomMangaInfo(it.id)) }
     }
-
-    // RK: the novel twin is NovelRestorer.restoreCustomInfo; both read BackupCustomInfoFields.customInfo.
-    private fun BackupCustomInfo.toCustomMangaInfo(mangaId: Long) = CustomMangaInfo(
-        mangaId = mangaId,
-        title = title,
-        author = author,
-        artist = artist,
-        description = description,
-        genre = genre,
-        status = status,
-        thumbnailUrl = thumbnailUrl,
-    )
 
     // RK: the id is a placeholder; the repository writes the rows under the restored entry's own
     private fun BackupSearchMetadata.toFlatMetadata() = FlatMetadata(

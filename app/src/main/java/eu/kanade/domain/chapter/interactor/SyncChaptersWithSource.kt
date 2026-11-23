@@ -12,8 +12,11 @@ import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
 import reikai.data.manga.toSourceChapters
 import reikai.domain.chapter.ArrivingChapter
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.LocalChapterTombstones
 import reikai.domain.chapter.StoredChapter
+import reikai.domain.chapter.SyncedChapter
 import reikai.domain.chapter.appliedTo
 import reikai.domain.chapter.chapterArrivals
 import reikai.domain.chapter.foundRelease
@@ -40,6 +43,8 @@ class SyncChaptersWithSource(
     private val getExcludedScanlators: GetExcludedScanlators,
     private val libraryPreferences: LibraryPreferences,
     private val chapterNumberOverrides: ChapterNumberOverrideRepository, // RK
+    private val chapterCopyMarks: ChapterCopyMarkRepository, // RK
+    private val localTombstones: LocalChapterTombstones, // RK
 ) {
 
     /**
@@ -121,7 +126,15 @@ class SyncChaptersWithSource(
             }
         }
 
-        val removedChapters = dbChapters.filterNot { it.url in sourceUrls }
+        // RK --> a local group member's folder gone from the local folder could not be read, so its rows stay as they
+        // are; a local chapter whose file is still there fails the refresh before anything is cancelled or deleted,
+        // as a local novel's does
+        val isLocal = source.isLocal()
+        val unlisted = dbChapters.filterNot { it.url in sourceUrls }
+        val held = localTombstones.held(ContentType.MANGA, isLocal, manga.url, unlisted.map { it.toSyncedChapter() })
+        val removedChapters = unlisted.filterNot { it.url in held }
+        localTombstones.confirm(ContentType.MANGA, isLocal, removedChapters.map { it.toSyncedChapter() }, sourceUrls)
+        // RK <--
 
         // The source no longer lists these, so their queued downloads could only fail
         removedChapters.mapNotNull { downloadManager.getQueuedDownloadOrNull(it.id) }
@@ -145,10 +158,34 @@ class SyncChaptersWithSource(
         // RK --> the arrival rules are a kernel the novel sync calls too
         val markDuplicateAsRead = libraryPreferences.markDuplicateReadChapterAsRead.get()
             .contains(LibraryPreferences.MARK_DUPLICATE_CHAPTER_READ_NEW)
+        // The user's copy marks bend the rule as they do in the reader; read only when the rule runs.
+        val marks = if (markDuplicateAsRead) {
+            chapterCopyMarks.loadedMarks(ContentType.MANGA, manga.id)
+        } else {
+            emptyMap()
+        }
         // Sources MUST return the chapters from most to less recent, which the fetch dates rely on.
         val arrivals = chapterArrivals(
-            added = newChapters.map { ArrivingChapter(it.chapterNumber, it.read, it.bookmark, it.dateUpload) },
-            stored = dbChapters.map { StoredChapter(sourceNumbers[it.url] ?: it.chapterNumber, it.read) },
+            added = newChapters.map {
+                ArrivingChapter(
+                    it.chapterNumber,
+                    it.read,
+                    it.bookmark,
+                    it.dateUpload,
+                    it.name,
+                    it.scanlator,
+                    marks[it.url],
+                )
+            },
+            stored = dbChapters.map {
+                StoredChapter(
+                    sourceNumbers[it.url] ?: it.chapterNumber,
+                    it.read,
+                    name = it.name,
+                    scanlator = it.scanlator,
+                    mark = marks[it.url],
+                )
+            },
             removed = removedChapters.map { StoredChapter(it.chapterNumber, it.read, it.bookmark, it.dateFetch) },
             markDuplicateAsRead = markDuplicateAsRead,
             now = nowInstant,
@@ -166,18 +203,32 @@ class SyncChaptersWithSource(
         }
         // RK <--
 
-        val added = chapterRepository.updateFromRemote(
-            removedIds = removedChapters.map { it.id },
-            added = toAdd,
-            updated = updatedChapters,
-        )
+        // RK --> a local series keeps a removed chapter's reading state and gives it back when the chapter
+        // returns, in the write's own transaction; a chapter that came back is not new, as the novel sync rules
+        val revived = localTombstones.around(
+            ContentType.MANGA,
+            manga.id,
+            isLocal,
+            removed = removedChapters.map { it.toSyncedChapter() },
+            arriving = toAdd.map { it.toSyncedChapter() },
+        ) {
+            chapterRepository.updateFromRemote(
+                removedIds = removedChapters.map { it.id },
+                added = toAdd,
+                updated = updatedChapters,
+            )
+        }
+        val added = revived.result
+        changedOrDuplicateReadUrls += revived.urls
+        // RK <--
 
         val excludedScanlators = getExcludedScanlators.await(manga.id).toHashSet()
 
         // RK: the found-release rule is ChapterArrivals' foundRelease, which the novel sync calls too
         val foundRelease = foundRelease(
             hadChapters = dbChapters.isNotEmpty(),
-            arrivals = newChapters.zip(arrivals).filter { (chapter, _) -> chapter.scanlator !in excludedScanlators }
+            arrivals = newChapters.zip(arrivals)
+                .filter { (chapter, _) -> chapter.scanlator !in excludedScanlators && chapter.url !in revived.urls }
                 .map { (_, arrival) -> arrival },
         )
 
@@ -187,4 +238,6 @@ class SyncChaptersWithSource(
 
         return added.filterNot { it.url in changedOrDuplicateReadUrls || it.scanlator in excludedScanlators }
     }
+
+    private fun Chapter.toSyncedChapter() = SyncedChapter(id, url, chapterNumber) // RK
 }

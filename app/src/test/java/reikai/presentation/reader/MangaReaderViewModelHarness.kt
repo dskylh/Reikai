@@ -6,8 +6,11 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.viewModelScope
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.chapter.interactor.SetReadStatus
+import eu.kanade.domain.download.interactor.DeleteDownload
+import eu.kanade.domain.manga.interactor.SetMangaViewerFlags
 import eu.kanade.domain.track.service.TrackPreferences
 import eu.kanade.tachiyomi.data.download.DownloadManager
+import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.source.Source
 import eu.kanade.tachiyomi.ui.reader.ReaderViewModel
 import eu.kanade.tachiyomi.ui.reader.loader.ChapterLoader
@@ -21,26 +24,36 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkConstructor
 import io.mockk.mockkStatic
+import io.mockk.spyk
 import io.mockk.unmockkConstructor
 import io.mockk.unmockkStatic
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.job
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.test.TestCoroutineScheduler
+import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import reikai.domain.chapter.InMemoryChapterCopyMarks
+import reikai.domain.chapter.NoLocalVolumes
 import reikai.domain.download.MangaChapterDownloadActions
 import reikai.domain.manga.MangaPreferences
 import reikai.domain.manga.MergedChapterProvider
 import reikai.domain.readinglog.NoReadingLog
 import reikai.domain.source.SourceKey
 import reikai.domain.track.ownChapterNumbers
-import reikai.util.testAppScope
+import reikai.util.restubDefaultDispatcher
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.data.Database
@@ -58,6 +71,7 @@ import tachiyomi.domain.history.interactor.UpsertHistory
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.manga.interactor.GetManga
 import tachiyomi.domain.manga.model.Manga
+import tachiyomi.domain.manga.model.MangaUpdate
 import tachiyomi.domain.source.model.StubSource
 import tachiyomi.domain.source.service.SourceManager
 import java.io.IOException
@@ -88,6 +102,9 @@ class MangaReaderViewModelHarness private constructor(
     private val history = HistoryRepositoryImpl(database)
     private val titles = mutableMapOf<Long, String>()
 
+    /** The Never skip and copy groups the reader reads; a test sets them before opening. */
+    val copyMarks = InMemoryChapterCopyMarks()
+
     /** Stores a manga under a chosen [id], so a test can name its chapters' owners. */
     suspend fun manga(id: Long, source: Long, title: String, chapterFlags: Long = 0L): Manga {
         driver.execute(
@@ -113,13 +130,14 @@ class MangaReaderViewModelHarness private constructor(
         scanlator: String? = null,
         read: Boolean = false,
         order: Long = (1_000 - number * 10).toLong(),
+        name: String = "Chapter $number",
     ): Chapter {
         val scanlatorValue = scanlator?.let { "'$it'" } ?: "NULL"
         driver.execute(
             null,
             "INSERT INTO chapter(id, manga_id, remote_url, remote_name, remote_scanlator, user_read, " +
                 "user_bookmark, user_last_page_read, remote_chapter_number, remote_order, state_date_fetch, " +
-                "remote_date_upload, remote_memo) VALUES ($id, ${manga.id}, '/$id', '$id', $scanlatorValue, " +
+                "remote_date_upload, remote_memo) VALUES ($id, ${manga.id}, '/$id', '$name', $scanlatorValue, " +
                 "${if (read) 1 else 0}, 0, 0, $number, $order, 0, 0, '{}')",
             0,
         ).await()
@@ -134,8 +152,42 @@ class MangaReaderViewModelHarness private constructor(
     /** [id] as the database holds it now. */
     suspend fun stored(id: Long): Chapter = chapters.getChapterById(id)!!
 
+    suspend fun storedManga(id: Long): Manga = mangas.getMangaById(id)
+
+    /** What the last model opened would hand back after a process death. */
+    var savedState: SavedStateHandle? = null
+        private set
+
+    /** The chapters a mark read removed the download of, with "Remove after marked as read" on. */
+    val deletedAfterRead: MutableList<Long> = java.util.Collections.synchronizedList(mutableListOf())
+
+    suspend fun setViewerFlags(id: Long, flags: Long) {
+        mangas.update(MangaUpdate(id) { viewerFlags = flags })
+    }
+
     /** The chapters of [mangaId] the reader recorded in History. */
     suspend fun historyOf(mangaId: Long): List<Long> = history.getHistoryByMangaId(mangaId).map { it.chapterId }
+
+    /** The time read history holds for [chapterId] of [mangaId], in milliseconds. */
+    suspend fun readTimeOf(mangaId: Long, chapterId: Long): Long? =
+        history.getHistoryByMangaId(mangaId).firstOrNull { it.chapterId == chapterId }?.readDuration
+
+    /** The open model's app scope, which the writes that outlive it are launched on. */
+    private var appScope: CoroutineScope? = null
+
+    /** The writes the open model has running on its app scope now. */
+    fun appWrites(): Set<Job> = checkNotNull(appScope).coroutineContext.job.children.toSet()
+
+    /** Runs [step] and waits out what it launched on [model]'s scope, then the writes those handed the app scope. */
+    suspend fun settle(model: ReaderViewModel, step: suspend () -> Unit) {
+        val modelJob = model.viewModelScope.coroutineContext.job
+        val running = modelJob.children.toSet() + appWrites()
+        step()
+        withTimeout(10_000) {
+            (modelJob.children.toSet() - running).joinAll()
+            (appWrites() - running).joinAll()
+        }
+    }
 
     /** A group of [manga] alone, as the provider resolves an unmerged series. */
     suspend fun single(manga: Manga): MergedChapterProvider.Group = MergedChapterProvider.Group(
@@ -146,11 +198,17 @@ class MangaReaderViewModelHarness private constructor(
 
     /**
      * Opens [chapterId] of [manga], waits for the first chapter to land, then asks [probe]. [preferences]
-     * seeds the store the reader, download and library settings read, by key. The page loader throws for
-     * a chapter in [failing], as a dropped connection does, and the sources in [incognito] are private. A
-     * source in [missingSources] resolves to a stub, as an uninstalled extension's does. The device is on
-     * Wi-Fi only when [wifi] is set, so by default the next chapter's eager preload is held. A first open
-     * that fails throws its error, unless [allowInitError] hands the failed state to [probe] instead.
+     * seeds the store the reader, download and library settings read, by key. The page loader, which [onLoad]
+     * watches, throws for a chapter in [failing], as a dropped connection does, and the sources in [incognito]
+     * are private. A source in [missingSources] resolves to a stub, as an uninstalled extension's does. The
+     * device is on Wi-Fi only when [wifi] is set, so by default the next chapter's eager preload is held. A
+     * first open that fails throws its error, unless [allowInitError] hands the failed state to [probe] instead.
+     *
+     * @param queuedDownloads the chapters waiting in the download queue
+     * @param onRequeue hears the chapters the reader puts back in the queue
+     * @param launchPage the page a launch asks to open at, as a page preview's does
+     * @param restored the chapter and page a process death saved, which the reopened model restores
+     * @param slowFlagWrite whether a reader flag write of a flag to an entry takes a moment, as a busy database's does
      */
     suspend fun <T> open(
         manga: Manga,
@@ -168,34 +226,54 @@ class MangaReaderViewModelHarness private constructor(
         onDownload: (List<Chapter>) -> Unit = {},
         onDelete: (List<Chapter>) -> Unit = {},
         onEnqueueDelete: (List<Chapter>) -> Unit = {},
+        onLoad: (chapterId: Long, fromSource: Boolean) -> Unit = { _, _ -> },
+        queuedDownloads: Set<Long> = emptySet(),
+        onRequeue: (List<Long>) -> Unit = {},
+        launchPage: Int? = null,
+        restored: Pair<Long, Int>? = null,
+        slowFlagWrite: (mangaId: Long, flag: Long) -> Boolean = { _, _ -> false },
         probe: suspend (ReaderViewModel, ReaderViewModel.State) -> T,
     ): T {
         val resolved = group ?: single(manga)
-        // The model starts loading from its init block, which a main dispatcher nothing advances never runs.
-        Dispatchers.setMain(UnconfinedTestDispatcher())
+        // The model loads on IO and Default, which only virtual time may drive here.
+        check(Dispatchers.IO is TestDispatcher) { "Call virtualDispatchers() before opening a reader" }
+        // Unconfined, so the init block's first launch runs as the model is built.
+        Dispatchers.setMain(UnconfinedTestDispatcher(currentCoroutineContext()[TestCoroutineScheduler]))
         mockkConstructor(ChapterLoader::class)
         mockkStatic(NETWORK_STATE)
         every { any<Context>().activeNetworkState() } returns NetworkState(true, true, isWifi = wifi)
         coEvery { anyConstructed<ChapterLoader>().loadChapter(any(), any()) } answers {
+            onLoad(firstArg<ReaderChapter>().chapter.id, secondArg())
             if (firstArg<ReaderChapter>().chapter.id in failing) throw IOException("no connection")
         }
         val store = ViewModelStore()
         var modelJob: Job? = null
         try {
-            val isOnDisk = { name: String, title: String ->
-                resolved.pooledChapters.any { it.name == name && titles[it.mangaId] == title && it.id in onDisk }
+            // By url, which is unique here, so same-titled copies on two scanlators can differ on disk.
+            val isOnDisk = { url: String, title: String ->
+                resolved.pooledChapters.any { it.url == url && titles[it.mangaId] == title && it.id in onDisk }
             }
             val downloadManager = mockk<DownloadManager>(relaxed = true) {
                 every { isChapterDownloaded(any(), any(), any(), any(), any()) } answers {
-                    isOnDisk(firstArg(), arg(3))
+                    isOnDisk(arg(2), arg(3))
+                }
+                coEvery { isChapterDownloadedOnDisk(any(), any(), any(), any(), any()) } answers {
+                    isOnDisk(arg(2), arg(3))
                 }
                 every { getDownloadedChapterIds(any(), any()) } answers {
                     val title = secondArg<Manga>().title
-                    firstArg<List<Chapter>>().filter { isOnDisk(it.name, title) }.mapTo(HashSet()) { it.id }
+                    firstArg<List<Chapter>>().filter { isOnDisk(it.url, title) }.mapTo(HashSet()) { it.id }
                 }
                 coEvery { downloadChapters(any(), any(), any()) } answers { onDownload(secondArg()) }
                 coEvery { deleteChapters(any(), any(), any()) } answers { onDelete(firstArg()) }
                 coEvery { enqueueChaptersToDelete(any(), any()) } answers { onEnqueueDelete(firstArg()) }
+                every { getQueuedDownloadOrNull(any()) } answers {
+                    resolved.pooledChapters.find { it.id == firstArg<Long>() && it.id in queuedDownloads }
+                        ?.let { Download(mockk(relaxed = true), manga, it) }
+                }
+                coEvery { addDownloadsToStartOfQueue(any()) } answers {
+                    onRequeue(firstArg<List<Download>>().map { it.chapter.id })
+                }
             }
             val getManga = GetManga(mangas)
             val sourceManager = mockk<SourceManager>(relaxed = true)
@@ -212,10 +290,13 @@ class MangaReaderViewModelHarness private constructor(
             )
             val downloadPreferences = DownloadPreferences(prefs)
             val model = ReaderViewModel(
-                appScope = testAppScope(),
+                // On the test's scheduler, so its writes land in virtual time and are joined below.
+                appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO).also { appScope = it },
                 savedState = SavedStateHandle(
-                    mapOf("manga" to manga.id, "chapter" to chapterId, "source_scoped" to sourceScoped),
-                ),
+                    mapOf("manga" to manga.id, "chapter" to chapterId, "source_scoped" to sourceScoped) +
+                        listOfNotNull(launchPage?.let { "launch_page" to it }) +
+                        restored?.let { (id, page) -> listOf("chapter_id" to id, "page_index" to page) }.orEmpty(),
+                ).also { this@MangaReaderViewModelHarness.savedState = it },
                 context = mockk<Context>(relaxed = true),
                 sourceManager = sourceManager,
                 downloadManager = downloadManager,
@@ -237,8 +318,19 @@ class MangaReaderViewModelHarness private constructor(
                 getNextChapters = GetNextChapters(GetChaptersByMangaId(chapters), getManga, mockk(relaxed = true)),
                 upsertHistory = UpsertHistory(history),
                 readingLog = NoReadingLog,
+                copyMarks = copyMarks,
+                localVolumes = NoLocalVolumes,
                 updateChapter = UpdateChapter(chapters),
-                setMangaViewerFlags = mockk(relaxed = true),
+                setMangaViewerFlags = spyk(SetMangaViewerFlags(mangas)) {
+                    coEvery { awaitSetReadingMode(any(), any()) } coAnswers {
+                        if (slowFlagWrite(firstArg(), secondArg())) slowWrite()
+                        callOriginal()
+                    }
+                    coEvery { awaitSetOrientation(any(), any()) } coAnswers {
+                        if (slowFlagWrite(firstArg(), secondArg())) slowWrite()
+                        callOriginal()
+                    }
+                },
                 getIncognitoState = mockk {
                     coEvery { await(any<SourceKey>()) } answers {
                         (firstArg<SourceKey?>() as? SourceKey.Manga)?.id in incognito
@@ -251,7 +343,7 @@ class MangaReaderViewModelHarness private constructor(
                 chapterCache = mockk(relaxed = true),
                 downloadCache = mockk(relaxed = true) {
                     every { isChapterDownloaded(any(), any(), any(), any(), any()) } answers {
-                        isOnDisk(firstArg(), arg(3))
+                        isOnDisk(arg(2), arg(3))
                     }
                 },
                 mergedChapterProvider = mockk { coEvery { load(any()) } returns resolved },
@@ -259,7 +351,11 @@ class MangaReaderViewModelHarness private constructor(
                 // Download removal and the source's own tracker leave the process.
                 setReadStatus = SetReadStatus(
                     downloadPreferences,
-                    mockk(relaxed = true),
+                    mockk<DeleteDownload> {
+                        coEvery { awaitAll(any(), *anyVararg()) } answers {
+                            deletedAfterRead += (args[1] as Array<*>).map { (it as Chapter).id }
+                        }
+                    },
                     mangas,
                     chapters,
                     mockk(relaxed = true),
@@ -270,6 +366,8 @@ class MangaReaderViewModelHarness private constructor(
             ).also {
                 store.put("reader", it)
                 modelJob = it.viewModelScope.coroutineContext.job
+                // Undoes what the coEverys above did to Default, as restubDefaultDispatcher says
+                restubDefaultDispatcher()
             }
             val state = settled(model) { it.viewerChapters != null || it.initError != null }
                 .also { if (!allowInitError) it.initError?.let { error -> throw error } }
@@ -277,7 +375,10 @@ class MangaReaderViewModelHarness private constructor(
         } finally {
             store.clear()
             // A cancelled load still resumes on Main to finish, so wait for it before a test resets Main.
-            withContext(NonCancellable) { modelJob?.join() }
+            withContext(NonCancellable) {
+                modelJob?.join()
+                appScope?.coroutineContext?.job?.children?.toList()?.joinAll()
+            }
             unmockkConstructor(ChapterLoader::class)
             unmockkStatic(NETWORK_STATE)
         }
@@ -286,15 +387,18 @@ class MangaReaderViewModelHarness private constructor(
     override fun close() = driver.close()
 }
 
+/** A reader flag write that takes a moment, as a busy database's does. */
+suspend fun slowWrite() = delay(SLOW_WRITE_MS)
+
+private const val SLOW_WRITE_MS = 300L
+
 private const val NETWORK_STATE = "eu.kanade.tachiyomi.util.system.NetworkStateTrackerKt"
 
-/** The model loads on the IO dispatcher, which virtual time does not reach, so this waits in real time. */
+/** Waits in virtual time for [model]'s state to reach [until]. */
 suspend fun settled(
     model: ReaderViewModel,
     until: (ReaderViewModel.State) -> Boolean,
-): ReaderViewModel.State = withContext(Dispatchers.Default) {
-    withTimeout(10_000) { model.state.first(until) }
-}
+): ReaderViewModel.State = withTimeout(10_000) { model.state.first(until) }
 
 /** The chapter sheet's rows as [model]'s production provider builds them, with nothing queued. */
 suspend fun sheetRows(model: ReaderViewModel): List<ReaderChapterRow> {
@@ -306,7 +410,7 @@ suspend fun sheetRows(model: ReaderViewModel): List<ReaderChapterRow> {
         },
         titleWords = EnglishChapterTitleWords,
     )
-    return withContext(Dispatchers.Default) { provider.chapterList.rows.first() }
+    return provider.chapterList.rows.first()
 }
 
 /** [chapter] as loaded with [count] pages, which the stubbed page loader never does itself. */

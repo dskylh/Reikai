@@ -12,6 +12,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.IconToggleButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SmallExtendedFloatingActionButton
 import androidx.compose.material3.Text
@@ -24,12 +27,11 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.icerock.moko.resources.StringResource
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.more.settings.screen.novel.NovelToggleListDialog
 import eu.kanade.presentation.more.settings.screen.novel.NovelToggleListViewModel
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.Add
 import mihon.icons.materialsymbols.rounded.Delete
@@ -61,7 +63,7 @@ fun <T : NovelStoredItem<T>> NovelToggleList(
     editDialog: @Composable (T?) -> Unit,
     summaryFontFamily: FontFamily? = null,
 ) {
-    val navigator = LocalNavigator.currentOrThrow
+    val navigator = LocalNavigator.current
     val state by viewModel.state.collectAsStateWithLifecycle()
     val lazyListState = rememberLazyListState()
 
@@ -131,7 +133,12 @@ private fun ToggleItem(
                 .padding(MaterialTheme.padding.medium),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            IconButton(onClick = onToggle) {
+            // Toggle semantics so the state is announced; the colours stay the plain button's.
+            IconToggleButton(
+                checked = enabled,
+                onCheckedChange = { onToggle() },
+                colors = IconButtonDefaults.iconToggleButtonColors(checkedContentColor = LocalContentColor.current),
+            ) {
                 Icon(
                     imageVector = if (enabled) {
                         MaterialSymbols.RoundedFilled.CheckCircle

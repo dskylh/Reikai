@@ -62,7 +62,7 @@ If cover thumbnails appear corrupted, blank, or broken, it's likely due to an in
 
 To fix one series, manga or light novel, open it and pull down to refresh. That downloads its cover again even when the source still lists the same image.
 
-**Refresh library covers**, at <nav to="advanced">, covers your whole manga library at once, but it only downloads a cover again when the source has moved it to a new address, so it will not repair a broken copy of an unchanged cover. It does not touch light novels.
+**Refresh library covers**, at <nav to="advanced">, covers your whole library at once, manga and light novels, but it only downloads a cover again when the source has moved it to a new address, so it will not repair a broken copy of an unchanged cover.
 
 ## Why have some chapters been marked as unread?
 If certain series chapters are marked as unread without your interaction, it could be due to changed URLs.
@@ -87,6 +87,12 @@ Disable **Downloaded only** via <nav to="downloaded-only">.
 ## What does the Lewd filter count as adult?
 The **Lewd** filter on the **Filter** tab of <nav to="main_library"> treats a series as adult when its extension is marked 18+, when one of its tags is plainly adult (such as "Smut" or "Erotica"), or, for manga, when it comes from one of the gallery sources Reikai enhances (a self-hosted LANraragi server included) or from a source whose name marks it as an adult site. An extension that only may contain adult content does not count, and neither does a "Mature" tag, which mainstream series carry too. A merged series counts as adult if any of its sources does. The extension and tag rules work the same for manga and light novels.
 
+## How do I show or hide series by tag?
+Open the **Filter** tab of <nav to="main_library"> and tap **Tags**. Tap a tag once to show only series that have it, again to hide series that have it, and a third time to clear it. **Match all shown** keeps only series with every shown tag, **Match all hidden** hides only series with every hidden tag, and **No tags** shows or hides series without any. You can also tap a tag on a series' page and pick **Show only this tag** or **Hide this tag**. The tags in use appear as chips under the toolbar; tap one to remove it. While a tag filter is set, **Save filter** keeps it under a name: tap the saved filter to use it again, or long-press it to remove it.
+
+## Two tags mean the same thing. Can I make them one?
+Yes. In **Tags** on the **Filter** tab, long-press the tag you want to fold away and pick the tag it should count as, say "Sci-fi" as "Science Fiction". The tag filter, `tag:` search, grouping **By tag**, Statistics and recommendations then treat the two as one. The pairs you made show above the tag list; tap one to undo it. Adult-content detection still reads each source's own tags. A series' Edit info tags count in place of its source's, and a merged series counts every source's tags.
+
 ## I edited an entry's title (or author). Why does sorting ignore the new name?
 
 That is intentional. When you use Edit info to change a title, author, cover, or other
@@ -100,3 +106,6 @@ sorts and still groups with its other sources. This is deliberate: it keeps a re
 silently reshuffling your library or splitting a merged series. The edit is stored separately
 and never overwrites the source, so **Reset all** in Edit info restores the original cleanly (**Reset info** and
 **Reset tags** put back just those fields, applied when you save).
+
+## How do I see how far a library update has got?
+While a library update runs, a banner at the top of the screen shows it with a percentage, counting manga and novels together. A backup restore shows one the same way. To hide them, turn off **Show library update progress banner** in <nav to="library"> or **Show restore progress banner** in <nav to="data-and-storage">.

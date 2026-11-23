@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.ui.updates.UpdatesViewModel
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.unmockkStatic
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -15,13 +16,15 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.extension.RegisterExtension
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.MethodSource
 import reikai.domain.category.RecentsSurface
+import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.interactor.GetCustomNovelInfo
 import reikai.domain.novel.interactor.GetNovelHistory
@@ -34,6 +37,7 @@ import reikai.novel.download.NovelDownloadCache
 import reikai.presentation.MainDispatcherExtension
 import reikai.presentation.history.NovelHistoryViewModel
 import reikai.presentation.updates.NovelUpdatesViewModel
+import reikai.util.virtualDispatchers
 import tachiyomi.domain.history.interactor.GetHistory
 import tachiyomi.domain.history.model.HistoryWithRelations
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -57,15 +61,22 @@ class RecentsFeedCustomInfoTest {
     @RegisterExtension
     val main = MainDispatcherExtension()
 
+    // The query runs on IO, which this puts on the test scheduler beside Main.
+    @BeforeEach
+    fun setUp() {
+        virtualDispatchers(UnconfinedTestDispatcher())
+    }
+
+    // Main stays set, so the extension can stop the models on it before it resets Main.
+    @AfterEach
+    fun tearDown() = unmockkStatic(Dispatchers::class)
+
     @ParameterizedTest(name = "{0}")
     @MethodSource("feeds")
     fun `a feed shows a row under the user's custom title`(feed: TitleProbe) = runTest {
         val titles = feed.build(main)
 
-        // The query runs on the IO dispatcher, which virtual time does not reach.
-        withContext(Dispatchers.Default) {
-            withTimeout(5_000) { titles.first { it.isNotEmpty() } }
-        } shouldBe listOf(CUSTOM)
+        titles.first { it.isNotEmpty() } shouldBe listOf(CUSTOM)
     }
 
     companion object {
@@ -102,7 +113,8 @@ class RecentsFeedCustomInfoTest {
                     },
                     downloadCache = mockk<DownloadCache> { every { changes } returns MutableStateFlow(Unit) },
                     getUpdates = mockk<GetUpdates> {
-                        every { subscribe(any(), any(), any(), any(), any(), any(), any()) } returns flowOf(listOf(row))
+                        every { subscribe(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                            flowOf(listOf(row))
                     },
                     getCustomMangaInfo = mockk<GetCustomMangaInfo> {
                         every { subscribeAll() } returns flowOf(listOf(CustomMangaInfo(mangaId = ID, title = CUSTOM)))
@@ -110,6 +122,7 @@ class RecentsFeedCustomInfoTest {
                     libraryPreferences = LibraryPreferences(store),
                     updatesPreferences = UpdatesPreferences(store),
                     reikaiSourcePreferences = preferences,
+                    reikaiLibraryPreferences = ReikaiLibraryPreferences(EmittingPreferenceStore()),
                 ),
             ).state.map { state -> state.items.map { it.update.mangaTitle } }
         }
@@ -126,7 +139,7 @@ class RecentsFeedCustomInfoTest {
                     surface = RecentsSurface.UPDATES,
                     novelRepo = mockk<NovelRepository> {
                         every {
-                            getFilteredNovelUpdatesAsFlow(any(), any(), any(), any(), any(), any(), any())
+                            getFilteredNovelUpdatesAsFlow(any(), any(), any(), any(), any(), any(), any(), any())
                         } returns flowOf(listOf(row))
                     },
                     downloadManagerProvider = { mockk { every { queueState } returns MutableStateFlow(emptyList()) } },
@@ -138,6 +151,7 @@ class RecentsFeedCustomInfoTest {
                     getCustomNovelInfo = mockk<GetCustomNovelInfo> {
                         every { subscribeAll() } returns flowOf(listOf(CustomNovelInfo(novelId = ID, title = CUSTOM)))
                     },
+                    reikaiLibraryPreferences = ReikaiLibraryPreferences(EmittingPreferenceStore()),
                 ),
             ).state.map { state -> state.items.map { it.update.novelTitle } }
         }

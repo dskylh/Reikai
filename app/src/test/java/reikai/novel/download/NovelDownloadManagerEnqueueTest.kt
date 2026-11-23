@@ -26,6 +26,7 @@ import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.source.ReikaiSourcePreferences
 import reikai.util.mockIoDispatcher
+import reikai.util.sourceContacts
 import reikai.util.testAppScope
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import kotlin.time.Instant
@@ -53,6 +54,7 @@ class NovelDownloadManagerEnqueueTest {
         every { downloadedChapterIds(novel, any()) } answers {
             secondArg<List<NovelChapter>>().filter { it == onDisk }.mapTo(HashSet()) { it.id }
         }
+        every { removeNovel(novel) } just runs
     }
     private val novelRepository = mockk<NovelRepository> { coEvery { getById(1L) } returns novel }
     private val chapterRepo = mockk<NovelChapterRepository> {
@@ -152,11 +154,38 @@ class NovelDownloadManagerEnqueueTest {
         manager.queueState.value shouldBe emptyList()
     }
 
+    @Test
+    fun `a chapter cancelled while the saved queue is restored stays out`() = runTest(io) {
+        store.addAll(listOf(download(saved)))
+        launchManager()
+        advanceUntilIdle()
+        manager.downloadChapters(listOf(saved))
+
+        restoreGate.complete(Unit)
+        manager.cancelDownloads(listOf(saved.id))
+        advanceUntilIdle()
+
+        manager.queueState.value shouldBe emptyList()
+    }
+
+    @Test
+    fun `deleting a novel while its saved queue is restored keeps its chapters out`() = runTest(io) {
+        store.addAll(listOf(download(saved)))
+        launchManager()
+        advanceUntilIdle()
+
+        manager.awaitDeleteNovel(novel)
+        restoreGate.complete(Unit)
+        advanceUntilIdle()
+
+        manager.queueState.value shouldBe emptyList()
+    }
+
     private fun launchManager() {
         manager = NovelDownloadManager(
             scope = testAppScope(),
             context = context,
-            provider = mockk(),
+            provider = mockk(relaxed = true),
             cache = cache,
             chapterRepo = chapterRepo,
             novelRepo = novelRepository,
@@ -170,6 +199,7 @@ class NovelDownloadManagerEnqueueTest {
             adultChecker = mockk(),
             sourceTitles = mockk(),
             getEntryCustomInfo = mockk { coEvery { await(any()) } returns null },
+            sourceContacts = io.scheduler.sourceContacts(),
         )
     }
 

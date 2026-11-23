@@ -13,7 +13,6 @@ import reikai.domain.library.sortForCategory
 import reikai.domain.library.toSortMode
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.library.model.LibrarySort
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * The assembly inputs besides the rows and categories. One value each: these describe the list, not a
@@ -25,6 +24,10 @@ data class LibraryAssemblyInputs(
     val showHiddenCategories: Boolean,
     /** Applied via [reikaiSortCategories]. */
     val categorySortOrder: CategorySortOrder,
+    /** Each Manual category's stored positions, by category id. */
+    val manualPositions: Map<Long, Map<EntryId, Long>> = emptyMap(),
+    /** Each Manual category's starting sort flags, which order what has no position yet. */
+    val manualBases: Map<Long, Long> = emptyMap(),
 )
 
 /**
@@ -58,10 +61,29 @@ fun assembleLibrary(
         .mapNotNull { category ->
             val bucket = buckets[category.id] ?: return@mapNotNull null
             val sort = sortForCategory(category, inputs.globalSort)
-            val comparator =
+            val comparator = if (sort.type == LibrarySort.Type.Manual) {
+                manualComparator(category.id, inputs, fields)
+            } else {
                 librarySortComparator(sort.type.toSortMode(), sort.isAscending, inputs.randomSeed, fields)
+            }
             LibraryBucket.Real(category) to bucket.sortedWith(comparator)
         }
+}
+
+/**
+ * A Manual category's order: stored positions first, then whatever has none (nothing before the first drag,
+ * a series added since after it) in the sort the category showed when it was switched to Manual.
+ */
+private fun manualComparator(
+    categoryId: Long,
+    inputs: LibraryAssemblyInputs,
+    fields: LibrarySortFields<LibraryItem>,
+): Comparator<LibraryItem> {
+    val positions = inputs.manualPositions[categoryId].orEmpty()
+    val base = LibrarySort.valueOf(inputs.manualBases[categoryId])
+        .takeIf { it.type != LibrarySort.Type.Manual } ?: LibrarySort.default
+    return compareBy<LibraryItem, Long?>(nullsLast()) { positions[it.entryId] }
+        .then(librarySortComparator(base.type.toSortMode(), base.isAscending, inputs.randomSeed, fields))
 }
 
 /**
@@ -74,10 +96,9 @@ fun presentIdsOf(assembled: List<Pair<LibraryBucket, List<LibraryItem>>>): Set<E
     assembled.flatMapTo(HashSet()) { (_, items) -> items.map { it.entryId } }
 
 /**
- * The assembled list the tab renders: the ordered buckets, the per-bucket display read as a function
- * so the per-type custom-info overlay is applied at read time, only for what is rendered, and the one
- * count rule: the chip-filtered bucket size, shown when the count preference is on or a search is
- * active, on every chip.
+ * The assembled list the tab renders: the ordered buckets, each bucket's display with the per-type
+ * custom-info overlay already applied, and the one count rule: the chip-filtered bucket size, shown
+ * when the count preference is on or a search is active, on every chip.
  * [chip] is the view this output was assembled for: the flow lags a chip flip by one emission, so the
  * tab renders an assembly only when its chip matches, falling back to the provider's own list meanwhile.
  */
@@ -85,19 +106,17 @@ class LibraryAssembled(
     val chip: ContentType,
     val buckets: List<LibraryBucket>,
     /**
-     * Everything this assembly kept, which is what a selection is pruned to. Held as a plain set
-     * rather than read back through [items], because that read applies the display overlay, and the
-     * overlay must never reach a decision about which entries exist.
+     * Everything this assembly kept, which is what a selection is pruned to and the toolbar counts.
+     * Held as a plain set because [items] carry the display overlay, which must never decide which
+     * entries exist.
      */
     val presentIds: Set<EntryId>,
     private val items: (LibraryBucket) -> List<LibraryItem>,
     private val counts: (LibraryBucket) -> Int? = { null },
+    /** Every series this view would show is one the user hid, so an empty view says where they went. */
+    val isAllHidden: Boolean = false,
 ) {
-    // The toolbar and the grid read these every frame, so each bucket's overlay pass runs once. Safe
-    // because an overlay edit re-emits a new assembly (the provider's overlay key is an assembly input).
-    private val itemsByKey = ConcurrentHashMap<String, List<LibraryItem>>()
-
-    fun itemsFor(bucket: LibraryBucket): List<LibraryItem> = itemsByKey.getOrPut(bucket.key) { items(bucket) }
+    fun itemsFor(bucket: LibraryBucket): List<LibraryItem> = items(bucket)
     fun countFor(bucket: LibraryBucket): Int? = counts(bucket)
 }
 

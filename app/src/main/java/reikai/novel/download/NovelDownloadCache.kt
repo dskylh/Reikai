@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
@@ -29,7 +30,9 @@ import mihon.core.metro.AppCoroutineScope
 import reikai.domain.download.DownloadIndexRules
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
+import reikai.storage.recoverInFlightRenames
 import tachiyomi.core.common.util.system.logcat
+import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.storage.service.StorageManager
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -50,6 +53,7 @@ class NovelDownloadCache(
     private val context: Context,
     private val storageManager: StorageManager,
     private val provider: NovelDownloadProvider,
+    private val downloadPreferences: DownloadPreferences,
 ) {
 
     private val _changes = Channel<Unit>(Channel.UNLIMITED)
@@ -86,6 +90,8 @@ class NovelDownloadCache(
     init {
         // Re-scan when the storage location moves: the files relocate under the new root.
         storageManager.changes.onEach { invalidate() }.launchIn(scope)
+        // A source renamed has had its folder renamed by the time this emits, so a rescan finds its downloads.
+        provider.sourceFolders.drop(1).onEach { invalidate() }.launchIn(scope)
         scope.launch {
             restoreIndex()
             renewIfStale()
@@ -103,18 +109,13 @@ class NovelDownloadCache(
         }
     }
 
-    // String overloads are the real query API (callers with denormalized rows avoid rebuilding a Novel);
-    // the typed overloads are thin shims.
+    // The String overload is the real query API (callers with denormalized rows avoid rebuilding a Novel);
+    // the typed one is a thin shim.
 
     fun isChapterDownloaded(source: String, title: String, chapterName: String, chapterUrl: String): Boolean {
         renewIfStale()
         val names = tree[provider.sourceDirName(source)]?.get(provider.novelDirName(title)) ?: return false
         return provider.validChapterFileNames(chapterName, chapterUrl).any { it in names }
-    }
-
-    fun getDownloadCount(source: String, title: String): Int {
-        renewIfStale()
-        return tree[provider.sourceDirName(source)]?.get(provider.novelDirName(title))?.size ?: 0
     }
 
     fun isChapterDownloaded(novel: Novel, chapter: NovelChapter): Boolean =
@@ -136,7 +137,10 @@ class NovelDownloadCache(
             .mapTo(HashSet()) { it.id }
     }
 
-    fun getDownloadCount(novel: Novel): Int = getDownloadCount(novel.source, novel.title)
+    fun getDownloadCount(novel: Novel): Int {
+        renewIfStale()
+        return tree[provider.sourceDirName(novel.source)]?.get(provider.novelDirName(novel.title))?.size ?: 0
+    }
 
     /** Optimistically record a just-written chapter so the UI reflects it without waiting for a scan. */
     fun addChapter(novel: Novel, chapter: NovelChapter) {
@@ -145,11 +149,7 @@ class NovelDownloadCache(
         val file = provider.chapterFileName(chapter)
         scope.launch {
             mutex.withLock {
-                tree = tree.mutate { sources ->
-                    sources.getOrPut(source) { mutableMapOf() }
-                        .getOrPut(novelDir) { mutableSetOf() }
-                        .add(file)
-                }
+                tree = tree.mutateSource(source) { novels -> novels.getOrPut(novelDir) { mutableSetOf() }.add(file) }
             }
             notifyChanges()
         }
@@ -166,11 +166,9 @@ class NovelDownloadCache(
         val names = chapters.flatMapTo(HashSet()) { provider.validChapterFileNames(it) }
         scope.launch {
             mutex.withLock {
-                tree = tree.mutate { sources ->
-                    val novels = sources[source] ?: return@mutate
+                tree = tree.mutateSource(source) { novels ->
                     novels[novelDir]?.removeAll(names)
                     if (novels[novelDir]?.isEmpty() == true) novels.remove(novelDir)
-                    if (novels.isEmpty()) sources.remove(source)
                 }
             }
             notifyChanges()
@@ -183,10 +181,7 @@ class NovelDownloadCache(
         val novelDir = provider.novelDirName(novel)
         scope.launch {
             mutex.withLock {
-                tree = tree.mutate { sources ->
-                    sources[source]?.remove(novelDir)
-                    if (sources[source]?.isEmpty() == true) sources.remove(source)
-                }
+                tree = tree.mutateSource(source) { novels -> novels.remove(novelDir) }
             }
             notifyChanges()
         }
@@ -200,8 +195,8 @@ class NovelDownloadCache(
         val newName = provider.chapterFileName(newChapter)
         scope.launch {
             mutex.withLock {
-                tree = tree.mutate { sources ->
-                    val files = sources[source]?.get(novelDir) ?: return@mutate
+                tree = tree.mutateSource(source) { novels ->
+                    val files = novels[novelDir] ?: return@mutateSource
                     files.removeAll(oldNames)
                     files.add(newName)
                 }
@@ -217,16 +212,14 @@ class NovelDownloadCache(
         val newDir = provider.novelDirName(newTitle)
         scope.launch {
             mutex.withLock {
-                tree = tree.mutate { sources ->
-                    val novels = sources[source] ?: return@mutate
-                    novels.remove(oldDir)?.let { novels[newDir] = it }
-                }
+                tree = tree.mutateSource(source) { novels -> novels.remove(oldDir)?.let { novels[newDir] = it } }
             }
             notifyChanges()
         }
     }
     private fun renewIfStale() {
-        if (DownloadIndexRules.isStale(lastRenew, System.currentTimeMillis()) && !renewing.get()) {
+        val renewHours = downloadPreferences.downloadIndexRenewHours.get()
+        if (DownloadIndexRules.isStale(lastRenew, System.currentTimeMillis(), renewHours) && !renewing.get()) {
             scope.launch { renew() }
         }
     }
@@ -258,11 +251,12 @@ class NovelDownloadCache(
     }
 
     private fun scan(root: UniFile?): Map<String, Map<String, Set<String>>> = buildMap {
-        root?.listFiles().orEmpty()
+        // A source or novel folder a killed case-only rename left in flight is put back before it is read.
+        recoverInFlightRenames(root?.listFiles().orEmpty().toList())
             .filter { it.isDirectory && !it.name.isNullOrBlank() }
             .forEach { sourceDir ->
                 val novels = buildMap<String, Set<String>> {
-                    sourceDir.listFiles().orEmpty()
+                    recoverInFlightRenames(sourceDir.listFiles().orEmpty().toList())
                         .filter { it.isDirectory && !it.name.isNullOrBlank() }
                         .forEach { novelDir ->
                             val files = novelDir.listFiles().orEmpty()
@@ -313,14 +307,17 @@ class NovelDownloadCache(
         }
     }
 
-    private inline fun Map<String, Map<String, Set<String>>>.mutate(
-        block: (MutableMap<String, MutableMap<String, MutableSet<String>>>) -> Unit,
+    /**
+     * The tree with [source]'s novels edited by [block]. Only that source's map and sets are copied: the tree
+     * is never edited in place, so every other source's can be shared. A source left empty is dropped.
+     */
+    private inline fun Map<String, Map<String, Set<String>>>.mutateSource(
+        source: String,
+        block: (MutableMap<String, MutableSet<String>>) -> Unit,
     ): Map<String, Map<String, Set<String>>> {
-        val copy = mapValuesTo(mutableMapOf()) { (_, novels) ->
-            novels.mapValuesTo(mutableMapOf()) { (_, files) -> files.toMutableSet() }
-        }
-        block(copy)
-        return copy
+        val novels = this[source].orEmpty().mapValuesTo(mutableMapOf()) { (_, files) -> files.toMutableSet() }
+        block(novels)
+        return toMutableMap().apply { if (novels.isEmpty()) remove(source) else put(source, novels) }
     }
 
     @Serializable

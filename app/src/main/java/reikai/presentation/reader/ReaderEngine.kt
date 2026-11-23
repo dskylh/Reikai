@@ -13,6 +13,7 @@ import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
@@ -20,7 +21,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -29,16 +29,36 @@ import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.scan
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
+import mihon.core.metro.AppCoroutineScope
 import reikai.domain.entry.GetEntryCustomInfo
 import reikai.domain.novel.tts.TtsPlayback
+import reikai.domain.reader.ChapterLength
+import reikai.domain.reader.ChapterPace
 import reikai.domain.reader.ChapterProgress
+import reikai.domain.reader.Listening
+import reikai.domain.reader.LiveReading
+import reikai.domain.reader.ReaderProgressLook
+import reikai.domain.reader.ReaderTimeLeft
+import reikai.domain.reader.chapterTimeLeft
+import reikai.domain.reader.listeningTimeLeft
 import reikai.domain.reader.seekTo
+import reikai.domain.readinglog.PACE_SAMPLE_LIMIT
+import reikai.domain.readinglog.PaceUnit
+import reikai.domain.readinglog.ReadingPace
+import reikai.domain.readinglog.ReadingPaceRepository
+import reikai.domain.readinglog.learnPace
+import tachiyomi.core.common.util.lang.withIOContext
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.TimeSource
 
 /**
  * The Reikai-owned reader engine, above one provider per content type. It owns dialog dispatch and
@@ -54,6 +74,10 @@ class ReaderEngine(
     @Assisted val provider: ReaderProvider,
     private val uiPreferences: UiPreferences,
     getEntryCustomInfo: GetEntryCustomInfo,
+    private val paceRepository: ReadingPaceRepository,
+    @AppCoroutineScope private val appScope: CoroutineScope,
+    // Unbound in the graph, so the default is what the app runs on; a test passes its scheduler's.
+    timeSource: TimeSource = TimeSource.Monotonic,
 ) : ViewModel() {
 
     @AssistedFactory
@@ -80,6 +104,9 @@ class ReaderEngine(
     val bottomButtons: StateFlow<List<ReaderBottomButton>> =
         provider.bottomButtons.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    val bottomButtonsFilled: StateFlow<Boolean> =
+        provider.bottomButtonsFilled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
     /** Where the reader is in the chapter, and which navigator shows it. */
     val navigator: StateFlow<ReaderNavigatorState> =
         provider.navigator.stateIn(viewModelScope, SharingStarted.Eagerly, ReaderNavigatorState())
@@ -87,6 +114,41 @@ class ReaderEngine(
     /** Whether this session wants a progress readout while the chrome is hidden. */
     val showProgress: StateFlow<Boolean> =
         provider.showProgress.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    val progressLook: StateFlow<ReaderProgressLook> =
+        provider.progressLook.stateIn(viewModelScope, SharingStarted.Eagerly, ReaderProgressLook())
+
+    // Shared, since a novel's length is counted by parsing the whole chapter and each collector of the
+    // provider's flow would count it again.
+    private val chapterLength: StateFlow<ChapterLength?> = provider.chapterLength
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    // Each chapter this session measured, to whether its reading is recorded.
+    private val recordedChapters = ConcurrentHashMap<Long, Boolean>()
+
+    // Eager whether or not time left is shown, so a length is kept and the pace goes on learning while it
+    // is off, and turning it on finds a pace already known. Asked once a chapter, since history only
+    // changes when the reader moves to another one.
+    private val chapterPace: StateFlow<ChapterPace?> = chapterLength
+        .onEach { length -> length?.let { recordedChapters[it.chapterId] = it.recorded } }
+        .mapLatest { length ->
+            length?.let {
+                withIOContext {
+                    if (it.recorded) paceRepository.setLength(it.contentType, it.chapterId, it.units)
+                    val samples = paceRepository.samples(it.contentType, PACE_SAMPLE_LIMIT)
+                    val unit = PaceUnit.of(it.contentType)
+                    // A chapter mostly read aloud teaches the voice's pace, so the two are learned apart.
+                    val (listened, read) = samples.partition { sample -> sample.isListened }
+                    ChapterPace(
+                        it.units,
+                        reading = learnPace(read, it.seriesIds, unit),
+                        listening = learnPace(listened, it.seriesIds, unit),
+                    )
+                }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     /** Whether a chapter is loading or failed, which this raises as a dialog for the host to show. */
     private val loadState: StateFlow<ReaderLoadState> =
@@ -207,7 +269,10 @@ class ReaderEngine(
 
     private val autoScrollPause = MutableStateFlow(AutoScrollPause())
 
-    fun setMenuVisible(visible: Boolean) = autoScrollPause.update { it.copy(menuVisible = visible) }
+    fun setMenuVisible(visible: Boolean) {
+        autoScrollPause.update { it.copy(menuVisible = visible) }
+        provider.setMenuOpen(visible)
+    }
 
     /** Off screen pauses it, since nothing else stops a frame loop running behind another app. */
     fun setOnScreen(onScreen: Boolean) = autoScrollPause.update { it.copy(onScreen = onScreen) }
@@ -242,6 +307,66 @@ class ReaderEngine(
         (provider.readAloud?.state ?: flowOf(ReaderReadAloudState()))
             .stateIn(viewModelScope, SharingStarted.Eagerly, ReaderReadAloudState())
 
+    private val clock = timeSource.markNow()
+
+    // Below readAloudState, which it reads as it is built. Each step's listened time is written on the app
+    // scope, so a reader closing mid-paragraph still keeps what was listened before it.
+    private val listening: StateFlow<Listening> = readAloudState
+        .map { (it.playback == TtsPlayback.Playing) to it.progress }
+        .distinctUntilChanged()
+        .scan(Listening()) { state, (playing, progress) ->
+            state.next(playing, progress, clock.elapsedNow().inWholeMilliseconds)
+        }
+        .onEach { it.listened?.let(::recordListened) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, Listening())
+
+    // The pace measured in the open chapter, which the time left shows until finished chapters teach one.
+    private val reading: StateFlow<LiveReading> =
+        combine(chapterLength, navigator.map { it.progress }.distinctUntilChanged(), ::Pair)
+            .scan(LiveReading()) { state, (length, progress) ->
+                length?.let {
+                    val now = clock.elapsedNow().inWholeMilliseconds
+                    state.next(it.chapterId, it.units, progress, now, PaceUnit.of(it.contentType))
+                } ?: state
+            }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, LiveReading())
+
+    /**
+     * The open chapter's time left while this session's setting asks for it, else null: while read-aloud
+     * plays, at the voice's pace over what it has still to speak, otherwise at the reader's own.
+     */
+    val timeLeft: StateFlow<ReaderTimeLeft?> =
+        combine(
+            provider.showTimeLeft,
+            chapterPace,
+            // The position and the live pace from one step, so a page turn recomputes this once.
+            reading,
+            readAloudState,
+            listening,
+        ) { show, pace, live, speech, heard ->
+            val progress = speech.progress
+            when {
+                !show -> null
+                speech.playback == TtsPlayback.Playing && progress != null ->
+                    listeningTimeLeft(progress, heard.msPerWord, pace?.listening ?: ReadingPace.Learning)
+                else -> pace?.let { chapterTimeLeft(it, live.progress, live.msPerUnit) }
+            }
+        }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    // Only a chapter whose length said it is recorded: one in incognito, or never measured, keeps nothing.
+    private fun recordListened(listened: Pair<Long, Long>) {
+        if (recordedChapters[listened.first] != true) return
+        // The app scope runs on IO already; launchIO would leave a test's dispatcher for a real thread.
+        appScope.launch { paceRepository.addListenedTime(listened.first, listened.second) }
+    }
+
+    override fun onCleared() {
+        // The paragraph being spoken when the reader closes has had no step to credit it yet.
+        listening.value.next(playing = false, progress = null, nowMs = clock.elapsedNow().inWholeMilliseconds)
+            .listened?.let(::recordListened)
+    }
+
     fun previousChapter() = stepChapter { provider.previousChapter() }
 
     fun nextChapter() = stepChapter { provider.nextChapter() }
@@ -275,15 +400,15 @@ class ReaderEngine(
 
     // Dialogs: one slot, so raising a dialog is also how the previous one closes.
 
-    private val mutableDialog = MutableStateFlow<ReaderDialog?>(null)
-    val dialog: StateFlow<ReaderDialog?> = mutableDialog.asStateFlow()
+    val dialog: StateFlow<ReaderDialog?>
+        field = MutableStateFlow<ReaderDialog?>(null)
 
     fun openDialog(dialog: ReaderDialog) {
-        mutableDialog.value = dialog
+        this.dialog.value = dialog
     }
 
     fun dismissDialog() {
-        mutableDialog.value = null
+        dialog.value = null
     }
 
     // Raises the load surface as the load moves, from the engine's own scope. A failure is a one-shot
@@ -298,14 +423,14 @@ class ReaderEngine(
                     // Never over a sheet the reader opened: a setting changed in one reloads the chapter in
                     // place, and read aloud steps chapters by itself, so replacing it would close it mid-use.
                     // A pick from the chapter list closes that sheet before it loads.
-                    ReaderLoadState.Loading -> if (mutableDialog.value.let { it == null || it.isLoadSurface }) {
+                    ReaderLoadState.Loading -> if (dialog.value.let { it == null || it.isLoadSurface }) {
                         openDialog(ReaderDialog.Loading)
                     }
                     is ReaderLoadState.Failed -> {
                         latestFailure = state.attempt
-                        // The failed chapter's own page, where a site challenge is solved or, for a
-                        // source that takes pages, the chapter saved from.
-                        val webUrl = state.chapterId?.let { provider.chapterWebUrl(it) }
+                        // The page a site challenge blocked, where it is solved; else the failed chapter's own,
+                        // where one on the page is, or, for a source that takes pages, the chapter saved from.
+                        val webUrl = state.blockedUrl ?: state.chapterId?.let { provider.chapterWebUrl(it) }
                         openDialog(
                             ReaderDialog.LoadFailed(state.message, state.canKeepReading, webUrl, state.chapterId),
                         )
@@ -319,7 +444,7 @@ class ReaderEngine(
     }
 
     private fun dismissLoadDialog() {
-        if (mutableDialog.value?.isLoadSurface == true) dismissDialog()
+        if (dialog.value?.isLoadSurface == true) dismissDialog()
     }
 
     /** What this raises for a load, as against a sheet the reader opened. */
@@ -328,8 +453,8 @@ class ReaderEngine(
 
     // Viewport: what is currently rendering the entry, whatever content type it is.
 
-    private val mutableViewport = MutableStateFlow<ReaderViewport?>(null)
-    val viewport: StateFlow<ReaderViewport?> = mutableViewport.asStateFlow()
+    val viewport: StateFlow<ReaderViewport?>
+        field = MutableStateFlow<ReaderViewport?>(null)
 
     /**
      * Swaps in the viewport the host just built. Destroying the outgoing one happens here rather
@@ -340,14 +465,14 @@ class ReaderEngine(
      * folding that in here would mean nothing could exercise the swap without inventing a host.
      */
     fun installViewport(viewport: ReaderViewport) {
-        mutableViewport.value?.let(::release)
-        mutableViewport.value = viewport
+        this.viewport.value?.let(::release)
+        this.viewport.value = viewport
     }
 
     /** Called when the host goes away, since the viewport holds its view tree. */
     fun destroyViewport() {
-        mutableViewport.value?.let(::release)
-        mutableViewport.value = null
+        viewport.value?.let(::release)
+        viewport.value = null
     }
 
     private fun release(viewport: ReaderViewport) {
@@ -363,8 +488,8 @@ class ReaderEngine(
         viewModelScope.launch {
             combine(
                 autoScrollRunning,
-                mutableViewport,
-                combine(autoScrollPause, mutableDialog) { pause, dialog -> pause to (dialog != null) },
+                viewport,
+                combine(autoScrollPause, dialog) { pause, raised -> pause to (raised != null) },
                 readAloudState,
                 seekHeld,
             ) { running, viewport, (pause, dialogOpen), readAloud, held ->

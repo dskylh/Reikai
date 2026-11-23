@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension
 
 import android.content.Context
+import android.widget.Toast
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Inject
 import dev.zacsweers.metro.SingleIn
@@ -21,7 +22,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
@@ -36,8 +36,11 @@ import mihon.domain.extension.interactor.UpdateExtensionStores
 import mihon.domain.extension.model.ExtensionStore
 import mihon.domain.extension.repository.ExtensionStoreRepository
 import reikai.domain.extension.KindListing
+import reikai.domain.extension.RefusedStore
 import reikai.domain.extension.RepoStatus
 import reikai.domain.extension.SharedRefresh
+import reikai.domain.extension.StoreKeyChangedException
+import reikai.domain.extension.extensionsInNotice
 import reikai.domain.extension.hasSigningKey
 import reikai.domain.extension.hasUpdate
 import reikai.domain.extension.installUpdate
@@ -45,6 +48,7 @@ import reikai.domain.extension.kindListing
 import reikai.domain.extension.pendingUpdate
 import reikai.domain.extension.signingKeys
 import reikai.domain.extension.toRepoStatus
+import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.source.ContentWarningScan
 import reikai.domain.source.contentWarningScan
@@ -82,6 +86,7 @@ class ExtensionManager(
     private val extensionUpdateNotifier: ExtensionUpdateNotifier,
     // RK: keeps the listing's icons for a novel app whose own icon shows nothing
     private val novelPreferences: NovelPreferences,
+    private val reikaiLibraryPreferences: ReikaiLibraryPreferences, // RK: a hidden type's updates go unannounced
 ) {
 
     private val initialized = CompletableDeferred<Unit>()
@@ -140,6 +145,10 @@ class ExtensionManager(
     @Volatile
     private var scannedContentWarnings: ContentWarningScan? = null
 
+    /** The store keys and the extensions trusted by hand that the latest scan judged trust against. */
+    @Volatile
+    private var scannedTrust: Pair<Set<String>, Set<String>>? = null
+
     /**
      * The keys of the added stores that have one, read at each scan and listing fetch. The first scan
      * finishes before the install receiver is registered, so every status sees stored keys.
@@ -155,15 +164,20 @@ class ExtensionManager(
             ExtensionInstallReceiver(InstallationListener(), scope).register(context)
 
             // Everything the load decision rests on can change while running, so decide again
-            // RK --> content warnings compare against what the scan used rather than drop(1), which
-            // lost a write landing during the first scan (the upgrade carry, a backup restore).
+            // RK --> content warnings and trust compare against what the scan used rather than drop(1),
+            // which lost a write landing during the first scan (the upgrade carry, a backup restore, a
+            // store added).
             launch {
                 preferences.contentWarningScanChanges()
                     .reloadWhenScanStale({ scannedContentWarnings }) { loadExtensions() }
             }
-            trustExtension.changes()
-                // RK <--
-                .collectLatest { loadExtensions() }
+            combine(
+                extensionStoreRepository.getAllAsFlow().map { it.signingKeys },
+                preferences.trustedExtensions.changes(),
+                ::Pair,
+            )
+                .reloadWhenScanStale({ scannedTrust }) { loadExtensions() }
+            // RK <--
         }
 
         // Extensions are only reloaded when the set of signing keys changes, which misses a store being
@@ -249,6 +263,7 @@ class ExtensionManager(
             // RK --> read before the loader reads them, so a write in between costs only a spare scan
             val contentWarnings = preferences.contentWarningScan()
             readStores()
+            val trust = storeKeys to preferences.trustedExtensions.get()
             // RK <--
             // RK --> novel extensions go back in too, so a reload keeps their source instances
             val (extensions, novelExtensions) = ExtensionLoader.loadExtensions(
@@ -274,6 +289,7 @@ class ExtensionManager(
                 .associateBy { it.pkgName }
             // RK: recorded once the scan lands, since a cancelled one judged nothing
             scannedContentWarnings = contentWarnings
+            scannedTrust = trust // RK
 
             // Newly loaded extensions have no status derived from the store index yet
             refreshStatuses()
@@ -320,7 +336,7 @@ class ExtensionManager(
      */
     suspend fun checkForUpdates() {
         val extensions = try {
-            updateExtensionStores()
+            refreshStores() // RK
             fetchExtensions()
         } catch (e: Exception) {
             logcat(LogPriority.ERROR, e)
@@ -330,9 +346,9 @@ class ExtensionManager(
         initialized.await()
         setAvailableExtensions(extensions)
 
-        val names = (loadedExtensionMapFlow.value.values + notLoadedExtensionMapFlow.value.values)
-            // RK: novel apks share the notice, since one store index lists both
-            .plus(loadedNovelExtensionMapFlow.value.values + notLoadedNovelExtensionMapFlow.value.values)
+        // RK --> novel apks share the notice, since one store index lists both
+        val names = extensionsTheNoticeCovers()
+            // RK <--
             // RK: a badge a store outage kept has nothing to install, so it is left out of the notice
             .filter { it.pendingUpdate(extensions, storeKeys) != null }
             .map { it.name }
@@ -341,9 +357,52 @@ class ExtensionManager(
         }
     }
 
+    // RK -->
+
+    /**
+     * Refreshes the saved stores and keeps the ones refused because their address now serves another key,
+     * so their listing stays refused across restarts. Each refusal is told once, not on every daily check,
+     * and one whose store this refresh could not reach is kept rather than told again.
+     */
+    suspend fun refreshStores() {
+        val refresh = updateExtensionStores()
+        val told = preferences.refusedExtensionStores.get().mapNotNullTo(HashSet(), RefusedStore::decode)
+        val saved = extensionStoreRepository.getAll().mapTo(HashSet()) { it.indexUrl }
+        preferences.refusedExtensionStores.set(refresh.refusalsAfter(told, saved).mapTo(HashSet()) { it.encode() })
+        val untold = refresh.refused.filter { it !in told }
+        if (untold.isEmpty()) return
+        withUIContext {
+            untold.forEach {
+                context.toast(
+                    context.stringResource(MR.strings.repo_key_changed_toast, it.name),
+                    Toast.LENGTH_LONG,
+                )
+            }
+        }
+    }
+
+    /** A refused store's listing is another store's, so it reads as refused, never as the saved store's. */
+    private suspend fun withoutRefusedListings(
+        byStore: Map<String, Result<List<Extension.Available>>>,
+    ): Map<String, Result<List<Extension.Available>>> {
+        val refused = preferences.refusedExtensionStores.get().mapNotNull(RefusedStore::decode)
+        if (refused.isEmpty()) return byStore
+        val saved = extensionStoreRepository.getAll().associateBy { it.indexUrl }
+        return byStore.mapValues { (indexUrl, result) ->
+            val refusal = saved[indexUrl]?.let { store -> refused.find { it.appliesTo(store) } }
+            refusal?.let { Result.failure(StoreKeyChangedException(it.servedName)) } ?: result
+        }
+    }
+    // RK <--
+
+    // RK --> every reader of the listings, a backup restore's included, takes a refused store's as refused
+    suspend fun fetchListingsByStore(): Map<String, Result<List<Extension.Available>>> =
+        withIOContext { withoutRefusedListings(extensionStoreRepository.fetchExtensionsByStore()) }
+    // RK <--
+
     // RK: fetched per store, so each store's outcome is kept for the Repos screen
     private suspend fun fetchExtensions(): List<Extension.Available> {
-        val byStore = withIOContext { extensionStoreRepository.fetchExtensionsByStore() }
+        val byStore = fetchListingsByStore() // RK
         storeStatuses.value = byStore.mapValues { (_, result) -> result.toRepoStatus() }
         return byStore.values.flatMap { it.getOrDefault(emptyList()) }
     }
@@ -656,13 +715,18 @@ class ExtensionManager(
         val pendingUpdateCount = (loadedExtensionMapFlow.value.values + notLoadedExtensionMapFlow.value.values)
             .count { it.hasUpdate }
         preferences.extensionUpdatesCount.set(pendingUpdateCount)
-        // RK: the notice lists novel apks too, so it stays while either has one pending
-        val novelPending = (loadedNovelExtensionMapFlow.value.values + notLoadedNovelExtensionMapFlow.value.values)
-            .count { it.hasUpdate }
-        if (pendingUpdateCount == 0 && novelPending == 0) {
+        // RK: the notice stays while anything it lists has an update pending
+        if (extensionsTheNoticeCovers().none { it.hasUpdate }) {
             extensionUpdateNotifier.dismiss()
         }
     }
+
+    // RK: one list, so the notice cannot outlive what it names
+    private fun extensionsTheNoticeCovers() = extensionsInNotice(
+        reikaiLibraryPreferences.shownContent.get(),
+        loadedExtensionMapFlow.value.values + notLoadedExtensionMapFlow.value.values,
+        loadedNovelExtensionMapFlow.value.values + notLoadedNovelExtensionMapFlow.value.values,
+    )
 
     private operator fun <T : Extension> Map<String, T>.plus(extension: T) = plus(extension.pkgName to extension)
 

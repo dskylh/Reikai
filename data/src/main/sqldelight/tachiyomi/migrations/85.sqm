@@ -1,0 +1,14 @@
+-- Pre-rendered read-aloud audio. Empty on upgrade: nothing was rendered before.
+CREATE TABLE novel_tts_audio(
+    _id INTEGER NOT NULL PRIMARY KEY,
+    paragraph_key TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    chapter_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(paragraph_key, signature)
+);
+
+CREATE INDEX novel_tts_audio_created_index ON novel_tts_audio(created_at);

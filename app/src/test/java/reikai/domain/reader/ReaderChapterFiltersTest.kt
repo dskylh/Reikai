@@ -2,11 +2,15 @@ package reikai.domain.reader
 
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.Arguments
+import org.junit.jupiter.params.provider.MethodSource
 import reikai.domain.merge.ChapterUnit
 import reikai.domain.merge.GroupChapterFlags
 import reikai.domain.merge.MergeScope
 import reikai.domain.novel.model.NovelChapterFlags
 import tachiyomi.core.common.preference.TriState
+import tachiyomi.domain.manga.model.Manga
 
 /**
  * The forward-eligibility rule every reader runs, over the group's answer. What the chapter-list
@@ -52,11 +56,43 @@ class ReaderChapterFiltersTest {
         flags.isForwardEligible(Row(1L), skipRead = false, skipFiltered = true, filters = downloadedOnly) shouldBe true
     }
 
+    /** The details lists, the resume target and the skip-filtered step all filter through [ChapterListFilters.keeps]. */
     @Test
-    fun `the Downloaded only switch shows a novel's downloaded filter forced on`() {
-        val filters = novelChapterListFilters(0L, 0L, NovelChapterFlags.SHOW_NOT_DOWNLOADED, downloadedOnly = true)
+    fun `the downloaded filter hides a chapter not on disk`() {
+        val downloadedOnly = noFilters.copy(downloaded = TriState.ENABLED_IS)
 
-        filters.downloaded shouldBe TriState.ENABLED_IS
+        downloadedOnly.keeps(isRead = { false }, isBookmarked = { false }, isDownloaded = { false }) shouldBe false
+    }
+
+    @Test
+    fun `the not-downloaded filter hides a chapter on disk`() {
+        val notDownloaded = noFilters.copy(downloaded = TriState.ENABLED_NOT)
+
+        notDownloaded.keeps(isRead = { false }, isBookmarked = { false }, isDownloaded = { true }) shouldBe false
+    }
+
+    /** Whether a chapter is on disk costs a folder check, so a list with that filter off never asks. */
+    @Test
+    fun `a filter that is off is not asked`() {
+        noFilters.keeps(isRead = { false }, isBookmarked = { false }, isDownloaded = { error("asked") }) shouldBe true
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("notDownloadedEntries")
+    fun `the Downloaded only switch forces the downloaded filter on`(
+        type: String,
+        filtersOf: (Boolean) -> ChapterListFilters,
+    ) {
+        filtersOf(true).downloaded shouldBe TriState.ENABLED_IS
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("notDownloadedEntries")
+    fun `the entry's own downloaded filter returns with the Downloaded only switch off`(
+        type: String,
+        filtersOf: (Boolean) -> ChapterListFilters,
+    ) {
+        filtersOf(false).downloaded shouldBe TriState.ENABLED_NOT
     }
 
     @Test
@@ -79,5 +115,25 @@ class ReaderChapterFiltersTest {
     fun `a picked bookmarked state writes back the novel's own flag`() {
         TriState.ENABLED_NOT.toFlag(NovelChapterFlags.SHOW_BOOKMARKED, NovelChapterFlags.SHOW_NOT_BOOKMARKED) shouldBe
             NovelChapterFlags.SHOW_NOT_BOOKMARKED
+    }
+
+    companion object {
+        /** Each type's filters, by the Downloaded only switch, for an entry whose own filter hides downloads. */
+        @JvmStatic
+        fun notDownloadedEntries(): List<Arguments> = listOf(
+            Arguments.of(
+                "manga",
+                { downloadedOnly: Boolean ->
+                    Manga.create().copy(chapterFlags = Manga.CHAPTER_SHOW_NOT_DOWNLOADED)
+                        .readerChapterFilters(downloadedOnly)
+                },
+            ),
+            Arguments.of(
+                "novel",
+                { downloadedOnly: Boolean ->
+                    novelChapterListFilters(0L, 0L, NovelChapterFlags.SHOW_NOT_DOWNLOADED, downloadedOnly)
+                },
+            ),
+        )
     }
 }

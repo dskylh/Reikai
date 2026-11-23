@@ -1,22 +1,26 @@
 package eu.kanade.tachiyomi.data.track.novellist
 
 import android.util.Base64
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.database.models.Track
-import eu.kanade.tachiyomi.data.track.BaseTracker
-import eu.kanade.tachiyomi.data.track.CookieLoginTracker
 import eu.kanade.tachiyomi.data.track.DeletableTracker
+import eu.kanade.tachiyomi.data.track.TrackerDependencies
+import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.data.track.model.TrackMangaMetadata
 import eu.kanade.tachiyomi.data.track.model.TrackSearch
 import eu.kanade.tachiyomi.data.track.novellist.dto.NLNovel
 import eu.kanade.tachiyomi.data.track.novellist.dto.NLReadingListEntry
 import eu.kanade.tachiyomi.data.track.novellist.dto.NLUpdateRequest
 import eu.kanade.tachiyomi.network.HttpException
+import kotlinx.serialization.json.Json
 import reikai.data.track.MetadataAccess
 import reikai.data.track.NovelStatusTracker
 import reikai.data.track.NovelTrackerStatuses
 import reikai.data.track.TenPointScore
-import reikai.data.track.storeCheckedCredential
+import reikai.data.track.TokenTracker
 import reikai.domain.track.TrackFieldMutations
 import tachiyomi.domain.track.model.Track as DomainTrack
 
@@ -28,10 +32,13 @@ import tachiyomi.domain.track.model.Track as DomainTrack
  *
  * Every write carries the chapter count, because a body omitting it resets progress to zero.
  */
-class NovelList(id: Long) :
-    BaseTracker(id, "NovelList"),
+@Inject
+@SingleIn(AppScope::class)
+class NovelList(
+    dependencies: TrackerDependencies,
+    private val json: Json,
+) : TokenTracker(TrackerManager.NOVELLIST, "NovelList", dependencies),
     DeletableTracker,
-    CookieLoginTracker,
     NovelStatusTracker {
 
     companion object {
@@ -48,7 +55,7 @@ class NovelList(id: Long) :
     private val interceptor by lazy { NovelListInterceptor(restoreToken()) }
 
     private val api by lazy {
-        NovelListApi(interceptor, client) { NovelListApi.novelListApiUrl(trackPreferences.novelListApiUrl.get()) }
+        NovelListApi(interceptor, client, json) { NovelListApi.novelListApiUrl(trackPreferences.novelListApiUrl.get()) }
     }
 
     override fun getLogo(): Int = R.drawable.brand_novellist
@@ -132,10 +139,6 @@ class NovelList(id: Long) :
         )
     }
 
-    override suspend fun login(username: String, password: String) = login(password)
-
-    suspend fun login(token: String) = storeCredential(token.trim())
-
     override val cookieLoginUrl: String = "${NovelListApi.BASE_URL}/sign-in"
 
     override val cookieDomain: String = NovelListApi.BASE_URL
@@ -157,22 +160,9 @@ class NovelList(id: Long) :
         return ACCESS_TOKEN.find(decoded)?.groupValues?.get(1)?.takeIf { it.isNotBlank() }
     }
 
-    override suspend fun loginWithCookie(credential: String) = storeCredential(credential)
+    override fun useCredential(credential: String?) = interceptor.newAuth(credential)
 
-    // Validated against the profile route before it is stored.
-    private suspend fun storeCredential(credential: String) =
-        storeCheckedCredential(credential, interceptor::newAuth) { api.getCurrentUser().username }
-
-    override suspend fun updateUserConfig() {
-        saveDisplayUsername(api.getCurrentUser().username)
-    }
-
-    override fun logout() {
-        super.logout()
-        interceptor.newAuth(null)
-    }
-
-    fun restoreToken(): String? = trackPreferences.trackPassword(this).get().ifBlank { null }
+    override suspend fun currentUsername(): String = api.getCurrentUser().username
 
     /**
      * The chapter count goes on every write, never conditionally: the route resets progress to zero

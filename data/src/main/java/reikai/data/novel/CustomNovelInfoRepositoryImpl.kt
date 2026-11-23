@@ -1,5 +1,6 @@
 package reikai.data.novel
 
+import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
@@ -28,6 +29,9 @@ class CustomNovelInfoRepositoryImpl(
         return database.custom_novel_infoQueries.getAll(::mapCustomNovelInfo).subscribeToList()
     }
 
+    override suspend fun getByNovelId(novelId: Long): CustomNovelInfo? =
+        database.custom_novel_infoQueries.getByNovelId(novelId, ::mapCustomNovelInfo).awaitAsOneOrNull()
+
     override suspend fun set(info: CustomNovelInfo) {
         database.custom_novel_infoQueries.insert(
             novelId = info.novelId,
@@ -38,6 +42,8 @@ class CustomNovelInfoRepositoryImpl(
             genre = info.genre,
             status = info.status,
             thumbnailUrl = info.thumbnailUrl,
+            // Stored as null when empty, so a row without alternative titles reads as one from before the column.
+            altTitles = info.altTitles.takeIf { it.isNotEmpty() },
         )
     }
 
@@ -54,6 +60,7 @@ class CustomNovelInfoRepositoryImpl(
         genre: List<String>?,
         status: Long?,
         thumbnailUrl: String?,
+        altTitles: List<String>?,
     ): CustomNovelInfo = CustomNovelInfo(
         novelId = novelId,
         title = title,
@@ -63,5 +70,6 @@ class CustomNovelInfoRepositoryImpl(
         genre = genre,
         status = status,
         thumbnailUrl = thumbnailUrl,
+        altTitles = altTitles.orEmpty(),
     )
 }

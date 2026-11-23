@@ -38,6 +38,7 @@ import eu.kanade.presentation.more.settings.screen.LocalSettingsIndexing
 import eu.kanade.presentation.more.settings.screen.SearchableSettings
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import mihon.app.di.appGraph
 import reikai.data.novel.tts.FoundTtsServer
 import reikai.data.novel.tts.ServerInfo
@@ -58,7 +59,8 @@ import androidx.compose.runtime.collectAsState as collectFlowAsState
  * the PC's server, model and voice, or the phone's speed test. The phone's voice stays with the other
  * voice settings in the novel reader screen, since live speech uses it too.
  */
-object SettingsReadAloudAudioScreen : SearchableSettings {
+@Serializable
+data object SettingsReadAloudAudioScreen : SearchableSettings {
 
     @ReadOnlyComposable
     @Composable

@@ -36,7 +36,12 @@ class TtsOptionsTest {
 
     @Test
     fun `the picked languages read in the list's order, not the order they were picked in`() {
-        options.languagesLabel(linkedSetOf("fr", "en")) shouldBe "English, French"
+        options.languagesLabel(linkedSetOf("fr", "en"), "All") shouldBe "English, French"
+    }
+
+    @Test
+    fun `no picked language reads as all of them`() {
+        options.languagesLabel(emptySet(), "All") shouldBe "All"
     }
 
     @Test
@@ -59,8 +64,41 @@ class TtsOptionsTest {
         options.voiceLabel("fr-1", "Default") shouldBe "Amelie"
     }
 
+    /** The empty id is the engine's own voice, which both pickers show by default. */
+    @Test
+    fun `the engine's own voice reads as the default`() {
+        options.voiceLabel("", "Default") shouldBe "Default"
+    }
+
     @Test
     fun `a voice the engine no longer offers reads as its id`() {
         options.voiceLabel("gone", "Default") shouldBe "gone"
+    }
+
+    /** The sheet and Settings both ask this, so one screen cannot offer the row the other hides. */
+    @Test
+    fun `one engine installed offers no engine choice`() {
+        TtsOptions(engines = listOf(TtsEngineInfo("com.example.speech", "Speech"))).offersEngineChoice shouldBe false
+    }
+
+    @Test
+    fun `two engines installed offer an engine choice`() {
+        TtsOptions(
+            engines = listOf(
+                TtsEngineInfo("com.example.speech", "Speech"),
+                TtsEngineInfo("com.example.voice", "Voice"),
+            ),
+        ).offersEngineChoice shouldBe true
+    }
+
+    @Test
+    fun `voices in one language offer no language choice`() {
+        TtsOptions(voices = listOf(TtsVoice("a", "A", "en-US"), TtsVoice("b", "B", "en-GB")))
+            .offersLanguageChoice shouldBe false
+    }
+
+    @Test
+    fun `voices in two languages offer a language choice`() {
+        options.offersLanguageChoice shouldBe true
     }
 }

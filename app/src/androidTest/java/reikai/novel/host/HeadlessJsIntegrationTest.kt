@@ -7,16 +7,22 @@ import app.cash.quickjs.QuickJs
 import com.dokar.quickjs.binding.function
 import eu.kanade.tachiyomi.network.JavaScriptEngine
 import eu.kanade.tachiyomi.network.NetworkHelper
+import eu.kanade.tachiyomi.network.interceptor.LoopbackServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import mihon.app.di.appGraph
 import okhttp3.Request
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import reikai.data.novel.NovelStatusCode
@@ -26,6 +32,8 @@ import reikai.novel.source.buildOptions
 import reikai.novel.source.defaultFilterValues
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import com.dokar.quickjs.QuickJs as DokarQuickJs
 
 /**
@@ -44,8 +52,11 @@ class HeadlessJsIntegrationTest {
     // Stands in for the graph's app scope; only the hosts' idle sweeper runs on it.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // Reaches the live registry and novel sites, so it runs only when asked (`-e network true`): a site
+    // down or changed would otherwise fail a run that is checking the sandbox tests beside it.
     @Test
     fun lnPluginsRunInProductionHeadlessHost() = runBlocking {
+        assumeTrue(InstrumentationRegistry.getArguments().getString("network") == "true")
         val networkHelper = Injekt.get<NetworkHelper>()
         val client = networkHelper.client
         val host = LnPluginHost(scope, context, networkHelper, context.appGraph.preferenceStore)
@@ -96,7 +107,7 @@ class HeadlessJsIntegrationTest {
                     }
                 fetchOk++
 
-                val info = runCatching { host.loadPlugin(entry.id, source, entry.iconUrl, entry.lang) }
+                val info = runCatching { host.load(source, entry.iconUrl, entry.lang) }
                     .getOrElse {
                         val msg = "${entry.id}: ${it.message}"
                         loadFailures += msg
@@ -209,7 +220,7 @@ class HeadlessJsIntegrationTest {
                     }
                 fetchOk++
 
-                val info = runCatching { host.loadPlugin(entry.id, source, entry.iconUrl, entry.lang) }
+                val info = runCatching { host.load(source, entry.iconUrl, entry.lang) }
                     .getOrElse {
                         Log.i(TAG, "RESULT $tag LOAD_FAIL ${it.message?.take(160)}")
                         continue
@@ -319,6 +330,85 @@ class HeadlessJsIntegrationTest {
         }
     }
 
+    /** A reply's headers are the same Headers a plugin builds, so an empty value reads as empty, not missing. */
+    @Test
+    fun aRepliesHeadersAreTheRuntimesHeaders() = runBlocking {
+        val q = DokarQuickJs.create(Dispatchers.IO)
+        try {
+            q.function("__lnLog") { null }
+            q.function("__lnFetch") {
+                """{"status":200,"statusText":"","headers":{"x-token":""},"body":"","url":"","error":null}"""
+            }
+            q.evaluate<Any?>("(function(){globalThis.self=globalThis;globalThis.window=globalThis;})()")
+            LnPluginHost.RUNTIME_ASSETS.forEach { path ->
+                q.evaluate<Any?>(context.assets.open(path).bufferedReader().use { it.readText() })
+            }
+            q.evaluate<Any?>(
+                "fetch('https://example.org/').then(function (r) {" +
+                    " globalThis.__got = [r.headers instanceof Headers, String(r.headers.get('X-Token'))].join(','); });",
+            )
+            val got = withTimeout(5_000) {
+                var read: String? = null
+                while (read == null) {
+                    read = q.evaluate<String?>("globalThis.__got === undefined ? null : globalThis.__got")
+                    if (read == null) delay(10)
+                }
+                read
+            }
+            assertEquals("true,", got)
+        } finally {
+            q.close()
+        }
+    }
+
+    /**
+     * A typed-array body crosses the bridge as its bytes and asks for the reply as bytes, as WuxiaWorld's
+     * own gRPC-web frame does through fetchApi. JSON.stringify had turned it into {"0":0,...}. The fetch
+     * is a Kotlin stub that records what the runtime sends: no network.
+     */
+    @Test
+    fun aTypedArrayBodyGoesOutAsItsBytes() = runBlocking {
+        val q = DokarQuickJs.create(Dispatchers.IO)
+        try {
+            var sent = ""
+            q.function("__lnLog") { null }
+            q.function("__lnFetch") { args ->
+                sent = args[1] as String
+                """{"status":200,"statusText":"","headers":{},"body":"","url":"","error":null,"bodyBase64":"AJIB"}"""
+            }
+            q.evaluate<Any?>("(function(){globalThis.self=globalThis;globalThis.window=globalThis;})()")
+            LnPluginHost.RUNTIME_ASSETS.forEach { path ->
+                q.evaluate<Any?>(context.assets.open(path).bufferedReader().use { it.readText() })
+            }
+            q.evaluate<Any?>(
+                "fetch('https://example.org/rpc', { method: 'POST', body: new Uint8Array([0, 0x8a, 0xff]) })" +
+                    ".then(function (r) { return r.arrayBuffer(); })" +
+                    ".then(function (b) { globalThis.__got = Array.from(new Uint8Array(b)).join(','); });",
+            )
+            // The promise settles while evaluate pumps the job queue, so poll for it, bounded.
+            val got = withTimeout(5_000) {
+                var read: String? = null
+                while (read == null) {
+                    read = q.evaluate<String?>("globalThis.__got === undefined ? null : globalThis.__got")
+                    if (read == null) delay(10)
+                }
+                read
+            }
+            val opts = LnPluginHost.JSON.parseToJsonElement(sent).jsonObject
+            assertEquals(
+                listOf("AIr/", "true", "absent", "0,146,1"),
+                listOf(
+                    (opts["bodyBase64"] as JsonPrimitive).content,
+                    (opts["binary"] as JsonPrimitive).content,
+                    if (opts.containsKey("body")) "present" else "absent",
+                    got,
+                ),
+            )
+        } finally {
+            q.close()
+        }
+    }
+
     /**
      * The host's text codecs answer bad input as a browser does (WHATWG Encoding): a malformed UTF-8
      * sequence decodes to U+FFFD instead of throwing, which a fetched page's `text()` relies on, and a
@@ -372,6 +462,38 @@ class HeadlessJsIntegrationTest {
     }
 
     /**
+     * The query shim decodes a malformed escape as a browser does, leaving a stray `%` and reading bad
+     * UTF-8 bytes as U+FFFD, where decodeURIComponent threw and failed a plugin's whole page. Inline: no network.
+     */
+    @Test
+    fun queryShimDecodesMalformedEscapesLikeABrowser() = runBlocking {
+        val q = DokarQuickJs.create(Dispatchers.IO)
+        try {
+            q.function("__lnLog") { null }
+            q.evaluate<Any?>("(function(){globalThis.self=globalThis;globalThis.window=globalThis;})()")
+            LnPluginHost.RUNTIME_ASSETS.forEach { path ->
+                q.evaluate<Any?>(context.assets.open(path).bufferedReader().use { it.readText() })
+            }
+            val results = q.evaluate<String>(
+                """
+                (function () {
+                  var p = new URLSearchParams("k=%B0%A1&j=%E4%BD%A0");
+                  var k = p.get("k");
+                  return [
+                    new URL("https://a.org/s?q=100%").searchParams.get("q"),
+                    p.get("j"),
+                    k.charCodeAt(0).toString(16) + " " + k.charCodeAt(1).toString(16),
+                  ].join("|");
+                })()
+                """.trimIndent(),
+            )
+            assertEquals("100%|你|fffd fffd", results)
+        } finally {
+            q.close()
+        }
+    }
+
+    /**
      * A stored undefined reads back as undefined, as LNReader's Storage.get returns item.value
      * (refs/lnreader-main/src/plugins/helpers/storage.ts). JSON drops the undefined, so the envelope
      * carried only its timestamp and came back whole. Inline plugin: no network.
@@ -389,7 +511,7 @@ class HeadlessJsIntegrationTest {
               },
             };
         """.trimIndent()
-        host.loadPlugin("storage-undefined-test", plugin)
+        host.load(plugin)
 
         assertEquals("undefined", host.parseChapter("storage-undefined-test", "/c"))
     }
@@ -410,7 +532,7 @@ class HeadlessJsIntegrationTest {
               parseChapter: async function () { return String(this.auth); },
             };
         """.trimIndent()
-        host.loadPlugin("web-storage-test", plugin)
+        host.load(plugin)
         host.storeWebStorage("web-storage-test", WebStorageSnapshot(local = "{}", session = "{}"))
         host.parseChapter("web-storage-test", "/c")
 
@@ -419,14 +541,227 @@ class HeadlessJsIntegrationTest {
         assertEquals("signed-in", host.parseChapter("web-storage-test", "/c"))
     }
 
+    /** The same for a setting the settings sheet saves, which komga reads into its site while constructed. */
+    @Test
+    fun aSavedSettingReachesAPluginThatReadsItAtConstruction() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        val plugin = """
+            var storage = require('@libs/storage').storage;
+            module.exports.default = {
+              id: 'setting-construction-test', name: 'T', site: 'https://example.org', version: '1.0.0',
+              url: storage.get('url'),
+              parseChapter: async function () { return String(this.url); },
+            };
+        """.trimIndent()
+        host.load(plugin)
+        host.setSetting("setting-construction-test", "url", JsonPrimitive("https://old.example"))
+        host.parseChapter("setting-construction-test", "/c")
+
+        host.setSetting("setting-construction-test", "url", JsonPrimitive("https://new.example"))
+
+        assertEquals("https://new.example", host.parseChapter("setting-construction-test", "/c"))
+    }
+
+    /**
+     * LNReader's fetchViaWebview hands a plugin the page once the page's own script has written the text,
+     * which a site checking the visitor first needs. The site here writes it well after the default settle time.
+     */
+    @Test
+    fun aPageItsOwnScriptFillsReachesThePluginFilled() = runBlocking {
+        val site = LoopbackServer { _, _ ->
+            LoopbackServer.ok(
+                "<html><body><div id='text'></div><script>setTimeout(function(){" +
+                    "document.getElementById('text').innerHTML='<p>filled</p>';},1500);</script></body></html>",
+                "text/html",
+            )
+        }
+        val got = site.use { renderThroughPlugin(it.url(""), it.url("chapter"), "#text p") }
+
+        assertEquals("true:true", got)
+    }
+
+    /** The page waits on a selector that never fills: the plugin is told so, with no page. */
+    @Test
+    fun aPageThatNeverShowsItsTextIsNotOk() = runBlocking {
+        val site = LoopbackServer { _, _ -> LoopbackServer.ok("<html><body></body></html>", "text/html") }
+        val got = site.use { renderThroughPlugin(it.url(""), it.url("chapter"), "#text p", timeoutMs = 1_000) }
+
+        assertEquals("false:false", got)
+    }
+
+    /** Plugin code is untrusted, so a page off the site the plugin declared is refused before any WebView opens. */
+    @Test
+    fun aPageOffThePluginsSiteIsRefused() = runBlocking {
+        val asked = AtomicBoolean(false)
+        val other = LoopbackServer { _, _ ->
+            asked.set(true)
+            LoopbackServer.ok("<p>x</p>", "text/html")
+        }
+        val got = other.use { renderThroughPlugin("https://example.org", it.url("chapter"), null) }
+
+        assertEquals("refused:false", "${if ("not the plugin's site" in got) "refused" else got}:${asked.get()}")
+    }
+
+    /** A site that sends the page on to another site has that page refused: it is never loaded, and the call fails. */
+    @Test
+    fun aPageRedirectedOffThePluginsSiteIsNeverLoaded() = runBlocking {
+        val asked = AtomicBoolean(false)
+        val other = LoopbackServer { _, _ ->
+            asked.set(true)
+            LoopbackServer.ok("<p>elsewhere</p>", "text/html")
+        }
+        val site = LoopbackServer { _, _ ->
+            "HTTP/1.1 302 Found\r\nLocation: ${other.url("there")}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        val got = site.use { s ->
+            other.use { renderThroughPlugin(s.url(""), s.url("chapter"), null, timeoutMs = 2_000) }
+        }
+
+        assertEquals("rejected:false", "${rejectedOr(got)}:${asked.get()}")
+    }
+
+    /** With no selector to wait on, a site's error page is the site refusing, so the call fails as LNReader's does. */
+    @Test
+    fun anErrorPageFailsACallWithNoSelector() = runBlocking {
+        val site = LoopbackServer { _, _ -> status(403, "<html><body><p>denied</p></body></html>") }
+        val got = site.use { renderThroughPlugin(it.url(""), it.url("chapter"), null) }
+
+        assertEquals("fetchViaWebview: HTTP 403", got)
+    }
+
+    /** A visitor check can answer 403 and then fill the page itself, so with a selector the text decides. */
+    @Test
+    fun anErrorPageThatFillsItsTextReachesAPluginWaitingOnIt() = runBlocking {
+        val site = LoopbackServer { _, _ ->
+            status(
+                403,
+                "<html><body><div id='text'></div><script>setTimeout(function(){" +
+                    "document.getElementById('text').innerHTML='<p>filled</p>';},500);</script></body></html>",
+            )
+        }
+        val got = site.use { renderThroughPlugin(it.url(""), it.url("chapter"), "#text p") }
+
+        assertEquals("true:true", got)
+    }
+
+    /** A page the WebView cannot load at all fails the call rather than coming back as a page. */
+    @Test
+    fun aPageThatCannotLoadFailsTheCall() = runBlocking {
+        val closed = LoopbackServer { _, _ -> "" }
+        val site = closed.url("")
+        val page = closed.url("chapter")
+        closed.close()
+        val got = renderThroughPlugin(site, page, null, timeoutMs = 5_000)
+
+        assertEquals("rejected", rejectedOr(got))
+    }
+
+    /**
+     * With no selector, a page that never finishes loading runs out of time as an error, as LNReader's does. The
+     * blank page a WebView starts on is complete at once, so it must not pass for the page asked for.
+     */
+    @Test
+    fun aPageThatNeverFinishesLoadingTimesOut() = runBlocking {
+        val site = LoopbackServer { _, _ ->
+            Thread.sleep(10_000)
+            LoopbackServer.ok("<html><body><p>late</p></body></html>", "text/html")
+        }
+        val got = site.use { renderThroughPlugin(it.url(""), it.url("chapter"), null, timeoutMs = 1_000) }
+
+        assertEquals("fetchViaWebview: timed out waiting for page", got)
+    }
+
+    /** An empty selector is no selector, as LNReader reads it, so a site's error page still fails the call. */
+    @Test
+    fun anErrorPageFailsACallWithAnEmptySelector() = runBlocking {
+        val site = LoopbackServer { _, _ -> status(404, "<html><body><p>gone</p></body></html>") }
+        val got = site.use { renderThroughPlugin(it.url(""), it.url("chapter"), "") }
+
+        assertEquals("fetchViaWebview: HTTP 404", got)
+    }
+
+    /** Waiting on a selector does not turn a page sent to another site into the plugin's ok false. */
+    @Test
+    fun aPageRedirectedOffThePluginsSiteFailsACallWaitingOnText() = runBlocking {
+        val other = LoopbackServer { _, _ -> LoopbackServer.ok("<p>elsewhere</p>", "text/html") }
+        val site = LoopbackServer { _, _ ->
+            "HTTP/1.1 302 Found\r\nLocation: ${other.url("there")}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        }
+        val got = site.use { s ->
+            other.use { renderThroughPlugin(s.url(""), s.url("chapter"), "#text p", timeoutMs = 2_000) }
+        }
+
+        assertEquals("rejected", rejectedOr(got))
+    }
+
+    /** Only a loaded page whose text never showed is ok false; one that never loaded runs out of time as an error. */
+    @Test
+    fun aPageThatNeverFinishesLoadingTimesOutForACallWaitingOnText() = runBlocking {
+        val site = LoopbackServer { _, _ ->
+            Thread.sleep(10_000)
+            LoopbackServer.ok("<html><body><p>late</p></body></html>", "text/html")
+        }
+        val got = site.use { renderThroughPlugin(it.url(""), it.url("chapter"), "#text p", timeoutMs = 1_000) }
+
+        assertEquals("fetchViaWebview: timed out waiting for page", got)
+    }
+
+    /** A plugin that names a user agent has the site see it. */
+    @Test
+    fun aPluginsUserAgentReachesTheSite() = runBlocking {
+        val seen = AtomicReference<String?>()
+        val site = LoopbackServer { _, headers ->
+            seen.compareAndSet(null, headers.firstOrNull { it.startsWith("User-Agent:", ignoreCase = true) })
+            LoopbackServer.ok("<html><body><div id='text'><p>filled</p></div></body></html>", "text/html")
+        }
+        site.use { renderThroughPlugin(it.url(""), it.url("chapter"), null, userAgent = "ReikaiTestAgent/1") }
+
+        assertEquals("User-Agent: ReikaiTestAgent/1", seen.get())
+    }
+
+    private fun status(code: Int, body: String) =
+        "HTTP/1.1 $code Error\r\nContent-Type: text/html\r\nCache-Control: no-store\r\n" +
+            "Content-Length: ${body.toByteArray().size}\r\nConnection: close\r\n\r\n$body"
+
+    /** "rejected" for the call's own failure message, otherwise the answer as it came. */
+    private fun rejectedOr(got: String) = if (got.startsWith("fetchViaWebview: ")) "rejected" else got
+
+    /** Runs a plugin on [site] whose parseChapter renders [page]; answers "ok:hasFilledText", or the refusal message. */
+    private suspend fun renderThroughPlugin(
+        site: String,
+        page: String,
+        selector: String?,
+        timeoutMs: Int = 15_000,
+        userAgent: String? = null,
+    ): String {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        val plugin = """
+            var fetchViaWebview = require('@libs/fetch').fetchViaWebview;
+            module.exports.default = {
+              id: 'render-test', name: 'T', site: ${LnPluginHost.JSON.encodeToString(
+            String.serializer(),
+            site,
+        )}, version: '1.0.0',
+              parseChapter: async function (path) {
+                try {
+                  var r = await fetchViaWebview(path, { waitForSelector: ${selector?.let {
+            "'$it'"
+        } ?: "undefined"}, timeoutMs: $timeoutMs,
+                    userAgent: ${userAgent?.let { "'$it'" } ?: "undefined"} });
+                  return r.ok + ':' + (r.html.indexOf('"text"><p>filled</p>') >= 0);
+                } catch (e) { return String(e && e.message || e); }
+              },
+            };
+        """.trimIndent()
+        host.load(plugin)
+        return host.parseChapter("render-test", page)
+    }
+
     /** Plugin code runs in the runtime's global scope, so the id-taking storage bridge must not be on it. */
     @Test
     fun aPluginCannotReadAnotherPluginsStorage() = runBlocking {
         val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
-        host.loadPlugin(
-            "victim-test",
-            "module.exports.default = { id: 'victim-test', name: 'V', site: 'https://a.org', version: '1' };",
-        )
+        host.load("module.exports.default = { id: 'victim-test', name: 'V', site: 'https://a.org', version: '1' };")
         host.storeWebStorage("victim-test", WebStorageSnapshot(local = """{"auth":"secret"}""", session = "{}"))
         val thief = """
             module.exports.default = {
@@ -436,27 +771,143 @@ class HeadlessJsIntegrationTest {
               },
             };
         """.trimIndent()
-        host.loadPlugin("thief-test", thief)
+        host.load(thief)
 
         assertEquals("blocked", host.parseChapter("thief-test", "/c"))
+    }
+
+    /**
+     * An id is the prefix of its plugin's storage scope, so `a::b` would hold keys that plugin `a`'s
+     * scope also matches, and `tachiyomi:5` would take an APK source's id. Inline plugin: no network.
+     */
+    @Test
+    fun aPluginIdWithAColonIsRefused() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+
+        val read = runCatching { host.inspectPlugin("module.exports.default = { id: 'a::b', name: 'C' };") }
+
+        assertTrue(read.exceptionOrNull() is LnPluginException)
     }
 
     /** A reload that now declares another plugin's id would take over that plugin's engine and storage. */
     @Test
     fun aReloadDeclaringAnotherIdIsRefused() = runBlocking {
         val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
-        host.loadPlugin(
-            "owner-test",
+        host.load(
             "module.exports.default = { id: 'owner-test', name: 'O', site: 'https://a.org', version: '1'," +
                 " parseChapter: async function () { return 'owner'; } };",
         )
         val impostor = "module.exports.default = { id: 'owner-test', name: 'I', site: 'https://b.org', version: '1'," +
             " parseChapter: async function () { return 'impostor'; } };"
 
-        runCatching { host.loadPlugin("impostor-test", impostor, expectedId = "impostor-test") }
+        runCatching { host.load(impostor, expectedId = "impostor-test") }
 
         assertEquals("owner", host.parseChapter("owner-test", "/c"))
     }
+
+    /**
+     * Plugin code reaching the runtime's loader with a stub that declares another plugin's id is refused,
+     * and the engine's storage is its own plugin's whatever id the stub declares. Inline plugins: no network.
+     */
+    @Test
+    fun aPluginCannotLoadAStubUnderAnotherPluginsId() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        host.load("module.exports.default = { id: 'nested-victim', name: 'V', site: 'https://a.org', version: '1' };")
+        host.storeWebStorage("nested-victim", WebStorageSnapshot(local = """{"auth":"secret"}""", session = "{}"))
+        host.setSetting("nested-victim", "password", JsonPrimitive("hunter2"))
+        val stub = "var s = require('@libs/storage');" +
+            " globalThis.leak = JSON.stringify(s.localStorage.get()) + '|' + s.storage.get('password');" +
+            " s.storage.set('password', 'pwned');" +
+            " module.exports.default = { id: 'nested-victim', name: 'X' };"
+        val attacker = """
+            module.exports.default = {
+              id: 'nested-attacker', name: 'A', site: 'https://b.org', version: '1',
+              parseChapter: async function () {
+                try { globalThis.__lnLoadPlugin(${JsonPrimitive(stub)}); } catch (e) { return 'refused'; }
+                return String(globalThis.leak);
+              },
+            };
+        """.trimIndent()
+        host.load(attacker)
+
+        val read = host.parseChapter("nested-attacker", "/c")
+
+        val password = (host.getSetting("nested-victim", "password") as? JsonPrimitive)?.content
+        assertEquals(listOf("refused", "hunter2"), listOf(read, password))
+    }
+
+    /** A script read before the installer accepted its declared id sees no plugin's storage. */
+    @Test
+    fun aScriptReadForInstallSeesNoStorageOfTheIdItDeclares() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        host.setSetting("read-victim", "password", JsonPrimitive("hunter2"))
+        val impostor = "var s = require('@libs/storage');" +
+            " module.exports.default = { id: 'read-victim', name: String(s.storage.get('password')) };"
+
+        assertEquals("undefined", host.inspectPlugin(impostor).name)
+    }
+
+    /** The other half: an update of the plugin its URL is installed as reads that plugin's storage, as komga's site does. */
+    @Test
+    fun aScriptReadAsItsInstalledIdSeesItsStorage() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        host.setSetting("read-owner", "url", JsonPrimitive("https://self.hosted"))
+        val plugin = "var s = require('@libs/storage');" +
+            " module.exports.default = { id: 'read-owner', name: 'O', site: s.storage.get('url') };"
+
+        assertEquals("https://self.hosted", host.inspectPlugin(plugin, trustedId = "read-owner").site)
+    }
+
+    /** A reload declaring another id is refused before its code meets that id's storage or its own. */
+    @Test
+    fun aRefusedReloadWritesNoStorage() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        val impostor = "require('@libs/storage').storage.set('k', 'x');" +
+            " module.exports.default = { id: 'refused-other', name: 'I' };"
+
+        runCatching { host.inspectPlugin(impostor, expectedId = "refused-owner") }
+
+        val written = listOf(host.getSetting("refused-other", "k"), host.getSetting("refused-owner", "k"))
+        assertEquals(listOf(null, null), written)
+    }
+
+    /**
+     * A script that fails its id discovery, which reads nothing, and declares another plugin's id once
+     * loaded is refused by the check after the read, or it would take over that plugin's place.
+     */
+    @Test
+    fun aScriptWhoseDiscoveryFailedIsStillRefusedForAnotherId() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        val impostor = "globalThis.__runs = (globalThis.__runs || 0) + 1;" +
+            " if (globalThis.__runs === 1) throw new Error('first run');" +
+            " module.exports.default = { id: 'takeover-other', name: 'I' };"
+
+        val refused = runCatching { host.inspectPlugin(impostor, expectedId = "takeover-owner") }.exceptionOrNull()
+
+        assertTrue("$refused", refused?.message?.contains("now declares the id takeover-other") == true)
+    }
+
+    /**
+     * Each script is read in an engine of its own, so one cannot leave a hook behind for the next, as a
+     * wrapped loader in a shared engine read every later plugin's storage. Inline plugins: no network.
+     */
+    @Test
+    fun aScriptCannotLeaveCodeBehindForTheNextOneRead() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        host.inspectPlugin(
+            "globalThis.__lnLoadPlugin = function () { return { id: 'hijacked', name: 'H' }; };" +
+                " module.exports.default = { id: 'hook-first', name: 'F' };",
+        )
+
+        assertEquals("hook-second", host.inspectPlugin("module.exports.default = { id: 'hook-second', name: 'S' };").id)
+    }
+
+    private suspend fun LnPluginHost.load(
+        source: String,
+        iconUrl: String? = null,
+        lang: String? = null,
+        expectedId: String? = null,
+    ): LnPluginInfo = inspectPlugin(source, iconUrl, lang, expectedId).also { retainPlugin(it.id, source) }
 
     /** LNReader's opt-in to the browser's storage reaches the app, which keeps none for a plugin without it. */
     @Test
@@ -469,7 +920,7 @@ class HeadlessJsIntegrationTest {
             };
         """.trimIndent()
 
-        assertTrue(host.loadPlugin("web-storage-flag-test", plugin).webStorageUtilized)
+        assertTrue(host.load(plugin).webStorageUtilized)
     }
 
     /** The other half of the opt-in: a plugin that never asks is never handed the site's storage. */
@@ -482,7 +933,7 @@ class HeadlessJsIntegrationTest {
             };
         """.trimIndent()
 
-        assertFalse(host.loadPlugin("no-web-storage-test", plugin).webStorageUtilized)
+        assertFalse(host.load(plugin).webStorageUtilized)
     }
 
     /**
@@ -499,11 +950,38 @@ class HeadlessJsIntegrationTest {
               parseNovel: async function (path) { return { path: path, name: 'T', status: NovelStatus[path] }; },
             };
         """.trimIndent()
-        host.loadPlugin("status-test", plugin)
+        host.load(plugin)
 
         val codes = listOf("Inactive", "STUB").map { host.parseNovel("status-test", it).toNovel("status-test").status }
 
         assertEquals(listOf(NovelStatusCode.ON_HIATUS, NovelStatusCode.LICENSED).map(Int::toLong), codes)
+    }
+
+    /**
+     * `@libs/pluginError` answers as LNReader's (lnreader c14bd4f0): a 429 throws its rate-limit error, a
+     * search 404 passes, a challenge page is recognised. Without the module a plugin importing it fails.
+     */
+    @Test
+    fun pluginErrorHelpersAnswerAsLnreaders() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        val plugin = """
+            var E = require('@libs/pluginError');
+            module.exports.default = {
+              id: 'plugin-error-test', name: 'T', site: 'https://example.org', version: '1.0.0',
+              parseNovel: async function (path) {
+                var limited;
+                try { E.checkResponse({ ok: false, status: 429, url: 'https://example.org/c' }); } catch (e) {
+                  limited = E.isPluginError(e) && e.code === E.PluginError.RateLimited && e.message === e.code;
+                }
+                var search = E.checkResponse({ ok: false, status: 404 }, { search: true }).status === 404;
+                var challenge = E.isChallengeHtml('<title>Just a moment...</title>');
+                return { path: path, name: [limited, search, challenge].join(',') };
+              },
+            };
+        """.trimIndent()
+        host.load(plugin)
+
+        assertEquals("true,true,true", host.parseNovel("plugin-error-test", "p").name)
     }
 
     /**
@@ -522,13 +1000,43 @@ class HeadlessJsIntegrationTest {
               parseChapter: async function () { return 'ok'; },
             };
         """.trimIndent()
-        host.loadPlugin("replay-failure-test", plugin)
+        host.load(plugin)
         host.setSetting("replay-failure-test", "fail", JsonPrimitive(true))
         runCatching { host.parseChapter("replay-failure-test", "/c") }
 
         host.setSetting("replay-failure-test", "fail", null)
 
         assertEquals("ok", host.parseChapter("replay-failure-test", "/c"))
+    }
+
+    /**
+     * The same when the cause goes away on its own: a setting change rebuilds the engine anyway, so only a
+     * failure with no change behind it shows a half-built engine kept. Its first construction in its own
+     * engine throws; nothing else changes. Inline plugin: no network.
+     */
+    @Test
+    fun aPluginWhoseFirstConstructionFailedLoadsOnTheNextCall() = runBlocking {
+        val host = LnPluginHost(scope, context, Injekt.get<NetworkHelper>(), context.appGraph.preferenceStore)
+        // Seeded before the plugin has an engine, so no rebuild follows; the read that loads it sees no storage.
+        host.setSetting("first-construction-test", "failOnce", JsonPrimitive(true))
+        val plugin = """
+            var storage = require('@libs/storage').storage;
+            if (storage.get('failOnce')) {
+              storage.set('failOnce', undefined);
+              throw new Error('first construction failed');
+            }
+            module.exports.default = {
+              id: 'first-construction-test', name: 'T', site: 'https://example.org', version: '1.0.0',
+              parseChapter: async function () { return 'ok'; },
+            };
+        """.trimIndent()
+        host.load(plugin)
+        runCatching { host.parseChapter("first-construction-test", "/c") }
+
+        val second = runCatching { host.parseChapter("first-construction-test", "/c") }
+
+        host.setSetting("first-construction-test", "failOnce", null)
+        assertEquals("ok", second.getOrNull())
     }
 
     /**

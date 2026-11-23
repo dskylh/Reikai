@@ -2,7 +2,8 @@ package reikai.presentation.recents
 
 import android.content.Intent
 import androidx.compose.runtime.snapshots.Snapshot
-import cafe.adriel.voyager.core.screen.Screen
+import androidx.lifecycle.viewModelScope
+import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.manga.components.ChapterDownloadAction
 import eu.kanade.tachiyomi.data.download.model.Download
 import io.kotest.matchers.collections.shouldContainExactly
@@ -10,10 +11,12 @@ import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.unmockkStatic
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -23,12 +26,16 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
 import org.junit.jupiter.params.ParameterizedTest
@@ -44,8 +51,12 @@ import reikai.domain.source.ReikaiSourcePreferences
 import reikai.presentation.MainDispatcherExtension
 import reikai.presentation.browse.AddDecision
 import reikai.presentation.browse.AddFavoriteResult
+import reikai.presentation.browse.AddOutcome
+import reikai.presentation.browse.EntryAddDialog
 import reikai.presentation.browse.components.EntryDuplicateCardUi
 import reikai.presentation.browse.components.EntrySourceLabel
+import reikai.presentation.components.DownloadProgress
+import reikai.util.virtualDispatchers
 import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.core.common.preference.Preference
@@ -55,6 +66,7 @@ import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.updates.service.UpdatesPreferences
 import tachiyomi.i18n.MR
 import kotlin.coroutines.ContinuationInterceptor
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Instant
 
 /**
@@ -69,12 +81,23 @@ class RecentsEngineTest {
     private val sourcePreferences = ReikaiSourcePreferences(store)
     private val updatesPreferences = UpdatesPreferences(store)
     private val libraryPreferences = LibraryPreferences(store)
+    private val uiPreferences = UiPreferences(store)
 
     // Every engine is tracked: its stop timeouts and its off-main transforms otherwise outlive the test and
     // resume on a Main that has been reset, failing whichever test runs next.
     @JvmField
     @RegisterExtension
     val main = MainDispatcherExtension()
+
+    // The assembly runs on Default and the resolves on IO, which this puts on the test scheduler beside Main.
+    @BeforeEach
+    fun setUp() {
+        virtualDispatchers(UnconfinedTestDispatcher())
+    }
+
+    // Main stays set, so the extension can stop the engines on it before it resets Main.
+    @AfterEach
+    fun tearDown() = unmockkStatic(Dispatchers::class)
 
     private fun engine(
         providers: List<RecentsProvider>,
@@ -90,6 +113,8 @@ class RecentsEngineTest {
                 sourcePreferences = sourcePreferences,
                 updatesPreferences = updatesPreferences,
                 libraryPreferences = libraryPreferences,
+                uiPreferences = uiPreferences,
+                appScope = main.trackScope(),
             ),
         )
     }
@@ -112,6 +137,8 @@ class RecentsEngineTest {
             sourcePreferences = ReikaiSourcePreferences(emittingStore),
             updatesPreferences = emittingUpdatesPreferences,
             libraryPreferences = LibraryPreferences(emittingStore),
+            uiPreferences = UiPreferences(emittingStore),
+            appScope = main.trackScope(),
         ),
     )
 
@@ -396,37 +423,19 @@ class RecentsEngineTest {
         engine.firstAssembly().items.size shouldBe 2
     }
 
+    // The engine's one long-press wiring: a range across both types in the rendered order, then a drop
+    // on a selected row, which only rangeOrToggle answers both ways.
     @Test
-    fun `a range selection spans both content types in the rendered order`() {
+    fun `a long press ranges across both content types and drops a row already selected`() {
         val engine = engine(listOf(provider(ContentType.MANGA), provider(ContentType.NOVELS)))
         val ordered = listOf(ref(manga1, 1), ref(novel1, 2), ref(manga2, 3))
 
         engine.toggleSelection(ordered.first())
         engine.toggleRangeSelection(ordered.last(), ordered)
-
         engine.selection.value shouldContainExactlyInAnyOrder ordered
-    }
-
-    @Test
-    fun `a long press on an already-selected row drops it, as it does everywhere else`() {
-        val engine = engine(listOf(provider(ContentType.MANGA)))
-        val ordered = listOf(ref(manga1, 1), ref(manga2, 2))
-
-        engine.toggleSelection(ordered.first())
-        engine.toggleRangeSelection(ordered.last(), ordered)
-        engine.toggleRangeSelection(ordered.last(), ordered)
-
-        engine.selection.value shouldContainExactly listOf(ordered.first())
-    }
-
-    @Test
-    fun `a range with no anchor selects only the row that was pressed`() {
-        val engine = engine(listOf(provider(ContentType.MANGA)))
-        val ordered = listOf(ref(manga1, 1), ref(manga2, 2))
 
         engine.toggleRangeSelection(ordered.last(), ordered)
-
-        engine.selection.value shouldContainExactly listOf(ordered.last())
+        engine.selection.value shouldContainExactlyInAnyOrder ordered.dropLast(1)
     }
 
     @Test
@@ -668,26 +677,18 @@ class RecentsEngineTest {
         engine.selection.value shouldContainExactly listOf(selected)
     }
 
-    @Test
-    fun `flipping the chip drops a selection it may now hide`() {
-        val engine = engine(listOf(provider(ContentType.MANGA)))
-        engine.toggleSelection(ref(manga1, 1))
-
-        engine.setContentType(ContentType.NOVELS)
-
-        engine.selection.value shouldBe emptySet()
-    }
-
     /** The tab row fires again on the chip already shown, which is not a flip. */
     @Test
-    fun `re-selecting the chip shown keeps the selection`() {
+    fun `flipping the chip drops a selection it may now hide, re-selecting the chip shown keeps it`() {
         val engine = emittingEngine(provider(ContentType.MANGA), setOf(RecentsMode.UPDATES))
         engine.setContentType(ContentType.MANGA)
         engine.toggleSelection(ref(manga1, 1))
 
         engine.setContentType(ContentType.MANGA)
-
         engine.selection.value shouldBe setOf(ref(manga1, 1))
+
+        engine.setContentType(ContentType.NOVELS)
+        engine.selection.value shouldBe emptySet()
     }
 
     /**
@@ -748,7 +749,7 @@ class RecentsEngineTest {
         val manga = provider(ContentType.MANGA)
         val novel = provider(ContentType.NOVELS)
 
-        engine(listOf(manga, novel)).clearHistory()
+        engine(listOf(manga, novel)).clearActiveHistory()
 
         (manga.historyCleared to novel.historyCleared) shouldBe (true to true)
     }
@@ -758,7 +759,7 @@ class RecentsEngineTest {
         val manga = provider(ContentType.MANGA)
         val novel = provider(ContentType.NOVELS)
 
-        engine(listOf(manga, novel), chip = ContentType.MANGA).clearHistory()
+        engine(listOf(manga, novel), chip = ContentType.MANGA).clearActiveHistory()
 
         novel.historyCleared shouldBe false
     }
@@ -772,7 +773,7 @@ class RecentsEngineTest {
         val manga = provider(ContentType.MANGA, historyClears = false)
         val novel = provider(ContentType.NOVELS, historyClears = false)
 
-        engine(listOf(manga, novel)).clearHistory() shouldBe false
+        engine(listOf(manga, novel)).clearActiveHistory() shouldBe false
     }
 
     @Test
@@ -780,7 +781,49 @@ class RecentsEngineTest {
         val manga = provider(ContentType.MANGA, historyClears = false)
         val novel = provider(ContentType.NOVELS, historyClears = true)
 
-        engine(listOf(manga, novel)).clearHistory() shouldBe true
+        engine(listOf(manga, novel)).clearActiveHistory() shouldBe true
+    }
+
+    // The screen's scope is gone the moment the user leaves the tab, so the wipe and its announcement
+    // cannot ride on it.
+
+    @Test
+    fun `a clear confirmed as the screen closes still wipes and is announced`() = runTest {
+        val manga = provider(ContentType.MANGA)
+        val engine = engine(listOf(manga))
+        val announced = mutableListOf<Unit>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { engine.historyCleared.toList(announced) }
+
+        engine.viewModelScope.cancel()
+        engine.clearHistory()
+
+        (manga.historyCleared to announced.size) shouldBe (true to 1)
+    }
+
+    @Test
+    fun `a swipe's write outlives the screen it was made on`() {
+        val manga = provider(ContentType.MANGA)
+        val engine = engine(listOf(manga))
+        val chapter = ref(manga1, 1)
+
+        engine.viewModelScope.cancel()
+        engine.markRead(setOf(chapter), read = true)
+
+        manga.markedRead shouldBe setOf(chapter)
+    }
+
+    @Test
+    fun `a bulk verb resolved as the screen closes still acts`() {
+        val manga = provider(ContentType.MANGA)
+        val engine = engine(listOf(manga))
+        val row = item(manga1, at = 1, lane = RecentsLane.Updated(ref(manga1, 4)))
+
+        engine.viewModelScope.cancel()
+        engine.actOnSelection(listOf(row), RecentsMode.UPDATES, membership = emptyMap()) {
+            engine.markReadSelection(it, read = true)
+        }
+
+        manga.markedRead shouldBe setOf(ref(manga1, 4))
     }
 
     // The chapter-state filters over the lanes no query filters. The updated lane is filtered in SQL,
@@ -995,12 +1038,25 @@ class RecentsEngineTest {
         } shouldContainExactly RecentsMode.entries.map { it.can(RecentsCapability.CHAPTER_FILTER) }
     }
 
+    // The add flow, through the shared one every surface runs, one per content type.
+
+    private fun RecentsEngine.addFlow(type: ContentType) = addFlows.single { it.contentType == type }
+
+    private fun entryOf(type: ContentType): EntryId = if (type == ContentType.MANGA) manga1 else novel1
+
+    /** Every failure [flow] reports from here on, collected before the act so none is missed. */
+    private fun TestScope.failuresOf(flow: RecentsAddFlow): List<Unit> {
+        val failures = mutableListOf<Unit>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { flow.failures.toList(failures) }
+        return failures
+    }
+
     @Test
     fun `an add runs through the provider that owns the entry's content type`() = runTest {
         val manga = provider(ContentType.MANGA)
         val novel = provider(ContentType.NOVELS)
 
-        engine(listOf(manga, novel)).startAdd(manga1)
+        engine(listOf(manga, novel)).addToLibrary(manga1)
 
         (manga.addedEntry to novel.addedEntry) shouldBe (manga1 to null)
     }
@@ -1009,7 +1065,7 @@ class RecentsEngineTest {
     fun `an entry already in the library is not added again`() = runTest {
         val manga = provider(ContentType.MANGA, decision = AddDecision.Remove)
 
-        engine(listOf(manga)).startAdd(manga1)
+        engine(listOf(manga)).addToLibrary(manga1)
 
         manga.addedEntry shouldBe null
     }
@@ -1019,9 +1075,13 @@ class RecentsEngineTest {
     fun `an add confirmed past the duplicate prompt leaves an entry already in the library alone`(
         type: ContentType,
     ) = runTest {
-        val fake = provider(type, decision = AddDecision.Remove)
+        val entry = entryOf(type)
+        val fake = provider(type, decision = AddDecision.ConfirmDuplicate(duplicates(entry)))
+        val engine = engine(listOf(fake))
+        engine.addToLibrary(entry)
 
-        engine(listOf(fake)).runAdd(if (type == ContentType.MANGA) manga1 else novel1)
+        fake.decision = AddDecision.Remove
+        engine.addFlow(type).confirmAddDuplicate()
 
         fake.addedEntry shouldBe null
     }
@@ -1030,21 +1090,22 @@ class RecentsEngineTest {
     fun `an entry that has gone is not added`() = runTest {
         val manga = provider(ContentType.MANGA, decision = null)
 
-        engine(listOf(manga)).startAdd(manga1)
+        engine(listOf(manga)).addToLibrary(manga1)
 
         manga.addedEntry shouldBe null
     }
 
     @Test
     fun `a possible duplicate is asked about instead of added`() = runTest {
-        val duplicates = duplicates(novel1)
+        val duplicates = duplicates(manga2)
         val manga = provider(ContentType.MANGA, decision = AddDecision.ConfirmDuplicate(duplicates))
         val engine = engine(listOf(manga))
 
-        engine.startAdd(manga1)
+        engine.addToLibrary(manga1)
 
-        engine.dialog.value shouldBe RecentsDialog.Duplicate(manga1, duplicates)
-        manga.addedEntry shouldBe null
+        (engine.addFlow(ContentType.MANGA).dialog.value to manga.addedEntry) shouldBe (
+            EntryAddDialog.AddDuplicate(duplicates.duplicates.map { it.card }, emptyMap(), false) to null
+            )
     }
 
     @Test
@@ -1053,18 +1114,81 @@ class RecentsEngineTest {
         val manga = provider(ContentType.MANGA, addResult = AddFavoriteResult.NeedsCategoryChoice(selection))
         val engine = engine(listOf(manga))
 
-        engine.startAdd(manga1)
+        engine.addToLibrary(manga1)
 
-        engine.dialog.value shouldBe RecentsDialog.ChangeCategory(manga1, selection)
+        engine.addFlow(ContentType.MANGA).dialog.value shouldBe EntryAddDialog.ChangeCategory(selection)
     }
 
     @Test
     fun `adding to a group hands the provider the picked duplicates`() = runTest {
-        val manga = provider(ContentType.MANGA)
+        val manga = provider(ContentType.MANGA, decision = AddDecision.ConfirmDuplicate(duplicates(manga2)))
+        val engine = engine(listOf(manga))
+        engine.addToLibrary(manga1)
 
-        engine(listOf(manga)).groupAdd(manga1, listOf(manga2))
+        engine.addFlow(ContentType.MANGA).addToGroup(listOf(manga2.rawId))
 
         manga.groupedWith shouldBe listOf(manga2)
+    }
+
+    @Test
+    fun `the picker's confirm files through the provider that owns the entry`() = runTest {
+        val selection = listOf(CheckboxState.State.None(category))
+        val manga = provider(ContentType.MANGA)
+        val novel = provider(ContentType.NOVELS, addResult = AddFavoriteResult.NeedsCategoryChoice(selection))
+        val engine = engine(listOf(manga, novel))
+        engine.addToLibrary(novel1)
+
+        engine.addFlow(ContentType.NOVELS).confirmCategories(listOf(3L))
+
+        (manga.filedCategories to novel.filedCategories) shouldBe (null to (novel1 to listOf(3L)))
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("contentTypes")
+    fun `an add whose favorite write failed says so`(type: ContentType) = runTest {
+        val engine = engine(listOf(provider(type, addResult = AddFavoriteResult.Failed)))
+        val failures = failuresOf(engine.addFlow(type))
+
+        engine.addToLibrary(entryOf(type))
+
+        failures.size shouldBe 1
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("contentTypes")
+    fun `a picker confirm whose favorite write failed says so`(type: ContentType) = runTest {
+        val selection = listOf(CheckboxState.State.None(category))
+        val fake = provider(
+            type,
+            addResult = AddFavoriteResult.NeedsCategoryChoice(selection),
+            fileOutcome = AddOutcome.Failed,
+        )
+        val engine = engine(listOf(fake))
+        val failures = failuresOf(engine.addFlow(type))
+        engine.addToLibrary(entryOf(type))
+
+        engine.addFlow(type).confirmCategories(listOf(3L))
+
+        failures.size shouldBe 1
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("contentTypes")
+    fun `a group add that failed says so`(type: ContentType) = runTest {
+        val entry = entryOf(type)
+        val other = if (type == ContentType.MANGA) manga2 else EntryId.Novel(2)
+        val fake = provider(
+            type,
+            decision = AddDecision.ConfirmDuplicate(duplicates(other)),
+            groupOutcome = AddOutcome.Failed,
+        )
+        val engine = engine(listOf(fake))
+        val failures = failuresOf(engine.addFlow(type))
+        engine.addToLibrary(entry)
+
+        engine.addFlow(type).addToGroup(listOf(other.rawId))
+
+        failures.size shouldBe 1
     }
 
     @Test
@@ -1190,16 +1314,6 @@ class RecentsEngineTest {
         engine.open(row, RecentsMode.FEED, membership = emptyMap())
 
         (fake.openedChapter to engine.targets.value[row.lane]?.ref) shouldBe (ref(manga1, 6) to ref(manga1, 6))
-    }
-
-    @Test
-    fun `the picker's confirm files through the provider that owns the entry`() = runTest {
-        val manga = provider(ContentType.MANGA)
-        val novel = provider(ContentType.NOVELS)
-
-        engine(listOf(manga, novel)).fileAddCategories(novel1, listOf(3L))
-
-        (manga.filedCategories to novel.filedCategories) shouldBe (null to (novel1 to listOf(3L)))
     }
 
     // The continue-reading row: which rows pay for a target, and what the verbs then act on.
@@ -1498,6 +1612,25 @@ class RecentsEngineTest {
     }
 
     /**
+     * A library update writes the chapter table once per entry, and a clear per write sent every drawn
+     * row back to loading its whole chapter list.
+     */
+    @Test
+    fun `a target input change keeps the resolved rows until the changes go quiet`() = runTest {
+        val row = readRow(manga1, chapterId = 5)
+        val target = targetRow(ref(manga1, 2), readState(read = false))
+        val fake = resolvingProvider(row, target)
+        val engine = resolvedFeed(fake, row)
+        fake.awaitTargetInputWatcher()
+
+        fake.changeTargetInput()
+        advanceTimeBy(100.milliseconds)
+        runCurrent()
+
+        engine.targets.value shouldBe mapOf(row.lane to target)
+    }
+
+    /**
      * A resolve reads the chapters before the change that cleared the memo, and answers after it. Storing
      * that answer would pin a stale target, and nothing asks again: the row's target is still null to
      * the screen, which is the value its resolve was already launched on.
@@ -1655,6 +1788,8 @@ private fun provider(
     updating: Boolean = false,
     decision: AddDecision<RecentsDuplicates>? = AddDecision.Add,
     addResult: AddFavoriteResult = AddFavoriteResult.Added,
+    fileOutcome: AddOutcome = AddOutcome.Added,
+    groupOutcome: AddOutcome = AddOutcome.Added,
     latestRead: RecentsItem? = null,
     historyClears: Boolean = true,
     states: Map<EntryId, RecentsChapterState> = emptyMap(),
@@ -1676,6 +1811,8 @@ private fun provider(
     updating,
     decision,
     addResult,
+    fileOutcome,
+    groupOutcome,
     latestRead,
     historyClears,
     states,
@@ -1696,7 +1833,7 @@ internal fun targetRow(ref: ChapterRef, state: RecentsChapterState, downloaded: 
         state = state,
         download = RecentsDownloadUi(
             state = { if (downloaded) Download.State.DOWNLOADED else Download.State.NOT_DOWNLOADED },
-            progress = RecentsDownloadProgress.Unsupported,
+            progress = DownloadProgress.Unsupported,
         ),
     )
 
@@ -1714,8 +1851,11 @@ private class FakeRecentsProvider(
     private val titles: Map<EntryId, String>,
     private val refreshStarts: Boolean,
     updating: Boolean,
-    private val decision: AddDecision<RecentsDuplicates>?,
+    /** Settable, so a test can have the entry reach the library while the duplicate prompt is open. */
+    var decision: AddDecision<RecentsDuplicates>?,
     private val addResult: AddFavoriteResult,
+    private val fileOutcome: AddOutcome,
+    private val groupOutcome: AddOutcome,
     private val latestRead: RecentsItem?,
     private val historyClears: Boolean,
     private val states: Map<EntryId, RecentsChapterState>,
@@ -1816,7 +1956,7 @@ private class FakeRecentsProvider(
 
     override fun downloadUi(item: RecentsItem): RecentsDownloadUi = RecentsDownloadUi(
         state = { if (item.entryId in downloadedNow) Download.State.DOWNLOADED else Download.State.NOT_DOWNLOADED },
-        progress = RecentsDownloadProgress.Unsupported,
+        progress = DownloadProgress.Unsupported,
     )
 
     // The same answer [targetRow] gives, since both adapters resolve the two through one lane rule; a
@@ -1893,13 +2033,14 @@ private class FakeRecentsProvider(
         return addResult
     }
 
-    override suspend fun applyAddCategories(entry: EntryId, categoryIds: List<Long>) {
+    override suspend fun applyAddCategories(entry: EntryId, categoryIds: List<Long>): AddOutcome {
         filedCategories = entry to categoryIds
+        return fileOutcome
     }
 
-    override suspend fun addToGroup(entry: EntryId, duplicates: List<EntryId>): AddFavoriteResult {
+    override suspend fun addToGroup(entry: EntryId, duplicates: List<EntryId>): AddOutcome {
         groupedWith = duplicates
-        return addResult
+        return groupOutcome
     }
 
     override suspend fun clearHistory(): Boolean {
@@ -1911,6 +2052,4 @@ private class FakeRecentsProvider(
         refreshed = true
         return refreshStarts
     }
-
-    override suspend fun detailsScreen(entry: EntryId): Screen? = null
 }

@@ -1,12 +1,14 @@
 package reikai.domain.entry
 
 import reikai.domain.library.updateerror.LibraryUpdateError
+import reikai.domain.novel.model.CustomNovelInfo
 import reikai.domain.novel.model.NovelHistoryWithRelations
 import reikai.domain.novel.model.NovelUpdateWithRelations
 import reikai.domain.novel.updateerror.NovelUpdateError
 import reikai.domain.recents.RecentlyAddedManga
 import reikai.domain.recents.RecentlyAddedNovel
 import tachiyomi.domain.history.model.HistoryWithRelations
+import tachiyomi.domain.manga.model.CustomMangaInfo
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.updates.model.UpdatesWithRelations
 
@@ -23,11 +25,30 @@ interface EntryCustomInfo {
     val status: Long?
     val thumbnailUrl: String?
 
+    /** Other names the series goes by, searched and shown under the title; empty when none. */
+    val altTitles: List<String>
+
     /** No overrides set: saving this clears the row (Reset to source). */
     val isEmpty: Boolean
         get() = title == null && author == null && artist == null && description == null &&
-            genre == null && status == null && thumbnailUrl == null
+            genre == null && status == null && thumbnailUrl == null && altTitles.isEmpty()
 }
+
+/**
+ * The alternative titles a restore writes over [device]'s row. A backup made before they were backed up,
+ * or by another app, carries none and cannot say so, so an empty list keeps the device's own; every other
+ * field is replaced as before.
+ */
+fun restoredAltTitles(backup: EntryCustomInfo, device: EntryCustomInfo?): List<String> =
+    backup.altTitles.ifEmpty { device?.altTitles.orEmpty() }
+
+/** These overrides as [mangaId]'s stored row. */
+fun EntryCustomInfo.toCustomMangaInfo(mangaId: Long) =
+    CustomMangaInfo(mangaId, title, author, artist, description, genre, status, thumbnailUrl, altTitles)
+
+/** These overrides as [novelId]'s stored row. */
+fun EntryCustomInfo.toCustomNovelInfo(novelId: Long) =
+    CustomNovelInfo(novelId, title, author, artist, description, genre, status, thumbnailUrl, altTitles)
 
 /**
  * Each set field wins, the rest pass through. Novels reach this too, since the library renders a novel

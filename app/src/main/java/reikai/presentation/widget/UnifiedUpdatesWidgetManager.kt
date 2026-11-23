@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import logcat.LogPriority
+import reikai.domain.library.ContentType
+import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.novel.NovelRepository
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.updates.interactor.GetUpdates
@@ -37,6 +39,7 @@ class UnifiedUpdatesWidgetManager(
     private val getUpdates: GetUpdates,
     private val novelRepository: NovelRepository,
     private val securityPreferences: SecurityPreferences,
+    private val reikaiLibraryPreferences: ReikaiLibraryPreferences,
 ) {
 
     // Seeded at process start, then kept by the receiver's enabled and disabled broadcasts.
@@ -53,7 +56,12 @@ class UnifiedUpdatesWidgetManager(
         placed.value = AppWidgetManager.getInstance(context)?.getAppWidgetIds(receiver)?.isNotEmpty() == true
         unifiedWidgetRefreshes(
             placed = placed,
-            updates = unifiedWidgetUpdates(getUpdates, novelRepository),
+            updates = unifiedWidgetUpdates(
+                getUpdates,
+                novelRepository,
+                reikaiLibraryPreferences.shownContent.changes(),
+                reikaiLibraryPreferences.seriesMergingEnabled.changes(),
+            ),
             locked = securityPreferences.useAuthenticator.changes(),
         )
             .onEach {
@@ -68,18 +76,27 @@ class UnifiedUpdatesWidgetManager(
     }
 }
 
+/** What a widget's face depends on, so a change to anything here redraws it. */
+internal data class UnifiedWidgetDrawn(
+    val mangaChapterIds: Set<Long>,
+    val novelChapterIds: Set<Long>,
+    val shown: ContentType,
+    val locked: Boolean,
+)
+
 /** What the driver redraws on: nothing while no combined widget is placed, so the queries stay closed. */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun unifiedWidgetRefreshes(
     placed: Flow<Boolean>,
     updates: Flow<UnifiedWidgetUpdates>,
     locked: Flow<Boolean>,
-): Flow<Triple<Set<Long>, Set<Long>, Boolean>> = placed.flatMapLatest { isPlaced ->
+): Flow<UnifiedWidgetDrawn> = placed.flatMapLatest { isPlaced ->
     if (!isPlaced) return@flatMapLatest emptyFlow()
     combine(updates, locked) { updates, locked ->
-        Triple(
+        UnifiedWidgetDrawn(
             updates.manga.map { it.chapterId }.toSet(),
             updates.novel.map { it.chapterId }.toSet(),
+            updates.shown,
             locked,
         )
     }

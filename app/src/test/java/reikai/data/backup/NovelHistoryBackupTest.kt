@@ -11,10 +11,18 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import reikai.data.novel.NovelChapterRepositoryImpl
 import reikai.data.novel.NovelHistoryRepositoryImpl
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
+import reikai.domain.library.FakeLibraryHiddenRepository
+import reikai.domain.library.FakeLibraryManualOrderRepository
 import reikai.domain.novel.NovelChapterRepository
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.novel.model.Novel
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
 import tachiyomi.data.History
@@ -77,6 +85,10 @@ class NovelHistoryBackupTest {
     }
 
     private fun creator(chapters: NovelChapterRepository = NovelChapterRepositoryImpl(database)) = NovelBackupCreator(
+
+        libraryHides = FakeLibraryHiddenRepository(),
+        tombstones = NoChapterTombstoneRepository,
+        manualOrder = FakeLibraryManualOrderRepository(),
         novelRepository = mockk(),
         novelChapterRepository = chapters,
         categoryRepository = mockk(),
@@ -86,6 +98,11 @@ class NovelHistoryBackupTest {
         novelHistoryRepository = NovelHistoryRepositoryImpl(database),
         novelSourceManager = mockk(),
         chapterNumberOverrides = NoChapterNumberOverrides,
+        copyMarks = InMemoryChapterCopyMarks(),
+        localVolumes = NoLocalVolumes,
+        volumePicks = NoVolumePicks,
         readingLog = NoReadingLog,
+        readingPace = NoReadingPace,
+        localNovelLanguages = NoLocalNovelLanguages,
     )
 }

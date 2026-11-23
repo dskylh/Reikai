@@ -136,20 +136,6 @@ fun reconcileCardOrder(incomingKeys: List<String>, localKeys: List<String>, pend
 }
 
 /**
- * This list's own items in [keys]' order, then any item [keys] does not name, in its current order. A
- * key naming nothing here is skipped, so an order computed from an older copy of a list can be applied
- * to the live one without bringing back what left it or dropping what joined it.
- */
-fun <T, K> List<T>.inOrderOf(keys: List<K>, keyOf: (T) -> K): List<T> {
-    val byKey = associateBy(keyOf)
-    val seen = HashSet<K>()
-    return buildList {
-        keys.forEach { key -> byKey[key]?.let { if (seen.add(key)) add(it) } }
-        this@inOrderOf.forEach { if (seen.add(keyOf(it))) add(it) }
-    }
-}
-
-/**
  * The saved order with every series that has left the queue taken out, so one queued again later goes
  * last instead of taking back its old position and moving a card nobody dragged. A key of a type not in
  * [restored] keeps its slot: that downloader has not loaded its saved queue yet, so its card may still come.
@@ -166,28 +152,36 @@ fun prunedOrder(
 }
 
 /**
- * The new series order of each content type whose own order a list reorder moved. A type whose
- * series kept their relative order is left out: Mihon's reorder restarts the chapters it is
- * downloading, so moving a novel past a manga must not touch the manga downloader.
+ * Each content type's series order in a list reorder. Every type is named, and each provider leaves its
+ * downloader alone when the live queue already holds that order ([withSeriesInOrderIfMoved]); the list's
+ * cards cannot decide that, since they lag a reorder still waiting on the downloader's lock.
  */
-fun seriesOrderChanges(
-    cards: List<EntryDownloadCardUi>,
-    cardKeysInOrder: List<String>,
-): Map<ContentType, List<Long>> {
+fun seriesOrders(cards: List<EntryDownloadCardUi>, cardKeysInOrder: List<String>): Map<ContentType, List<Long>> {
     val byKey = cards.associateBy { it.cardKey }
-    val ordered = cardKeysInOrder.mapNotNull { byKey[it] }
-    return ordered.groupBy({ it.contentType }, { it.seriesId })
-        .filter { (type, wanted) -> wanted != cards.filter { it.contentType == type }.map { it.seriesId } }
+    return cardKeysInOrder.mapNotNull { byKey[it] }.groupBy({ it.contentType }, { it.seriesId })
+}
+
+/**
+ * The queue with its series in [seriesIdsInOrder], or null when it already holds that order: Mihon's
+ * reorder restarts the chapters it is downloading, so moving a novel past a manga must not touch it.
+ * Compared by series order, not by chapter: a queue with one series split around another (a later
+ * download appended) is never equal to its regrouped form, so a drag elsewhere would restart it.
+ */
+fun <T> List<T>.withSeriesInOrderIfMoved(seriesIdsInOrder: List<Long>, seriesOf: (T) -> Long): List<T>? {
+    val reordered = withSeriesInOrder(seriesIdsInOrder, seriesOf)
+    return reordered.takeIf { it.map(seriesOf).distinct() != map(seriesOf).distinct() }
 }
 
 /**
  * The queue with one chapter moved behind the rest of its series, the chapter sheet's Move to bottom.
- * The series keeps its place: its card, not the sheet, orders it against other series.
+ * The series keeps its place: its card, not the sheet, orders it against other series, so a series'
+ * only queued chapter stays where it is.
  */
 fun <T> List<T>.withChapterLastInSeries(chapterId: Long, chapterIdOf: (T) -> Long, seriesOf: (T) -> Long): List<T> {
     val moved = find { chapterIdOf(it) == chapterId } ?: return this
     val rest = this - moved
     val lastOfSeries = rest.indexOfLast { seriesOf(it) == seriesOf(moved) }
+    if (lastOfSeries < 0) return this
     return rest.toMutableList().apply { add(lastOfSeries + 1, moved) }
 }
 
@@ -212,4 +206,18 @@ fun <T, K : Comparable<K>> List<T>.sortedWithinSeries(
 ): List<T> = groupBy(seriesOf).values.flatMap { group ->
     val sorted = group.sortedBy(keyOf)
     if (descending) sorted.reversed() else sorted
+}
+
+/**
+ * The sorted queue, or null when every series already holds its chapters in that order. Compared per
+ * series for the reason [withSeriesInOrderIfMoved] gives: a split queue is never equal to its regrouped
+ * form, and the sort sheet reaches every provider, so a novel-only sort must not restart Mihon's downloader.
+ */
+fun <T, K : Comparable<K>> List<T>.sortedWithinSeriesIfChanged(
+    seriesOf: (T) -> Long,
+    keyOf: (T) -> K?,
+    descending: Boolean,
+): List<T>? {
+    val sorted = sortedWithinSeries(seriesOf, keyOf, descending)
+    return sorted.takeIf { it.groupBy(seriesOf) != groupBy(seriesOf) }
 }

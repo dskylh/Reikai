@@ -26,9 +26,31 @@
 
   var CHAPTER_SELECTOR = '.rk-chapter';
   var CHAPTER_ID_ATTR = 'data-rk-chapter-id';
+
+  function chapterById(id) {
+    return document.querySelector(CHAPTER_SELECTOR + '[' + CHAPTER_ID_ATTR + '="' + id + '"]');
+  }
+
   // Text in a chapter that is not the chapter's words: ruby readings, code, and a failed picture's box.
   // Read aloud and the top line both skip it, so a line is counted as the native renderer counts it.
   var UNCOUNTED_SELECTOR = 'rt, rp, script, style, .rk-failure';
+  // A character neither the top line nor read aloud counts: a space, or the object replacement a picture
+  // leaves. ReadAloudText.isCounted, the native renderer's one rule for both.
+  var UNCOUNTED_CHARS = /[\s\uFFFC]/g;
+
+  function countedLength(text) {
+    return text.replace(UNCOUNTED_CHARS, '').length;
+  }
+
+  /* The text nodes in root whose characters count, in document order. */
+  function countedTextWalker(root) {
+    return document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (node) {
+        var parent = node.parentElement;
+        return parent && parent.closest(UNCOUNTED_SELECTOR) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+  }
   // A chapter swipe's shortest travel, CHAPTER_SWIPE_MIN_DP in ChapterSwipe.kt. The document is
   // initial-scale=1, so a CSS pixel here is the dp the native renderer measures it in.
   var SWIPE_MIN_PX = __SWIPE_MIN_PX__;
@@ -38,6 +60,16 @@
   var PAGE_SWIPE_MIN_PX = __PAGE_SWIPE_MIN_PX__;
   // How far a touch travels before it is a drag, the system touch slop the native renderer reads, in dp.
   var TOUCH_SLOP_PX = __TOUCH_SLOP_PX__;
+  // How a picture opens full screen (NovelPictureGesture.kt): a long press always, a tap only while scrolling.
+  var LONG_PRESS_MS = __LONG_PRESS_MS__;
+  var PICTURE_OPENS_ON_TAP = __PICTURE_OPENS_ON_TAP__;
+  // How far a picture may shrink to fit one page, MIN_PAGE_FIT_SCALE in PictureBox.kt.
+  var MIN_PAGE_FIT_SCALE = __MIN_PAGE_FIT_SCALE__;
+
+  /* shrinksToPage (PictureBox.kt): drawn a page tall only when that shrinks it to no less than MIN_PAGE_FIT_SCALE. */
+  function shrinksToPage(height, pageHeight) {
+    return height > pageHeight && pageHeight >= height * MIN_PAGE_FIT_SCALE;
+  }
   // The live report's interval: fine enough for the rail, far coarser than a scroll frame.
   var REPORT_INTERVAL_MS = 50;
   // A late reflow (images, fonts) fires scrollend against a still-settling height, so a persist
@@ -81,13 +113,11 @@
 
   // Paged reading, which this page measures and moves for while the host decides the pages. See paged.
   var PAGED = __PAGED__;
+  // Two pages side by side: the window is two pages tall, the second drawn beside the first by the host.
+  var SPREAD = __SPREAD__;
 
-  var settings = {
-    swipe: __SWIPE__,
-    bionic: __BIONIC__,
-    // { highlight, style, color, textColor, keepInView, scrollToTop }, from NovelWebDocument.readAloudJson.
-    readAloud: __READ_ALOUD__,
-  };
+  // { swipe, bionic, readAloud }, NovelWebDocument.behaviourJson: the same object every settings push sends.
+  var settings = __SETTINGS__;
 
   var boundaries = [];
   var lastChapterSeen = null;
@@ -116,7 +146,12 @@
 
   // region geometry
 
+  /* One page's screen: in a spread the window is two of them stacked, which the host shows side by side. */
   function viewportHeight() {
+    return windowHeight() / (SPREAD ? 2 : 1);
+  }
+
+  function windowHeight() {
     return window.innerHeight || document.documentElement.clientHeight;
   }
 
@@ -142,7 +177,8 @@
    */
   function rebuildBoundaries() {
     // First, so the ends and fits below are measured where the reader is rather than where the change
-    // left the page for a moment.
+    // left the page for a moment. A seam refitted to the page is such a change.
+    paged.fitSeams();
     place.sync();
     var chapters = document.querySelectorAll(CHAPTER_SELECTOR);
     var top = scrollTop();
@@ -201,7 +237,9 @@
    * they land it measures short and would be read the moment it opened.
    */
   function reportEnds() {
-    if (!ready) return;
+    // Paged, the host reports a chapter's end by the page it shows (NovelPaging.showsEnd): the column holds more on
+    // screen under the page masks, which the reader cannot see.
+    if (!ready || PAGED) return;
     var bottom = scrollTop() + viewportHeight() + EDGE_TOLERANCE;
     boundaries.forEach(function (b) {
       if (endsSeen[b.id] || b.start + b.height > bottom || !imagesLanded(b.el)) return;
@@ -266,6 +304,8 @@
       if (top >= boundaries[i].claimFrom - EDGE_TOLERANCE) index = i; else break;
     }
     var chapter = boundaries[index];
+    // A seam's page never moves the reader, as Mihon's transition page: it names no place at all.
+    if (paged.seamShown(chapter.id)) return { id: null, progress: 0, seam: true };
     var paging = paged.shownIn(chapter.id);
     if (paging !== null) return { id: chapter.id, progress: paging };
     var progress = 0;
@@ -342,7 +382,7 @@
       // Height leaving can end the document above where the screen did, and the browser pulls the page
       // back to its bottom. That is not the reader, who cannot scroll up onto the bottom edge; counted
       // as theirs, it moved them up a second time.
-      var maxTop = document.documentElement.scrollHeight - viewportHeight();
+      var maxTop = document.documentElement.scrollHeight - windowHeight();
       if (scrolled < 0 && scrollTop() >= maxTop - 1) scrolled = 0;
       var shift = top - (held.y - scrolled);
       if (Math.abs(shift) <= 0.5) return false;
@@ -373,6 +413,9 @@
     }
 
     return {
+      /* The line held now and where it sits on screen, null while it has left the document. */
+      line: function () { return held ? { node: held.node, offset: held.offset } : null; },
+      topOf: topOf,
       /* Puts the held line back, then holds the line now at the top, saying whether the page moved. Safe
          at any point: nothing moved reads as a shift of zero. */
       sync: function () {
@@ -400,10 +443,9 @@
   /*
    * The line at the top of the screen, as the characters of its chapter before it that read-aloud keeps,
    * less spaces: the native renderer's shownCharPrefix, so a rebuilt page lands on the line the reader had
-   * whichever renderer rebuilds it. Sent when it changes, -1 while no chapter text is at the top.
+   * whichever renderer rebuilds it. Sent when it changes, -1 while no chapter is at the top.
    */
   var topLine = (function () {
-    var UNCOUNTED = /[\s\uFFFC]/g;
     // Per chapter id, a Map of each counted text node to the characters before it, dropped on any DOM change.
     var cache = {};
     var sent = null;
@@ -411,24 +453,15 @@
     // stopped on. A chapter joining below lands it again, unless the reader has moved off that line.
     var shortSeek = null;
 
-    function count(text) {
-      return text.replace(UNCOUNTED, '').length;
-    }
-
     function countsOf(chapter) {
       var id = chapter.getAttribute(CHAPTER_ID_ATTR);
       if (!cache[id]) {
         var before = new Map();
         var total = 0;
-        var walker = document.createTreeWalker(chapter, NodeFilter.SHOW_TEXT, {
-          acceptNode: function (node) {
-            var parent = node.parentElement;
-            return parent && parent.closest(UNCOUNTED_SELECTOR) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
-          },
-        });
+        var walker = countedTextWalker(chapter);
         while (walker.nextNode()) {
           before.set(walker.currentNode, total);
-          total += count(walker.currentNode.nodeValue);
+          total += countedLength(walker.currentNode.nodeValue);
         }
         cache[id] = before;
       }
@@ -438,14 +471,54 @@
     function measure(id) {
       // The screen's own top rather than below the inset, as the native renderer measures: the inset reaches a
       // rebuilt page after it lands, and measured below it the next report named the line under the landed one.
-      // Paged, the page's top, whose first line the reader is on.
+      // Paged, the line the page holds, which a rebuild lands on again. The page's own first line sits above
+      // it after a reflow, and reporting that walked the reader back a page on every rotation.
+      var line = paged.line();
+      if (line && line.node.nodeType === Node.TEXT_NODE) {
+        var holder = line.node.parentElement && line.node.parentElement.closest(CHAPTER_SELECTOR);
+        var counted = holder && holder.getAttribute(CHAPTER_ID_ATTR) === id ? countsOf(holder).get(line.node) : undefined;
+        if (counted !== undefined) return counted + countedLength(line.node.nodeValue.slice(0, line.offset));
+      }
       var caret = document.caretRangeFromPoint(0, Math.min(readingTop() + 1, viewportHeight() - 1));
       var node = caret && caret.startContainer;
-      if (!node || node.nodeType !== Node.TEXT_NODE) return -1;
-      var chapter = node.parentElement && node.parentElement.closest(CHAPTER_SELECTOR);
+      if (!node) return -1;
+      var text = node.nodeType === Node.TEXT_NODE;
+      var element = text ? node.parentElement : node;
+      var chapter = element && element.closest(CHAPTER_SELECTOR);
       if (!chapter || chapter.getAttribute(CHAPTER_ID_ATTR) !== id) return -1;
-      var before = countsOf(chapter).get(node);
-      return before === undefined ? -1 : before + count(node.nodeValue.slice(0, caret.startOffset));
+      var counts = countsOf(chapter);
+      if (text) {
+        var before = counts.get(node);
+        if (before !== undefined) return before + countedLength(node.nodeValue.slice(0, caret.startOffset));
+      }
+      // A picture at the top, or text the count skips (a failed picture's box): the line where the counted text
+      // resumes below it, as the native renderer counts the line of the chunk that holds the picture rather
+      // than reporting none and landing a rebuild by percent. The caret's own child counts when it is that text.
+      var after = text ? node : node.childNodes[caret.startOffset];
+      if (after && counts.has(after)) return counts.get(after);
+      var walker = document.createTreeWalker(chapter, NodeFilter.SHOW_TEXT);
+      // Past an element's end, the walk starts below everything in it, so no text above the caret is named.
+      walker.currentNode = after || lastDescendant(node);
+      while (walker.nextNode()) {
+        if (counts.has(walker.currentNode)) return counts.get(walker.currentNode);
+      }
+      // Below the chapter's last counted text, as on a closing picture: the line after all of it.
+      var total = 0;
+      counts.forEach(function (before, counted) { total = before + countedLength(counted.nodeValue); });
+      return total;
+    }
+
+    /* The chapter's first element that takes up room, null when its text comes first. */
+    function firstShown(chapter) {
+      for (var el = chapter.firstElementChild; el; el = el.nextElementSibling) {
+        if (el.getBoundingClientRect().height > 0) return el;
+      }
+      return null;
+    }
+
+    function lastDescendant(node) {
+      while (node.lastChild) node = node.lastChild;
+      return node;
     }
 
     return {
@@ -462,10 +535,10 @@
         shortSeek = null;
         var found = null;
         countsOf(chapter).forEach(function (before, node) {
-          if (found || line >= before + count(node.nodeValue)) return;
+          if (found || line >= before + countedLength(node.nodeValue)) return;
           var left = line - before;
           for (var i = 0; i < node.nodeValue.length; i++) {
-            if (count(node.nodeValue[i]) === 0) continue;
+            if (countedLength(node.nodeValue[i]) === 0) continue;
             if (left === 0) {
               found = { node: node, offset: i };
               return;
@@ -479,11 +552,16 @@
         range.setEnd(found.node, found.offset + 1);
         var rect = range.getClientRects()[0];
         if (!rect) return false;
-        window.scrollTo({ top: Math.round(scrollTop() + rect.top - readingTop()), behavior: 'instant' });
+        // Line 0 is the chapter's start, where an opening picture sits above the first counted character.
+        var start = line === 0 ? firstShown(chapter) : null;
+        var top = start ? start.getBoundingClientRect().top : rect.top;
+        paged.release();
+        window.scrollTo({ top: Math.round(scrollTop() + top - readingTop()), behavior: 'instant' });
         place.sync();
+        paged.hold(start || found.node, start ? 0 : found.offset);
         var id = chapter.getAttribute(CHAPTER_ID_ATTR);
         lastChapterSeen = id;
-        var landed = range.getClientRects()[0];
+        var landed = start ? start.getBoundingClientRect() : range.getClientRects()[0];
         if (landed && landed.top > readingTop() + EDGE_TOLERANCE) {
           shortSeek = { chapter: chapter, line: line, at: measure(id) };
         }
@@ -521,15 +599,15 @@
   var paged = (function () {
     // { id, scrollY, height, fraction } of the page last shown, null before one has been.
     var shown = null;
+    // The line the reader's page started on. A reflow recuts the pages, and the page shown after one starts
+    // above this line, so holding that start instead walks the reader back a page on every reflow.
+    var pageLine = null;
     var notifyPending = false;
     var maskTop = null;
     var maskBottom = null;
+    var maskBetween = null;
     // Where measure() reads a text node's line height from, per element, which costs a style lookup each.
     var lineHeights = null;
-
-    function chapterEl(id) {
-      return document.querySelector(CHAPTER_SELECTOR + '[' + CHAPTER_ID_ATTR + '="' + id + '"]');
-    }
 
     function margins() {
       var el = document.querySelector(CHAPTER_SELECTOR);
@@ -586,9 +664,44 @@
       return lineHeights.get(element);
     }
 
+    /*
+     * Every seam and the end marker fit one page whole, as Mihon's transition page fits its screen and the text
+     * renderer's marker does (NovelSeam.fitScale, fitPadding): the padding gives way first, then the card zooms
+     * down whole, rewrapping as it shrinks. Natural size is read at no zoom each time, so this settles in one go.
+     */
+    function fitSeams() {
+      if (!PAGED) return;
+      var m = margins();
+      var page = viewportHeight() - m.top - m.bottom;
+      if (!(page > 0)) return;
+      // A picture taller than a page is drawn a page tall (reader.css) unless that shrinks it past
+      // MIN_PAGE_FIT_SCALE; then it keeps its width and runs across pages, as pictureBox draws it.
+      document.documentElement.style.setProperty('--rk-page-height', page + 'px');
+      // Every class first, then every height, then every toggle: a read after a write lays the page out
+      // again, so interleaving them would cost one layout per picture.
+      var pictures = Array.prototype.slice.call(document.querySelectorAll(CHAPTER_SELECTOR + ' img.rk-loaded'));
+      pictures.forEach(function (img) { img.classList.add('rk-runs-on'); });
+      var heights = pictures.map(function (img) { return img.getBoundingClientRect().height; });
+      pictures.forEach(function (img, i) {
+        img.classList.toggle('rk-runs-on', heights[i] > page && !shrinksToPage(heights[i], page));
+      });
+      var max = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--rk-seam-padding-vertical')) || 0;
+      document.querySelectorAll('.rk-seam').forEach(function (seam) {
+        var card = seam.firstElementChild;
+        card.style.zoom = '';
+        var natural = card.getBoundingClientRect().height;
+        var scale = natural <= page ? 1 : (page - 1) / natural;
+        if (scale < 1) card.style.zoom = String(scale);
+        var padding = Math.floor(Math.max(0, Math.min(max, (page - card.getBoundingClientRect().height) / 2)));
+        seam.style.paddingTop = padding + 'px';
+        seam.style.paddingBottom = padding + 'px';
+      });
+    }
+
     function measure(id) {
-      var el = chapterEl(id);
+      var el = chapterById(id);
       if (!el) return null;
+      fitSeams();
       var item = itemOf(el);
       var y = scrollTop();
       var bands = [];
@@ -638,10 +751,19 @@
       };
     }
 
-    /* The chapter at the reading line, how far down its item that line is, and each held chapter's item
-       height, which is what the host's measured pages are keyed on. */
+    /* pageLine's top on screen, null without one. */
+    function pageLineTop() {
+      var top = pageLine ? place.topOf(pageLine.node, pageLine.offset) : null;
+      if (top === null) pageLine = null;
+      return top;
+    }
+
+    /* The chapter at the reader's line, how far down its item that line is and the column's own reading line
+       is, and each held chapter's item height, which is what the host's measured pages are keyed on. */
     function where() {
-      var probe = scrollTop() + readingTop();
+      var line = pageLineTop();
+      var reading = scrollTop() + readingTop();
+      var probe = line === null ? reading : scrollTop() + line;
       var chapters = document.querySelectorAll(CHAPTER_SELECTOR);
       var heights = {};
       var at = null;
@@ -649,13 +771,16 @@
         var item = itemOf(chapters[i]);
         var id = chapters[i].getAttribute(CHAPTER_ID_ATTR);
         heights[id] = item.bottom - item.top;
-        if (at === null || item.top <= probe + EDGE_TOLERANCE) at = { id: id, y: probe - item.top };
+        if (at === null || item.top <= probe + EDGE_TOLERANCE) {
+          at = { id: id, y: probe - item.top, columnY: reading - item.top };
+        }
       }
       if (at === null) return null;
       var m = margins();
       return {
         id: at.id,
         y: at.y,
+        columnY: at.columnY,
         heights: heights,
         contentHeight: viewportHeight() - m.top - m.bottom,
       };
@@ -669,8 +794,10 @@
       return el;
     }
 
-    function show(id, top, height, fraction) {
-      var el = chapterEl(id);
+    /* keepLine: a page put back after the column moved, which leaves the reader's line as it was. seam: a seam's
+       page, which reports no place. second: a spread's second page, its top below this one's and its height. */
+    function show(id, top, height, fraction, keepLine, seam, second) {
+      var el = chapterById(id);
       if (!el) return;
       var m = margins();
       var before = scrollTop();
@@ -678,10 +805,26 @@
       if (!maskTop) maskTop = mask('rk-page-mask-top');
       if (!maskBottom) maskBottom = mask('rk-page-mask-bottom');
       maskTop.style.height = m.top + 'px';
-      maskBottom.style.top = (m.top + height) + 'px';
-      shown = { id: String(id), scrollY: scrollTop(), height: height, fraction: fraction };
+      // A spread's second page sits below the first in the window, so the gap between the two is masked too.
+      var bottom = second ? second.shift + second.height : height;
+      maskBottom.style.top = (m.top + bottom) + 'px';
+      if (SPREAD) {
+        if (!maskBetween) maskBetween = mask('rk-page-mask-between');
+        maskBetween.style.top = (m.top + height) + 'px';
+        maskBetween.style.height = Math.max(0, second ? second.shift - height : 0) + 'px';
+      }
+      shown = {
+        id: String(id), scrollY: scrollTop(), height: height, bottom: bottom, fraction: fraction, seam: seam === true,
+      };
       // Holds the line landed on at once, as a seek does, so a change before the next frame keeps it.
       place.sync();
+      if (!keepLine || pageLineTop() === null) {
+        pageLine = place.line();
+        // A page that starts inside a picture has no line of its own, and the nearest one is on an earlier
+        // page: held, every turn from here would land back on that page. Then the reading top decides.
+        var heldTop = pageLineTop();
+        if (heldTop !== null && (heldTop < m.top - 1 || heldTop >= m.top + height)) pageLine = null;
+      }
       onScroll();
       // A page is where the reader stops, and a jump the page cannot scroll itself may end in no scrollend.
       persist();
@@ -692,8 +835,9 @@
           if (shown && shown.id === String(id)) bridge().onPagedPicturesLanded(DOCUMENT_TOKEN, String(id));
         });
       }
-      // Whether the column moved, which the host's view only follows a moment later.
-      return { landed: landed, moved: scrollTop() !== before };
+      // Whether the column moved, which the host's view only follows a moment later, and the page's top margin,
+      // which a spread's host masks above both pages.
+      return { landed: landed, moved: scrollTop() !== before, marginTop: m.top };
     }
 
     /* Asks the host to put a whole page back, once a frame at most. */
@@ -709,9 +853,16 @@
     return {
       margins: margins,
       measure: function (id) { return measure(String(id)); },
+      fitSeams: fitSeams,
       where: where,
       show: show,
       moved: moved,
+      /* The reader or a follow chose another place, which pageLine must not pull them back from. */
+      release: function () { pageLine = null; },
+      /* A line seek names the reader's place, which the page shown for it starts above. */
+      hold: function (node, offset) { if (PAGED) pageLine = { node: node, offset: offset }; },
+      /* The line held, while it is still in the document. */
+      line: function () { return pageLineTop() === null ? null : pageLine; },
       /* After a frame: whatever scrolled the page that was not a page being shown. */
       check: function () {
         if (PAGED && (!shown || Math.abs(scrollTop() - shown.scrollY) > 0.5)) moved();
@@ -720,11 +871,15 @@
       shownIn: function (id) {
         return PAGED && shown && shown.id === id ? shown.fraction : null;
       },
+      /* Whether the page shown is a seam's, at the top of chapter id. */
+      seamShown: function (id) {
+        return PAGED && !!shown && shown.id === id && shown.seam;
+      },
       /* The page's own extent on screen, which read aloud keeps to. */
       visible: function () {
         if (!PAGED || !shown) return null;
         var top = margins().top;
-        return { top: top, bottom: top + shown.height };
+        return { top: top, bottom: top + shown.bottom };
       },
     };
   })();
@@ -742,7 +897,11 @@
       rebuildBoundaries();
     }
     var s = state();
-    if (s.id === null) return;
+    // A seam's page reports nothing, but a column it moved still asks for its page back.
+    if (s.id === null) {
+      if (s.seam) paged.check();
+      return;
+    }
 
     if (s.id !== lastChapterSeen) {
       lastChapterSeen = s.id;
@@ -763,15 +922,20 @@
    * the throttle holds back is sent once the interval has passed, or a scroll stopping inside it left
    * the rail on a place the reader had already left. A chapter finishing, or a different chapter, is
    * never held: the last value sent belongs to the chapter before, so it cannot stand for this one.
+   * now sends past the throttle and drops whatever it held.
    */
-  function reportProgress(s) {
+  function reportProgress(s, now) {
     // The host drops a report sent before ready, and one remembered as sent is never sent again.
     if (!ready) return;
+    if (now) {
+      clearTimeout(heldReport);
+      heldReport = null;
+    }
     var sameChapter = s.id === lastReportedId;
     var finishing = s.progress >= 1 && lastReported !== 1;
-    if (sameChapter && !finishing && Math.abs(s.progress - lastReported) <= 0.005) return;
+    if (sameChapter && !finishing && s.progress === lastReported) return;
     var wait = REPORT_INTERVAL_MS - (Date.now() - lastReportedAt);
-    if (sameChapter && !finishing && wait > 0) {
+    if (!now && sameChapter && !finishing && wait > 0) {
       if (!heldReport) heldReport = setTimeout(function () { heldReport = null; onScroll(); }, wait);
       return;
     }
@@ -796,7 +960,11 @@
       return;
     }
     var s = state();
-    if (s.id !== null) bridge().onProgressSettled(DOCUMENT_TOKEN, s.id, s.progress);
+    if (s.id === null) return;
+    // The settled report is the scroll's last: a live one still held back is sent now, ahead of it, so
+    // neither the throttle nor the frame after can land one behind it and mark the place unsettled again.
+    reportProgress(s, true);
+    bridge().onProgressSettled(DOCUMENT_TOKEN, s.id, s.progress);
   }
 
   // endregion
@@ -809,7 +977,10 @@
    * bionicBoldsTheLettersTheNativeRendererDoes runs both.
    */
   var FIXATION = [0, 4, 12, 17, 24, 29, 35, 42, 48];
-  var WORD = /[\p{L}\p{Nd}]*\p{L}[\p{L}\p{Nd}]*/gu;
+  // A run, then checked for its letter: a pattern that finds the letter inside the run backtracks
+  // quadratically over a long run of digits.
+  var WORD = /[\p{L}\p{Nd}]+/gu;
+  var LETTER = /\p{L}/u;
 
   function boldLength(wordLength) {
     for (var i = 0; i < FIXATION.length; i++) {
@@ -818,43 +989,72 @@
     return Math.max(wordLength - FIXATION.length, 0);
   }
 
+  // Where a word cannot run on, as the native renderer's Html.fromHtml breaks its text there.
+  var BIONIC_BLOCKS = 'p, div, li, ul, ol, h1, h2, h3, h4, h5, h6, blockquote, pre, table, tr, td, th, ' +
+    'dl, dd, dt, section, article, figure, figcaption';
+
   function applyBionic(root) {
     // A chapter's own script and style blocks are text nodes too, and wrapping them in spans empties
     // them: an element child is not script or CSS, so the chapter's styling and code were lost. Text
     // already inside a span this made is skipped, or switching bionic off and on nests the emphasis.
-    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
       acceptNode: function (node) {
-        var parent = node.parentNode;
-        if (!parent || parent.nodeName === 'SCRIPT' || parent.nodeName === 'STYLE') return NodeFilter.FILTER_REJECT;
-        return parent.closest('.rk-bionic') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+        if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+        var skipped = node.nodeName === 'SCRIPT' || node.nodeName === 'STYLE' || node.classList.contains('rk-bionic');
+        return skipped ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
       },
     });
-    var texts = [];
+    // The words are read across the whole run of inline text, as the native renderer reads its one
+    // Spannable, so a word split by markup (<i>un</i>believable) is still one word.
+    var texts = [], starts = [], flat = '', broken = false, lastBlock = null;
     while (walker.nextNode()) {
-      if (walker.currentNode.nodeValue.trim()) texts.push(walker.currentNode);
+      var node = walker.currentNode;
+      if (node.nodeType !== Node.TEXT_NODE) {
+        // A picture too: the native renderer lifts each one out of its paragraph into a block of its own.
+        if (node.matches(BIONIC_BLOCKS + ', br, hr, img')) broken = true;
+        continue;
+      }
+      var block = node.parentElement && node.parentElement.closest(BIONIC_BLOCKS);
+      if (broken || block !== lastBlock) flat += '\n';
+      broken = false;
+      lastBlock = block;
+      texts.push(node);
+      starts.push(flat.length);
+      flat += node.nodeValue;
     }
-    texts.forEach(function (node) {
-      node.parentNode.replaceChild(emphasised(node.nodeValue), node);
+    var bolds = texts.map(function () { return []; });
+    var at = 0;
+    var match;
+    WORD.lastIndex = 0;
+    while ((match = WORD.exec(flat)) !== null) {
+      if (!LETTER.test(match[0])) continue;
+      var end = match.index + boldLength(match[0].length);
+      while (at < texts.length - 1 && starts[at + 1] <= match.index) at++;
+      for (var i = at; i < texts.length && starts[i] < end; i++) {
+        var from = Math.max(match.index, starts[i]) - starts[i];
+        var to = Math.min(end, starts[i] + texts[i].nodeValue.length) - starts[i];
+        if (to > from) bolds[i].push([from, to]);
+      }
+    }
+    texts.forEach(function (node, i) {
+      if (node.nodeValue.trim()) node.parentNode.replaceChild(emphasised(node.nodeValue, bolds[i]), node);
     });
   }
 
   // Built from nodes, never markup: the text is already decoded, so a chapter's escaped `&lt;i&gt;`
-  // arrives here as `<i>` and would become a tag.
-  function emphasised(text) {
+  // arrives here as `<i>` and would become a tag. bolds are [from, to) runs of text, in order.
+  function emphasised(text, bolds) {
     var span = document.createElement('span');
     span.className = 'rk-bionic';
+    readerMarked.add(span);
     var from = 0;
-    var match;
-    WORD.lastIndex = 0;
-    while ((match = WORD.exec(text)) !== null) {
-      var n = boldLength(match[0].length);
-      if (n === 0) continue;
-      if (match.index > from) span.appendChild(document.createTextNode(text.slice(from, match.index)));
+    bolds.forEach(function (run) {
+      if (run[0] > from) span.appendChild(document.createTextNode(text.slice(from, run[0])));
       var bold = document.createElement('b');
-      bold.textContent = match[0].slice(0, n);
+      bold.textContent = text.slice(run[0], run[1]);
       span.appendChild(bold);
-      from = match.index + n;
-    }
+      from = run[1];
+    });
     if (from < text.length) span.appendChild(document.createTextNode(text.slice(from)));
     return span;
   }
@@ -871,7 +1071,8 @@
   /* A link's fragment when it points into its own chapter, else null: a bare #name, or the chapter's trusted
      base with one, the rule NovelChapterAddress.fragmentInDocument gives the native reader. */
   function fragmentWithin(link, chapter) {
-    var href = link.getAttribute('href');
+    // Trimmed, as a browser and NovelChapterAddress.absolute read an address.
+    var href = link.getAttribute('href').trim();
     if (href.charAt(0) === '#') return href.substring(1);
     var id = chapter.getAttribute(CHAPTER_ID_ATTR);
     var base = id in chapterBases ? chapterBases[id] : DOCUMENT_BASE;
@@ -887,15 +1088,38 @@
     return dx < 0;
   }
 
+  /* The loaded picture in a chapter a touch on [target] lands on, else null. */
+  function pictureAt(target) {
+    var img = target && target.closest ? target.closest('img.rk-loaded') : null;
+    return img && img.closest(CHAPTER_SELECTOR) ? img : null;
+  }
+
+  function openPicture(img) {
+    var chapter = img.closest(CHAPTER_SELECTOR);
+    bridge().onPictureOpened(DOCUMENT_TOKEN, img.currentSrc || img.getAttribute('src') || '',
+      (chapter && chapter.getAttribute(CHAPTER_ID_ATTR)) || '');
+  }
+
   function installGestures() {
     // `multi`: the touch has had a second finger down, so it is neither a tap nor a swipe (ChapterSwipe.kt).
     var startX = 0, startY = 0, startAt = 0, moved = false, multi = false;
+    // A long press on a picture opens it, and leaves the touch no tap or swipe.
+    var press = null, opened = false;
+    function endPress() {
+      if (press !== null) clearTimeout(press);
+      press = null;
+    }
+    // A picture's long press is the viewer's, never the browser's selection or menu.
+    document.addEventListener('contextmenu', function (e) {
+      if (pictureAt(e.target)) e.preventDefault();
+    });
     // Only a finger counts. A chapter's own script can build touch events, and the token it cannot
     // read would not stop it: these listeners would send the call for it, stepping the chapter.
     document.addEventListener('touchstart', function (e) {
       if (!e.isTrusted) return;
       // A finger on the page takes the scroll over, as it stops a fling.
       glide.stop();
+      endPress();
       if (e.touches.length !== 1) {
         multi = true;
         return;
@@ -905,6 +1129,16 @@
       startAt = Date.now();
       moved = false;
       multi = false;
+      opened = false;
+      var picture = pictureAt(e.target);
+      if (picture) {
+        press = setTimeout(function () {
+          press = null;
+          if (moved || multi) return;
+          opened = true;
+          openPicture(picture);
+        }, LONG_PRESS_MS);
+      }
     }, { passive: true });
 
     document.addEventListener('touchmove', function (e) {
@@ -913,6 +1147,7 @@
       // hasTravelled (ChapterSwipe.kt) gives the native renderer.
       if (Math.abs(e.touches[0].clientX - startX) > TOUCH_SLOP_PX ||
         Math.abs(e.touches[0].clientY - startY) > TOUCH_SLOP_PX) moved = true;
+      if (moved) endPress();
       if (moved) onReaderMove();
     }, { passive: true });
 
@@ -931,6 +1166,7 @@
       var target = anchorTarget(chapter, fragment);
       if (!target) return;
       onReaderMove();
+      paged.release();
       window.scrollTo({ top: window.scrollY + target.getBoundingClientRect().top - readingTop(), behavior: 'instant' });
       place.sync();
     }, true);
@@ -941,7 +1177,9 @@
 
     document.addEventListener('touchend', function (e) {
       // Only the last finger's lift ends the touch.
-      if (!e.isTrusted || e.touches.length !== 0 || multi) return;
+      if (!e.isTrusted) return;
+      endPress();
+      if (e.touches.length !== 0 || multi || opened) return;
       var touch = e.changedTouches && e.changedTouches[0];
       if (!touch) return;
       var dx = touch.clientX - startX;
@@ -967,10 +1205,16 @@
           return;
         }
       }
-      if (moved || elapsed > 400) return;
+      // The long-press delay, so a hold too short to open a picture is still a tap.
+      if (moved || elapsed > LONG_PRESS_MS) return;
       // A tap on a link, or anywhere on the failure box, is that control's, not the reader's. The
       // whole box rather than just its Retry, as the native renderer draws the same line.
-      if (e.target && e.target.closest && e.target.closest('a, button, .rk-failure')) return;
+      if (e.target && e.target.closest && e.target.closest('a[href], button, .rk-failure')) return;
+      var picture = PICTURE_OPENS_ON_TAP ? pictureAt(e.target) : null;
+      if (picture) {
+        openPicture(picture);
+        return;
+      }
 
       // The host reads the tap zones, the same rule the native renderer asks, and scrolls back through
       // scrollSmoothlyBy when a zone says to.
@@ -1022,16 +1266,31 @@
    * a plain scrollBy starts an animation the next frame interrupts, which crawls and stutters.
    */
   var autoScroll = (function () {
-    var raf = null, rate = 0, last = 0;
+    var raf = null, rate = 0, last = 0, carry = 0;
+    // The distance is carried between frames and spent in whole device pixels, as FrameScroller does:
+    // the page rounds each step to one, so a slow speed on a fast screen otherwise never moves, and on
+    // a 60Hz one runs well over its speed. What actually moved is taken off, since the page may round a
+    // step FrameScroller would spend whole, and a step that moves nothing (the chapter's end) drops the carry.
+    var FRAMES_PER_SECOND = __FRAMES_PER_SECOND__;
     function step(now) {
-      if (last) window.scrollBy({ top: rate * (now - last) / 1000, behavior: 'instant' });
+      if (last) {
+        carry += rate * (now - last) / 1000;
+        var ratio = window.devicePixelRatio || 1;
+        var whole = Math.trunc(carry * ratio) / ratio;
+        if (whole !== 0) {
+          var before = window.scrollY;
+          window.scrollBy({ top: whole, behavior: 'instant' });
+          var moved = window.scrollY - before;
+          carry = moved === 0 ? 0 : carry - moved;
+        }
+      }
       last = now;
       raf = requestAnimationFrame(step);
     }
     return {
       start: function (perFrame) {
-        rate = perFrame * 60;
-        if (!raf) { last = 0; raf = requestAnimationFrame(step); }
+        rate = perFrame * FRAMES_PER_SECOND;
+        if (!raf) { last = 0; carry = 0; raf = requestAnimationFrame(step); }
       },
       stop: function () {
         if (!raf) return;
@@ -1055,7 +1314,6 @@
    */
   var readAloud = (function () {
     var OBJECT_REPLACEMENT = String.fromCharCode(0xFFFC);
-    var SPACE = /\s/;
     var MARKS = ['rk-tts-background', 'rk-tts-underline'];
     // Per chapter id, dropped whenever the chapters' DOM changes, since a Range over a replaced text
     // node collapses: bionic emphasis, an insert and a chapter's own script all replace some.
@@ -1070,12 +1328,8 @@
       var page = paged.visible() || { top: 0, bottom: viewportHeight() };
       return {
         top: Math.max(insetTop(), obscured.top, page.top),
-        bottom: Math.min(viewportHeight() - obscured.bottom, page.bottom),
+        bottom: Math.min(windowHeight() - obscured.bottom, page.bottom),
       };
-    }
-
-    function chapterElement(id) {
-      return document.querySelector(CHAPTER_SELECTOR + '[' + CHAPTER_ID_ATTR + '="' + id + '"]');
     }
 
     function normalise(line) {
@@ -1093,17 +1347,12 @@
       }
       var texts = shown.split('\n').map(normalise).filter(function (line) { return line.length > 0; });
       var chars = [], nodes = [], offsets = [];
-      var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
-        acceptNode: function (node) {
-          var parent = node.parentElement;
-          return parent && parent.closest(UNCOUNTED_SELECTOR) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
-        },
-      });
+      var walker = countedTextWalker(el);
       while (walker.nextNode()) {
         var node = walker.currentNode;
         var value = node.nodeValue;
         for (var i = 0; i < value.length; i++) {
-          if (SPACE.test(value[i])) continue;
+          if (countedLength(value[i]) === 0) continue;
           chars.push(value[i]);
           nodes.push(node);
           offsets.push(i);
@@ -1145,7 +1394,7 @@
 
     function entry(id) {
       if (!cache[id]) {
-        var el = chapterElement(id);
+        var el = chapterById(id);
         if (!el) return null;
         cache[id] = build(el);
       }
@@ -1241,6 +1490,7 @@
       // the reading line, where the host then shows the page holding it.
       if (PAGED) {
         if (rect.top >= visible.top - EDGE_TOLERANCE && rect.top < visible.bottom) return;
+        paged.release();
         window.scrollBy({ top: Math.round(rect.top - readingTop()), behavior: 'instant' });
         return;
       }
@@ -1268,17 +1518,22 @@
           var ranges = entry(id).ranges;
           for (var i = 0; i < ranges.length; i++) {
             if (!ranges[i]) continue;
-            var rect = ranges[i].getBoundingClientRect();
-            if (rect.bottom > visible.top && rect.top < visible.bottom) return { id: id, paragraph: i };
+            var lines = ranges[i].getClientRects();
+            if (!lines.length) continue;
+            // A paragraph counts while its last line can be read whole, as firstParagraphOnScreen says natively.
+            var lastLine = lines[lines.length - 1];
+            if (lastLine.top >= visible.top - EDGE_TOLERANCE && lines[0].top < visible.bottom) {
+              return { id: id, paragraph: i };
+            }
           }
         }
         return null;
       },
       /* from and to name the sentence being spoken inside the paragraph, and -1 names the whole paragraph. */
-      highlight: function (id, index, from, to) {
+      highlight: function (id, index, from, to, follows) {
         spoken = id === null ? null : { id: String(id), index: index, from: from, to: to };
         draw();
-        follow();
+        if (follows) follow();
       },
       /* Read by the next choice only: following here would move the text as the chrome comes up. */
       setObscured: function (top, bottom) {
@@ -1345,8 +1600,11 @@
         // against the line the seek left.
         place.sync();
         // The reader is now in this chapter by construction, so the next frame must not report the
-        // one above and hand the rest of a rail drag a target the reader has already left.
-        lastChapterSeen = String(chapterId);
+        // one above and hand the rest of a rail drag a target the reader has already left. Said when it
+        // changes: the host may hold a report of another chapter still on its way, which would be last.
+        var id = String(chapterId);
+        if (id !== lastChapterSeen) bridge().onVisibleChapter(DOCUMENT_TOKEN, id);
+        lastChapterSeen = id;
         return;
       }
     },
@@ -1366,7 +1624,7 @@
      * reader still, as it does for a chapter arriving above.
      */
     setSeam: function (id, seam) {
-      var el = document.querySelector(CHAPTER_SELECTOR + '[' + CHAPTER_ID_ATTR + '="' + id + '"]');
+      var el = chapterById(id);
       if (!el) return;
       var above = el.previousElementSibling;
       if (above && above.classList.contains('rk-seam')) above.parentNode.removeChild(above);
@@ -1424,7 +1682,7 @@
       }
     },
     evictChapter: function (id) {
-      var el = document.querySelector(CHAPTER_SELECTOR + '[' + CHAPTER_ID_ATTR + '="' + id + '"]');
+      var el = chapterById(id);
       if (!el) return;
       // The seam belonging to a chapter is the one above it, except for the first chapter, whose
       // seam is below because a seam introduces what follows it. Taking the wrong side strands one.
@@ -1452,6 +1710,24 @@
   var SRCSET_CANDIDATE = /([\s,]*)(\S+?)(,+(?=\s|$)|(?=\s|$)[^,]*)/g;
 
   /*
+   * Takes the reader's chapter marker off a chapter's own markup, which a source can carry. Left on, the
+   * nested element reads as a chapter of its own, and progress, ends and fits past it name the wrong one.
+   * The seam class and the reader's own ids go too: fitSeams reads a seam's card, and setEnd and
+   * setFailure replace whatever element carries their id. So do a failure box's, a bionic span's and a
+   * loaded picture's classes, which read aloud, the top line, taps, bionic and fitSeams read anywhere in a chapter.
+   */
+  function disownMarkers(root) {
+    var owned = CHAPTER_SELECTOR + ', [' + CHAPTER_ID_ATTR + '], .rk-seam, .rk-failure, .rk-bionic, img.rk-loaded, ' +
+      '[id^="rk-"]';
+    root.querySelectorAll(owned).forEach(function (node) {
+      if (readerMarked.has(node)) return;
+      node.classList.remove('rk-chapter', 'rk-seam', 'rk-failure', 'rk-bionic', 'rk-loaded');
+      node.removeAttribute(CHAPTER_ID_ATTR);
+      if (node.id.indexOf('rk-') === 0) node.removeAttribute('id');
+    });
+  }
+
+  /*
    * The document has one base, the chapter it opened on, so a chapter added by scrolling would resolve
    * its relative images and links against that chapter's site. They are made absolute against the
    * chapter's own base first, parsed in a template so nothing is fetched before the rewrite. A chapter
@@ -1460,6 +1736,7 @@
   function chapterContent(html, baseUrl) {
     var template = document.createElement('template');
     template.innerHTML = html;
+    disownMarkers(template.content);
     if (!baseUrl) return template.content;
     template.content.querySelectorAll('[src], [href], [srcset]').forEach(function (node) {
       ['src', 'href'].forEach(function (name) {
@@ -1488,7 +1765,10 @@
     for (var i = 0; i < names.length; i++) {
       if (!names[i]) continue;
       var name = CSS.escape(names[i]);
-      var target = chapter.querySelector('[id="' + name + '"], a[name="' + name + '"]');
+      // The same order as the native reader's elementNamed (HtmlAnchors.kt): id, then name, then xml:id.
+      var target = chapter.querySelector('[id="' + name + '"]') ||
+        chapter.querySelector('[name="' + name + '"]') ||
+        chapter.querySelector('[xml\\:id="' + name + '"]');
       if (target) return target;
     }
     return null;
@@ -1519,19 +1799,22 @@
   function buildSeam(seam) {
     var el = document.createElement('div');
     el.className = 'rk-seam';
-    el.appendChild(seamPart(labels.finished, seam.finished));
+    // The card inside the padding, which paged reading zooms whole to fit a page (fitSeams).
+    var card = document.createElement('div');
+    el.appendChild(card);
+    card.appendChild(seamPart(labels.finished, seam.finished));
     if (!seam.next) {
       var notice = textBlock('rk-seam-notice', labels.noNext);
       notice.insertBefore(icon('rk-icon-info'), notice.firstChild);
-      el.appendChild(notice);
+      card.appendChild(notice);
       return el;
     }
     if (seam.missing) {
       var warning = textBlock('rk-seam-warning', seam.missing);
       warning.insertBefore(icon('rk-icon-warning'), warning.firstChild);
-      el.appendChild(warning);
+      card.appendChild(warning);
     }
-    el.appendChild(seamPart(labels.next, seam.next));
+    card.appendChild(seamPart(labels.next, seam.next));
     return el;
   }
 
@@ -1567,7 +1850,7 @@
      by the place-holding, at scroll offset zero as anywhere else. */
   function insertChapter(id, html, baseUrl, atStart, seam) {
     var container = document.getElementById('rk-chapters');
-    if (!container || document.querySelector(CHAPTER_SELECTOR + '[' + CHAPTER_ID_ATTR + '="' + id + '"]')) {
+    if (!container || chapterById(id)) {
       return;
     }
     var chapter = buildChapter(id, html, baseUrl);
@@ -1690,10 +1973,37 @@
     }, true);
   });
 
+  // The nodes the reader marked itself, which disownMarkers leaves: a picture can load or fail in the
+  // opening chapter before start disowns that chapter's own markup.
+  var readerMarked = new WeakSet();
+
   // Drops the loading box reader.css draws in a picture's place. A failed one gets its failure box instead.
   document.addEventListener('load', function (e) {
-    if (e.target.tagName === 'IMG') e.target.classList.add('rk-loaded');
+    if (e.target.tagName !== 'IMG') return;
+    e.target.classList.add('rk-loaded');
+    readerMarked.add(e.target);
   }, true);
+
+  /*
+   * A Retry's picture carries a mark on the app's own address for it (NovelWebImages.isRetry), so the app
+   * fetches it afresh rather than serving the bytes that just failed from its cache. A site's address is left.
+   */
+  var IMAGE_ROUTE = __IMAGE_ROUTE__;
+  var RETRY_PARAM = __RETRY_PARAM__;
+  var retries = 0;
+  function retried(url) {
+    return url.indexOf(IMAGE_ROUTE) === 0 ? url + '&' + RETRY_PARAM + '=' + (++retries) : url;
+  }
+  function markRetry(img) {
+    var src = img.getAttribute('src');
+    if (src) img.setAttribute('src', retried(src));
+    var srcset = img.getAttribute('srcset');
+    if (srcset) {
+      img.setAttribute('srcset', srcset.replace(SRCSET_CANDIDATE, function (_, lead, url, tail) {
+        return lead + retried(url) + tail;
+      }));
+    }
+  }
 
   /*
    * A chapter picture that fails is shown as the manga reader shows a failed page: a box saying so, with
@@ -1706,6 +2016,7 @@
     if (img.tagName !== 'IMG' || !img.closest(CHAPTER_SELECTOR)) return;
     var box = document.createElement('div');
     box.className = 'rk-failure rk-image-failure';
+    readerMarked.add(box);
     box.appendChild(textBlock('rk-failure-heading', labels.imageError));
     if (/^(https?:)?\/\//i.test(img.getAttribute('src') || '')) {
       var button = document.createElement('button');
@@ -1714,6 +2025,9 @@
       button.addEventListener('click', function (click) {
         if (!click.isTrusted) return;
         var fresh = img.cloneNode(false);
+        markRetry(fresh);
+        // Inside a picture the browser asks for a source's candidate over the img's own.
+        if (img.parentNode.tagName === 'PICTURE') img.parentNode.querySelectorAll('source').forEach(markRetry);
         fresh.style.display = '';
         box.parentNode.removeChild(box);
         img.parentNode.replaceChild(fresh, img);
@@ -1729,7 +2043,10 @@
 
   /* What needs the chapter parsed, which this script, running in the head, is ahead of. */
   function start() {
+    // The opening chapter came in with the page, past chapterContent.
+    document.querySelectorAll('#rk-chapters > ' + CHAPTER_SELECTOR).forEach(disownMarkers);
     if (PAGED) document.documentElement.classList.add('rk-paged');
+    if (SPREAD) document.documentElement.classList.add('rk-spread');
     if (typeof ResizeObserver === 'function') {
       new ResizeObserver(function () {
         lastResizeAt = Date.now();

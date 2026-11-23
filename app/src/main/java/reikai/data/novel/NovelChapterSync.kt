@@ -1,8 +1,14 @@
 package reikai.data.novel
 
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import reikai.domain.chapter.ArrivingChapter
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.CopyMark
+import reikai.domain.chapter.LocalChapterTombstones
 import reikai.domain.chapter.StoredChapter
+import reikai.domain.chapter.SyncedChapter
 import reikai.domain.chapter.appliedTo
 import reikai.domain.chapter.chapterArrivals
 import reikai.domain.chapter.foundRelease
@@ -15,6 +21,7 @@ import reikai.domain.novel.model.NovelChapter
 import reikai.domain.novel.model.NovelUpdate
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.host.ChapterItem
+import reikai.novel.local.LocalNovelSource
 import tachiyomi.data.chapter.ChapterSanitizer
 import tachiyomi.domain.chapter.model.NoChaptersException
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -23,10 +30,10 @@ import kotlin.time.Clock
 /**
  * Novel-side parallel of the manga `syncChaptersWithSource`, in one transaction. A re-added chapter
  * inherits the read/bookmark state and `dateFetch` of the one it replaces, so it is not new. A [page]
- * sync matches against the whole novel, so a chapter that moved pages is re-tagged in place, and never
- * deletes: one page cannot tell a removed chapter from one that moved to a page this run did not fetch.
- * Null syncs the whole novel and drops what the source no longer lists. Predicting the next update is
- * the caller's, once per whole-novel sync ([predictNovelFetchInterval]).
+ * sync matches against the whole novel, so a chapter that moved pages is re-tagged in place, and drops only
+ * the rows past [dropPagesAbove], the source's last page, once every page below it synced: one page cannot
+ * tell a removed chapter from one that moved. Null syncs the whole novel and drops what the source no longer
+ * lists; [pageOpened], that the page opened since the last walk. Predicting the next update is the caller's.
  */
 suspend fun syncChaptersWithNovelSource(
     rawSourceChapters: List<ChapterItem>,
@@ -34,19 +41,25 @@ suspend fun syncChaptersWithNovelSource(
     novelChapterRepository: NovelChapterRepository,
     novelRepository: NovelRepository,
     libraryPreferences: LibraryPreferences,
-    numberOverrides: ChapterNumberOverrideRepository,
+    syncRules: NovelChapterSyncRules,
     page: String? = null,
+    pageOpened: Boolean = false,
     novelDownloadManager: NovelDownloadManager? = null,
+    dropPagesAbove: Long? = null,
 ): NovelChapterSyncResult {
     if (rawSourceChapters.isEmpty()) throw NoChaptersException()
 
     val novelId = novel.id
     require(novelId > 0L) { "syncChaptersWithNovelSource requires a persisted novel (id > 0)" }
 
+    val (numberOverrides, copyMarks, tombstones) = syncRules
     val dbChapters = novelChapterRepository.getByNovelId(novelId)
 
     val drafts = rawSourceChapters.toDrafts(novelId, novel.title, page)
     val draftUrls = drafts.mapTo(HashSet()) { it.url }
+    val droppedPages = dropPagesAbove?.let { last ->
+        dbChapters.filter { it.url !in draftUrls && (it.page.toLongOrNull() ?: 0L) > last }
+    }.orEmpty()
     // A page sync numbers the novel's whole stored list with its page in place, in page then listing
     // order, so a chapter at a page edge reads as one list reads it, whichever page arrived first. Its
     // source order is the place in that list too: a plugin's index restarts on every page, and every
@@ -55,6 +68,7 @@ suspend fun syncChaptersWithNovelSource(
         drafts
     } else {
         dbChapters.filter { it.url !in draftUrls && it.page != page && it.page.toLongOrNull() != null }
+            .minus(droppedPages.toSet())
             .plus(drafts)
             .sortedWith(compareBy({ it.page.toLong() }, { it.sourceOrder }))
             .mapIndexed { i, chapter -> chapter.copy(sourceOrder = i.toLong()) }
@@ -78,7 +92,13 @@ suspend fun syncChaptersWithNovelSource(
     val dbByUrl = dbChapters.associateBy { it.url }
     val sourceUrls = sourceChapters.mapTo(mutableSetOf()) { it.url }
     val sourceNumbers = overridden.chapters.associate { it.url to it.chapterNumber }
-    val toDelete = if (page == null) dbChapters.filterNot { it.url in sourceUrls } else emptyList()
+    // A local group member's folder or book gone from the local folder could not be read, so its rows stay as they
+    // are; a local book's chapter whose file is still there fails the refresh, as a local manga's does.
+    val isLocal = LocalNovelSource.isLocal(novel.source)
+    val unlisted = if (page == null) dbChapters.filterNot { it.url in sourceUrls } else droppedPages
+    val held = tombstones.held(ContentType.NOVELS, isLocal, novel.url, unlisted.map { it.toSyncedChapter() })
+    val toDelete = unlisted.filterNot { it.url in held }
+    tombstones.confirm(ContentType.NOVELS, isLocal, toDelete.map { it.toSyncedChapter() }, sourceUrls)
 
     val managedUrls = mutableSetOf<String>()
     for (sourceChapter in sourceChapters) {
@@ -120,10 +140,14 @@ suspend fun syncChaptersWithNovelSource(
     val now = Clock.System.now()
     val markDuplicateAsRead = libraryPreferences.markDuplicateReadChapterAsRead.get()
         .contains(LibraryPreferences.MARK_DUPLICATE_CHAPTER_READ_NEW)
+    // The user's copy marks bend the rule as they do in the reader; read only when the rule runs.
+    val marks = if (markDuplicateAsRead) copyMarks.loadedMarks(ContentType.NOVELS, novelId) else emptyMap()
     // Sources list newest first, so the kernel counts fetch dates down from now in that order.
     val arrivals = chapterArrivals(
-        added = toAdd.map { ArrivingChapter(it.chapterNumber, it.read, it.bookmark, it.dateUpload) },
-        stored = dbChapters.map { it.toStoredChapter(sourceNumbers[it.url] ?: it.chapterNumber) },
+        added = toAdd.map {
+            ArrivingChapter(it.chapterNumber, it.read, it.bookmark, it.dateUpload, it.name, it.scanlator, marks[it.url])
+        },
+        stored = dbChapters.map { it.toStoredChapter(sourceNumbers[it.url] ?: it.chapterNumber, marks[it.url]) },
         removed = toDelete.map { it.toStoredChapter() },
         markDuplicateAsRead = markDuplicateAsRead,
         now = now,
@@ -140,7 +164,19 @@ suspend fun syncChaptersWithNovelSource(
         )
     }
 
-    val insertedChapters = novelChapterRepository.updateFromRemote(toDelete.map { it.id }, updatedToAdd, toChange)
+    // A local book keeps a removed chapter's reading state and gives it back when the chapter returns, in
+    // the write's own transaction; a chapter that came back is not new.
+    val revived = tombstones.around(
+        ContentType.NOVELS,
+        novelId,
+        isLocal,
+        removed = toDelete.map { it.toSyncedChapter() },
+        arriving = updatedToAdd.map { it.toSyncedChapter() },
+    ) {
+        novelChapterRepository.updateFromRemote(toDelete.map { it.id }, updatedToAdd, toChange)
+    }
+    val insertedChapters = revived.result
+    changedOrDuplicateReadUrls += revived.urls
 
     // novels.last_update tracks the last time the chapter list changed at all; only on a real change.
     novelRepository.update(NovelUpdate(novel.id) { lastUpdate = now })
@@ -148,18 +184,34 @@ suspend fun syncChaptersWithNovelSource(
     // Relocate any downloaded file whose chapter was re-titled, so recognition follows the new name
     // (mirrors the manga rename-on-sync, pinned by RenameOnSyncConformanceTest). No-op when the chapter
     // isn't downloaded.
-    downloadRenames.forEach { (old, new) -> novelDownloadManager?.renameChapter(novel, old, new) }
+    // After the commit, not before it as manga does: a chapter a lane saves before the commit lands under the old
+    // name, and this moves it. Not cancellable, since a later sync sees no change of name and would strand the file.
+    withContext(NonCancellable) {
+        downloadRenames.forEach { (old, new) -> novelDownloadManager?.renameChapter(novel, old, new) }
+    }
     // The source no longer lists these, so their queued downloads could only fail, as the manga sync
     // cancels them too (RemovedChapterQueueConformanceTest).
     novelDownloadManager?.cancelDownloads(toDelete.map { it.id })
 
     // A page is compared with what that page held: chapters filling a page never stored are the back
     // catalogue, whatever other pages the novel has.
-    val hadChapters = if (page == null) dbChapters.isNotEmpty() else dbChapters.any { it.page == page }
+    // Rows stored while the novel had one page carry no page number, and they were its first page.
+    val hadChapters = when (page) {
+        null -> dbChapters.isNotEmpty()
+        "1" -> dbChapters.any { it.page == page || it.page.toLongOrNull() == null }
+        else -> dbChapters.any { it.page == page }
+    }
+    // Nor are they new, unless the page opened since the last walk or the novel had nothing stored to compare with.
+    val backCatalogue = !hadChapters && !pageOpened && dbChapters.isNotEmpty()
     return NovelChapterSyncResult(
-        insertedChapters.filterNot { it.url in changedOrDuplicateReadUrls },
+        if (backCatalogue) emptyList() else insertedChapters.filterNot { it.url in changedOrDuplicateReadUrls },
         changed = true,
-        foundRelease(hadChapters, arrivals),
+        foundRelease(
+            hadChapters,
+            toAdd.zip(arrivals).filter { (chapter, _) ->
+                chapter.url !in revived.urls
+            }.map { it.second },
+        ),
     )
 }
 
@@ -195,5 +247,7 @@ private fun numbered(novelTitle: String, chapters: List<NovelChapter>): List<Nov
         withNumber = { chapter, number -> chapter.copy(chapterNumber = number) },
     ).asReversed()
 
-private fun NovelChapter.toStoredChapter(number: Double = chapterNumber) =
-    StoredChapter(number, read, bookmark, dateFetch)
+private fun NovelChapter.toStoredChapter(number: Double = chapterNumber, mark: CopyMark? = null) =
+    StoredChapter(number, read, bookmark, dateFetch, name, scanlator, mark)
+
+private fun NovelChapter.toSyncedChapter() = SyncedChapter(id, url, chapterNumber)

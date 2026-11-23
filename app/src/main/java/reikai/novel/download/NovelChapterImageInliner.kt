@@ -1,11 +1,13 @@
 package reikai.novel.download
 
 import android.util.Base64
+import eu.kanade.tachiyomi.network.await
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import reikai.novel.content.NovelChapterAddress
 import reikai.novel.content.NovelImageSources
 import reikai.novel.network.NovelImageClient
+import reikai.util.runCatchingCancellable
 
 /**
  * Inlines a downloaded chapter's images as `data:` URIs so the saved HTML is self-contained and reads
@@ -18,7 +20,9 @@ import reikai.novel.network.NovelImageClient
 private const val MAX_INLINE_BYTES = 5L * 1024 * 1024
 
 suspend fun inlineChapterImages(html: String, baseSite: String, images: NovelImageClient): String {
-    val document = Jsoup.parse(html)
+    // As a fragment, as the reader parses a chapter: a whole-document parse moves a leading <style>, <script>
+    // or <link> into a head this never writes out, so a chapter with a picture lost its styling.
+    val document = Jsoup.parseBodyFragment(html)
     if (document.select("img, picture").isEmpty()) return html
     // Pretty-printing reflows the markup, which folds the line breaks inside a paragraph the source
     // styles as preformatted; only the image sources are meant to change here. Same trap as the
@@ -32,11 +36,13 @@ suspend fun inlineChapterImages(html: String, baseSite: String, images: NovelIma
         // A data: src beside a srcset is a lazy-load placeholder, and the srcset holds the picture.
         val widest = NovelImageSources.srcsetCandidate(img, Int.MAX_VALUE).orEmpty()
         val given = img.attr("src")
-        val src = if (given.isBlank() || given.startsWith("data:")) widest else given
+        val src = if (given.isBlank() || NovelChapterAddress.isDataAddress(given)) widest else given
         if (src.isBlank()) continue
         val absolute = NovelChapterAddress.absolute(baseSite, src)
-        runCatching {
-            images.newCall(absolute).execute().use { response ->
+        // Suspending, so a pause cancels the fetch in flight and ends the loop, rather than fetching
+        // every picture left for a result the cancelled drain throws away.
+        runCatchingCancellable {
+            images.newCall(absolute).await().use { response ->
                 if (!response.isSuccessful) return@use
                 val body = response.body
                 // Bound the read itself, not just the post-read size: a lying or unknown (-1)
@@ -46,17 +52,24 @@ suspend fun inlineChapterImages(html: String, baseSite: String, images: NovelIma
                 val source = body.source()
                 source.request(MAX_INLINE_BYTES + 1)
                 if (source.buffer.size > MAX_INLINE_BYTES) return@use
-                val bytes = source.readByteArray()
-                if (bytes.isEmpty()) return@use
                 val mime = response.header("Content-Type")?.substringBefore(';')?.takeIf { it.startsWith("image/") }
-                    ?: "image/jpeg"
-                val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
-                img.attr("src", "data:$mime;base64,$encoded")
+                val address = inlinedImageAddress(source.readByteArray(), mime) ?: return@use
+                img.attr("src", address)
                 dropCandidates(img)
             }
         }
     }
     return document.body().html()
+}
+
+/**
+ * A picture as a `data:` address a chapter carries in itself, or null when it is empty or over the cap a
+ * stored chapter's pictures and a local chapter's stylesheet pictures are held to. [mime] defaults to
+ * JPEG, which the decoders sniff past.
+ */
+fun inlinedImageAddress(bytes: ByteArray, mime: String?): String? {
+    if (bytes.isEmpty() || bytes.size > MAX_INLINE_BYTES) return null
+    return "data:${mime ?: "image/jpeg"};base64," + Base64.encodeToString(bytes, Base64.NO_WRAP)
 }
 
 private fun dropCandidates(img: Element) {

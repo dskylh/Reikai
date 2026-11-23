@@ -3,9 +3,12 @@ package reikai.domain.novel.interactor
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.data.cache.CoverCache
 import logcat.LogPriority
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.StoredDetails
 import reikai.data.novel.refreshNovelFromSource
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.LocalChapterTombstones
 import reikai.domain.merge.ReconcileMergedChapters
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
@@ -31,7 +34,7 @@ class RepairNovelDetails(
     // download worker, and a repair run must not do that just by existing.
     private val downloadManager: () -> NovelDownloadManager,
     private val libraryPreferences: LibraryPreferences,
-    private val chapterNumberOverrides: ChapterNumberOverrideRepository,
+    private val syncRules: NovelChapterSyncRules,
     private val coverCache: CoverCache,
     private val reconcileMergedChapters: ReconcileMergedChapters,
 ) {
@@ -55,7 +58,7 @@ class RepairNovelDetails(
                         novelChapterRepository,
                         novelRepository,
                         libraryPreferences,
-                        chapterNumberOverrides,
+                        syncRules,
                         coverCache,
                         novelDownloadManager = downloadManager(),
                         // The parse tells the victim from its donor. A user's own edits live in

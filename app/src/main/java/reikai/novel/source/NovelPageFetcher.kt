@@ -7,11 +7,15 @@ import eu.kanade.tachiyomi.data.cache.CoverCache
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import logcat.LogPriority
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.predictNovelFetchInterval
 import reikai.data.novel.storeRefreshedNovel
 import reikai.data.novel.syncChaptersWithNovelSource
 import reikai.data.novel.toNovel
+import reikai.data.novel.withoutPageCount
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.LocalChapterTombstones
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
 import reikai.novel.download.NovelChapterSaver
@@ -33,7 +37,7 @@ class NovelPageFetcher(
     private val chapterRepo: NovelChapterRepository,
     private val sourceManager: NovelSourceManager,
     private val libraryPreferences: LibraryPreferences,
-    private val chapterNumberOverrides: ChapterNumberOverrideRepository,
+    private val syncRules: NovelChapterSyncRules,
     private val coverCache: CoverCache,
     private val saver: NovelChapterSaver,
     private val novelDownloadManager: () -> NovelDownloadManager,
@@ -52,7 +56,9 @@ class NovelPageFetcher(
         val source = sourceManager.get(novel.source) ?: return@attempt false
         val fetch = source.pageFetch ?: return@attempt false
         val parsed = fetch.details(novel.url, url, html).toNovel(sourceId = source.id, favorite = novel.favorite)
-        storeRefreshedNovel(novel, parsed, novelRepo, libraryPreferences, novelDownloadManager(), coverCache)
+        // A novel with no chapters yet has nothing to walk from, and its page selector needs the count.
+        val details = if (chapterRepo.getByNovelId(novel.id).isEmpty()) parsed else parsed.withoutPageCount()
+        storeRefreshedNovel(novel, details, novelRepo, libraryPreferences, novelDownloadManager(), coverCache)
         true
     } ?: false
 
@@ -69,7 +75,7 @@ class NovelPageFetcher(
             chapterRepo,
             novelRepo,
             libraryPreferences,
-            chapterNumberOverrides,
+            syncRules,
             novelDownloadManager = novelDownloadManager(),
         )
         predictNovelFetchInterval(

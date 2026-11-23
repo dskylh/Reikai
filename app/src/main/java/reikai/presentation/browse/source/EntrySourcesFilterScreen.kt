@@ -15,21 +15,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metrox.viewmodel.metroViewModel
 import eu.kanade.presentation.browse.components.BaseSourceItem
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.more.settings.widget.SwitchPreferenceWidget
-import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.ui.browse.source.SourcesFilterViewModel
 import eu.kanade.tachiyomi.util.system.toast
+import kotlinx.serialization.Serializable
+import mihon.core.navigation.LocalNavigator
 import reikai.domain.library.ContentType
+import reikai.domain.library.within
 import reikai.novel.source.NovelSource
+import reikai.novel.source.isDisabled
 import reikai.presentation.browse.browseLanguageLabel
 import reikai.presentation.browse.components.NovelSourceRow
 import reikai.presentation.browse.components.formatLabel
 import reikai.presentation.components.ContentTypeFilterChips
+import reikai.presentation.components.LocalShownContent
 import tachiyomi.domain.source.model.Source
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.FastScrollLazyColumn
@@ -44,139 +47,119 @@ import tachiyomi.presentation.core.screens.LoadingScreen
  * chip: routing All and Manga to the manga screen left every plugin unreachable from the default
  * chip. The two halves keep their own preferences and are drawn by one list over [SourceFilterSection].
  */
-class EntrySourcesFilterScreen(
+@Serializable
+data class EntrySourcesFilterRoute(
     /** The Browse chip this was opened from. All lands on manga. */
-    private val initial: ContentType = ContentType.MANGA,
-) : Screen() {
+    val initial: ContentType = ContentType.MANGA,
+) : NavKey
 
-    @Composable
-    override fun Content() {
-        val navigator = LocalNavigator.currentOrThrow
-        // Held as a boolean rather than the enum: only two of the three chips exist here, and a
-        // boolean is saveable without asking whether the enum is.
-        var showNovels by rememberSaveable { mutableStateOf(initial == ContentType.NOVELS) }
+@Composable
+fun EntrySourcesFilterScreen(initial: ContentType) {
+    val navigator = LocalNavigator.current
+    SourcesFilterContent(
+        initial = initial,
+        navigateUp = navigator::pop,
+        mangaSources = { MangaSources(it, navigator::pop) },
+        novelSources = { NovelSources(it) },
+    )
+}
 
-        Scaffold(
-            topBar = { scrollBehavior ->
-                Column {
-                    AppBar(
-                        title = stringResource(MR.strings.label_sources),
-                        navigateUp = navigator::pop,
-                        scrollBehavior = scrollBehavior,
-                    )
-                    ContentTypeFilterChips(
-                        selected = if (showNovels) ContentType.NOVELS else ContentType.MANGA,
-                        onSelect = { showNovels = it == ContentType.NOVELS },
-                        types = FILTER_TYPES,
-                    )
-                }
-            },
-        ) { contentPadding ->
-            if (showNovels) {
-                NovelSources(contentPadding)
-            } else {
-                MangaSources(contentPadding, navigator::pop)
-            }
+@Composable
+private fun MangaSources(contentPadding: PaddingValues, navigateUp: () -> Unit) {
+    val context = LocalContext.current
+    val viewModel = metroViewModel<SourcesFilterViewModel>()
+    val state by viewModel.state.collectAsStateWithLifecycle()
+
+    when (val s = state) {
+        SourcesFilterViewModel.State.Loading -> LoadingScreen(Modifier.padding(contentPadding))
+        // Upstream toasted and left the screen, and it still does. Leaving takes the novel half
+        // with it, which is survivable: this half is only composed under the Manga chip, so
+        // opening from Novels never touches the failing flow.
+        is SourcesFilterViewModel.State.Error -> LaunchedEffect(Unit) {
+            context.toast(MR.strings.internal_error)
+            navigateUp()
         }
-    }
-
-    @Composable
-    private fun MangaSources(contentPadding: PaddingValues, navigateUp: () -> Unit) {
-        val context = LocalContext.current
-        val viewModel = metroViewModel<SourcesFilterViewModel>()
-        val state by viewModel.state.collectAsStateWithLifecycle()
-
-        when (val s = state) {
-            SourcesFilterViewModel.State.Loading -> LoadingScreen(Modifier.padding(contentPadding))
-            // Upstream toasted and left the screen, and it still does. Leaving takes the novel half
-            // with it, which is survivable: this half is only composed under the Manga chip, so
-            // opening from Novels never touches the failing flow.
-            is SourcesFilterViewModel.State.Error -> LaunchedEffect(Unit) {
-                context.toast(MR.strings.internal_error)
-                navigateUp()
-            }
-            is SourcesFilterViewModel.State.Success -> if (s.isEmpty) {
-                EmptyScreen(
-                    stringRes = MR.strings.source_filter_empty_screen,
-                    modifier = Modifier.padding(contentPadding),
+        is SourcesFilterViewModel.State.Success -> if (s.isEmpty) {
+            EmptyScreen(
+                stringRes = MR.strings.source_filter_empty_screen,
+                modifier = Modifier.padding(contentPadding),
+            )
+        } else {
+            SourceFilterList(
+                sections = s.toSections(),
+                contentPadding = contentPadding,
+                onToggleLanguage = viewModel::toggleLanguage,
+                onToggleSource = viewModel::toggleSource,
+            ) { source, modifier, onClick, action ->
+                BaseSourceItem(
+                    modifier = modifier,
+                    source = source,
+                    showLanguageInContent = false,
+                    onClickItem = onClick,
+                    action = { action() },
                 )
-            } else {
-                SourceFilterList(
-                    sections = s.toSections(),
-                    contentPadding = contentPadding,
-                    onToggleLanguage = viewModel::toggleLanguage,
-                    onToggleSource = viewModel::toggleSource,
-                ) { source, modifier, onClick, action ->
-                    BaseSourceItem(
-                        modifier = modifier,
-                        source = source,
-                        showLanguageInContent = false,
-                        onClickItem = onClick,
-                        action = { action() },
-                    )
-                }
             }
         }
     }
+}
 
-    @Composable
-    private fun NovelSources(contentPadding: PaddingValues) {
-        val viewModel = metroViewModel<NovelSourcesFilterViewModel>()
-        val state by viewModel.state.collectAsStateWithLifecycle()
+@Composable
+private fun NovelSources(contentPadding: PaddingValues) {
+    val viewModel = metroViewModel<NovelSourcesFilterViewModel>()
+    val state by viewModel.state.collectAsStateWithLifecycle()
 
-        when (val s = state) {
-            NovelSourcesFilterViewModel.State.Loading -> LoadingScreen(Modifier.padding(contentPadding))
-            is NovelSourcesFilterViewModel.State.Success -> if (s.isEmpty) {
-                EmptyScreen(stringRes = MR.strings.ln_no_sources, modifier = Modifier.padding(contentPadding))
-            } else {
-                SourceFilterList(
-                    sections = s.toSections(),
-                    contentPadding = contentPadding,
-                    onToggleLanguage = viewModel::toggleLanguage,
-                    onToggleSource = { viewModel.toggleSource(it.id) },
-                ) { source, modifier, onClick, action ->
-                    NovelSourceRow(
-                        modifier = modifier,
-                        name = source.name,
-                        iconUrl = source.iconUrl,
-                        subtitle = formatLabel(source.format, s.showsFormat),
-                        onClickItem = onClick,
-                        action = action,
-                    )
-                }
+    when (val s = state) {
+        NovelSourcesFilterViewModel.State.Loading -> LoadingScreen(Modifier.padding(contentPadding))
+        is NovelSourcesFilterViewModel.State.Success -> if (s.isEmpty) {
+            EmptyScreen(stringRes = MR.strings.ln_no_sources, modifier = Modifier.padding(contentPadding))
+        } else {
+            SourceFilterList(
+                sections = s.toSections(),
+                contentPadding = contentPadding,
+                onToggleLanguage = viewModel::toggleLanguage,
+                onToggleSource = { viewModel.toggleSource(it.id) },
+            ) { source, modifier, onClick, action ->
+                NovelSourceRow(
+                    modifier = modifier,
+                    name = source.name,
+                    iconUrl = source.iconUrl,
+                    subtitle = formatLabel(source.format, s.showsFormat),
+                    onClickItem = onClick,
+                    action = action,
+                )
             }
         }
     }
+}
 
-    /** Each language as a switch over its sources, each with a checkbox; only [row] is per type. */
-    @Composable
-    private fun <S> SourceFilterList(
-        sections: List<SourceFilterSection<S>>,
-        contentPadding: PaddingValues,
-        onToggleLanguage: (String) -> Unit,
-        onToggleSource: (S) -> Unit,
-        row: @Composable (S, Modifier, onClick: () -> Unit, action: @Composable RowScope.() -> Unit) -> Unit,
-    ) {
-        val context = LocalContext.current
-        FastScrollLazyColumn(contentPadding = contentPadding) {
-            sections.forEach { section ->
-                item(key = "source-filter-header-${section.language}", contentType = "source-filter-header") {
-                    // Off hides the whole language's sources here and everywhere else.
-                    SwitchPreferenceWidget(
-                        modifier = Modifier.animateItem(),
-                        title = browseLanguageLabel(section.language, context),
-                        checked = section.enabled,
-                        onCheckedChanged = { onToggleLanguage(section.language) },
-                    )
-                }
-                items(
-                    items = section.sources,
-                    key = { "source-filter-${it.key}" },
-                    contentType = { "source-filter-item" },
-                ) { entry ->
-                    row(entry.source, Modifier.animateItem(), { onToggleSource(entry.source) }) {
-                        Checkbox(checked = entry.checked, onCheckedChange = null)
-                    }
+/** Each language as a switch over its sources, each with a checkbox; only [row] is per type. */
+@Composable
+private fun <S> SourceFilterList(
+    sections: List<SourceFilterSection<S>>,
+    contentPadding: PaddingValues,
+    onToggleLanguage: (String) -> Unit,
+    onToggleSource: (S) -> Unit,
+    row: @Composable (S, Modifier, onClick: () -> Unit, action: @Composable RowScope.() -> Unit) -> Unit,
+) {
+    val context = LocalContext.current
+    FastScrollLazyColumn(contentPadding = contentPadding) {
+        sections.forEach { section ->
+            item(key = "source-filter-header-${section.language}", contentType = "source-filter-header") {
+                // Off hides the whole language's sources here and everywhere else.
+                SwitchPreferenceWidget(
+                    modifier = Modifier.animateItem(),
+                    title = browseLanguageLabel(section.language, context),
+                    checked = section.enabled,
+                    onCheckedChanged = { onToggleLanguage(section.language) },
+                )
+            }
+            items(
+                items = section.sources,
+                key = { "source-filter-${it.key}" },
+                contentType = { "source-filter-item" },
+            ) { entry ->
+                row(entry.source, Modifier.animateItem(), { onToggleSource(entry.source) }) {
+                    Checkbox(checked = entry.checked, onCheckedChange = null)
                 }
             }
         }
@@ -204,7 +187,7 @@ fun SourcesFilterViewModel.State.Success.toSections(): List<SourceFilterSection<
 fun NovelSourcesFilterViewModel.State.Success.toSections(): List<SourceFilterSection<NovelSource>> =
     items.map { (language, sources) ->
         section(language, enabled = language !in disabledLanguages, sources) {
-            SourceFilterEntry(it.id, it, checked = it.id !in disabledSources)
+            SourceFilterEntry(it.id, it, checked = !it.isDisabled(disabledSources, disabledLanguages))
         }
     }
 
@@ -216,3 +199,43 @@ private fun <S> section(
 ) = SourceFilterSection(language, enabled, if (enabled) sources.map(entry) else emptyList())
 
 private val FILTER_TYPES = listOf(ContentType.MANGA, ContentType.NOVELS)
+
+/** The chip row over whichever half [initial] and Show pick, the half drawn by its slot. */
+@Composable
+internal fun SourcesFilterContent(
+    initial: ContentType,
+    navigateUp: () -> Unit,
+    mangaSources: @Composable (PaddingValues) -> Unit,
+    novelSources: @Composable (PaddingValues) -> Unit,
+) {
+    // Held as a boolean rather than the enum: only two of the three chips exist here, and a
+    // boolean is saveable without asking whether the enum is.
+    // The chip as picked, read through Show on every composition, so hiding novels while the
+    // screen is open moves the list to manga rather than leaving it under a chip row now hidden.
+    var pickedNovels by rememberSaveable { mutableStateOf(initial == ContentType.NOVELS) }
+    val showNovels =
+        showsNovels(if (pickedNovels) ContentType.NOVELS else ContentType.MANGA, LocalShownContent.current)
+
+    Scaffold(
+        topBar = { scrollBehavior ->
+            Column {
+                AppBar(
+                    title = stringResource(MR.strings.label_sources),
+                    navigateUp = navigateUp,
+                    scrollBehavior = scrollBehavior,
+                )
+                ContentTypeFilterChips(
+                    selected = if (showNovels) ContentType.NOVELS else ContentType.MANGA,
+                    onSelect = { pickedNovels = it == ContentType.NOVELS },
+                    types = FILTER_TYPES,
+                )
+            }
+        },
+    ) { contentPadding ->
+        if (showNovels) novelSources(contentPadding) else mangaSources(contentPadding)
+    }
+}
+
+/** Whether the novel list shows: the picked chip, unless Show hides that half. */
+internal fun showsNovels(chip: ContentType, shown: ContentType): Boolean =
+    chip.within(shown) == ContentType.NOVELS

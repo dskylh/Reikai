@@ -1,0 +1,10 @@
+-- The read-aloud pre-render queue. Empty on upgrade.
+CREATE TABLE novel_tts_chapter(
+    chapter_id INTEGER NOT NULL PRIMARY KEY,
+    pinned INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    state INTEGER NOT NULL,
+    requested_at INTEGER NOT NULL
+);
+
+CREATE INDEX novel_tts_audio_chapter_index ON novel_tts_audio(chapter_id);

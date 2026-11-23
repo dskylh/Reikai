@@ -8,10 +8,12 @@ import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 import reikai.domain.category.GetNovelCategories
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.download.NovelRemovableDownloads
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.model.NovelChapter
+import reikai.domain.reader.ChapterIncognito
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.download.NovelDownloadPendingDeleter
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
@@ -27,6 +29,7 @@ import kotlin.time.Instant
 class DeleteNovelChaptersBehindReaderTest {
 
     private val order = listOf(1L, 2L, 3L, 4L, 5L)
+    private val publicSource = ChapterIncognito(sourceOf = { null }, isIncognito = { false })
 
     private fun chapter(id: Long, read: Boolean = true, bookmark: Boolean = false) = NovelChapter(
         id = id,
@@ -89,19 +92,36 @@ class DeleteNovelChaptersBehindReaderTest {
             chapterRepository = repo,
             pendingDeleter = pending,
             libraryPreferences = LibraryPreferences(store),
+            copyMarks = InMemoryChapterCopyMarks(),
         )
     }
 
     @Test
     fun `finishing a chapter queues the one the slots retire`() = runTest {
-        subject(slots = 1).await(orderedIds = order, readChapterId = 4L, memberIds = listOf(7L), stitch = emptyList())
+        subject(
+            slots = 1,
+        ).await(
+            orderedIds = order,
+            readChapterId = 4L,
+            memberIds = listOf(7L),
+            stitch = emptyList(),
+            incognito = publicSource,
+        )
 
         queued.map { it.id } shouldBe listOf(3L)
     }
 
     @Test
     fun `finishing a chapter deletes nothing while the reader is open`() = runTest {
-        subject(slots = 0).await(orderedIds = order, readChapterId = 4L, memberIds = listOf(7L), stitch = emptyList())
+        subject(
+            slots = 0,
+        ).await(
+            orderedIds = order,
+            readChapterId = 4L,
+            memberIds = listOf(7L),
+            stitch = emptyList(),
+            incognito = publicSource,
+        )
 
         coVerify(exactly = 0) { manager.deleteChapters(any()) }
     }
@@ -109,7 +129,13 @@ class DeleteNovelChaptersBehindReaderTest {
     @Test
     fun `leaving the reader deletes the queued chapters`() = runTest {
         val interactor = subject(slots = 1)
-        interactor.await(orderedIds = order, readChapterId = 4L, memberIds = listOf(7L), stitch = emptyList())
+        interactor.await(
+            orderedIds = order,
+            readChapterId = 4L,
+            memberIds = listOf(7L),
+            stitch = emptyList(),
+            incognito = publicSource,
+        )
 
         interactor.deletePending()
 
@@ -129,7 +155,13 @@ class DeleteNovelChaptersBehindReaderTest {
         val chapters = order.associateWith { chapter(it, read = it != 3L) }
         subject(
             chapters = chapters,
-        ).await(orderedIds = order, readChapterId = 4L, memberIds = listOf(7L), stitch = emptyList())
+        ).await(
+            orderedIds = order,
+            readChapterId = 4L,
+            memberIds = listOf(7L),
+            stitch = emptyList(),
+            incognito = publicSource,
+        )
 
         queued shouldBe emptyList()
     }
@@ -139,7 +171,13 @@ class DeleteNovelChaptersBehindReaderTest {
         val chapters = order.associateWith { chapter(it, bookmark = it == 3L) }
         subject(
             chapters = chapters,
-        ).await(orderedIds = order, readChapterId = 4L, memberIds = listOf(7L), stitch = emptyList())
+        ).await(
+            orderedIds = order,
+            readChapterId = 4L,
+            memberIds = listOf(7L),
+            stitch = emptyList(),
+            incognito = publicSource,
+        )
 
         queued shouldBe emptyList()
     }
@@ -148,7 +186,13 @@ class DeleteNovelChaptersBehindReaderTest {
     fun `a bookmarked chapter is queued once the user allows removing them`() = runTest {
         val chapters = order.associateWith { chapter(it, bookmark = it == 3L) }
         subject(chapters = chapters, allowRemovingBookmarked = true)
-            .await(orderedIds = order, readChapterId = 4L, memberIds = listOf(7L), stitch = emptyList())
+            .await(
+                orderedIds = order,
+                readChapterId = 4L,
+                memberIds = listOf(7L),
+                stitch = emptyList(),
+                incognito = publicSource,
+            )
 
         queued.map { it.id } shouldBe listOf(3L)
     }
@@ -156,7 +200,13 @@ class DeleteNovelChaptersBehindReaderTest {
     @Test
     fun `a novel in an excluded category keeps its chapters`() = runTest {
         subject(excludedCategoryIds = setOf("11"), novelCategoryIds = listOf(11L))
-            .await(orderedIds = order, readChapterId = 4L, memberIds = listOf(7L), stitch = emptyList())
+            .await(
+                orderedIds = order,
+                readChapterId = 4L,
+                memberIds = listOf(7L),
+                stitch = emptyList(),
+                incognito = publicSource,
+            )
 
         queued shouldBe emptyList()
     }
@@ -165,7 +215,13 @@ class DeleteNovelChaptersBehindReaderTest {
     @Test
     fun `a novel outside the excluded categories is still queued`() = runTest {
         subject(excludedCategoryIds = setOf("11"), novelCategoryIds = listOf(12L))
-            .await(orderedIds = order, readChapterId = 4L, memberIds = listOf(7L), stitch = emptyList())
+            .await(
+                orderedIds = order,
+                readChapterId = 4L,
+                memberIds = listOf(7L),
+                stitch = emptyList(),
+                incognito = publicSource,
+            )
 
         queued.map { it.id } shouldBe listOf(3L)
     }

@@ -65,8 +65,11 @@ interface NovelSource {
      */
     val iconUrl: String?
 
-    /** How the source is packaged, which lists name once more than one kind is shown. */
-    val format: NovelExtensionFormat
+    /**
+     * How the source is packaged, which lists name once more than one kind is shown; null for the built-in
+     * local source, which is packaged as nothing, as manga's local source shows no format either.
+     */
+    val format: NovelExtensionFormat?
 
     /** What installed the source: an app's own name, or the plugin's, since a plugin is its own extension. */
     val extensionName: String
@@ -150,6 +153,15 @@ interface NovelSource {
 }
 
 /**
+ * A source whose novels are files on this device, which an in-app move or rename changes while a refresh may be
+ * reading them: [locked] runs [block], a parse of the novel at [novelPath] and the row sync that follows it,
+ * while nothing else lists or moves that novel. A source over the network has nothing to hold and is not one.
+ */
+interface LockedSeriesSource {
+    suspend fun <T> locked(novelPath: String, block: suspend () -> T): T
+}
+
+/**
  * A novel source that is a catalogue of an installed app rather than a plugin. [appSource] is the
  * catalogue object the app loaded, so a reload that kept it keeps its adapter too.
  */
@@ -174,7 +186,7 @@ internal suspend fun <T> appSourceCall(block: suspend CoroutineScope.() -> T): T
 
 /**
  * One page of a listing or search, and how the source marks where its listing ends. Each adapter decodes
- * every name with `NovelTextSanitizer.decodeEntities`, as `SourceNovel.toNovel` decodes the details, so a
+ * every name with `NovelTextSanitizer.decodeEntities`, as it decodes a parse's details, so a
  * listed row and the novel stored from it read one name.
  */
 data class NovelItemsPage(val items: List<NovelItem>, val end: CatalogueEnd)

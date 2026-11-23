@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
@@ -30,13 +31,16 @@ import reikai.domain.dedupe.MergedDuplicateChapter
 import reikai.domain.download.QueuedChapter
 import reikai.domain.library.ContentType
 import reikai.domain.novel.NovelChapterRepository
+import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.model.Novel
 import reikai.novel.download.FakeSharedPreferences
 import reikai.novel.download.NovelDownloadCache
 import reikai.novel.download.NovelDownloadProvider
 import reikai.novel.download.NovelDownloadStore
+import reikai.util.stubUniFileStatics
 import reikai.util.testAppScope
+import reikai.util.unstubUniFileStatics
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.chapter.interactor.GetChapter
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -74,7 +78,14 @@ class MergedDuplicateDownloadsTest {
     }
     private val downloadProvider = DownloadProvider(mockk(), storageManager, libraryPreferences)
     private val novelProvider =
-        NovelDownloadProvider(testAppScope(), storageManager, downloadProvider, libraryPreferences)
+        NovelDownloadProvider(
+            testAppScope(),
+            mockk(),
+            storageManager,
+            downloadProvider,
+            libraryPreferences,
+            NovelPreferences(InMemoryPreferenceStore()),
+        )
 
     private val sourceManager = mockk<SourceManager> {
         coEvery { getOrStub(SOURCE_ID) } returns StubSource(id = SOURCE_ID, lang = "en", name = "Src")
@@ -210,13 +221,13 @@ class MergedDuplicateDownloadsTest {
 
     @ParameterizedTest
     @EnumSource(Type::class)
-    fun `a merged-away folder the merge emptied is removed`(type: Type) = runTest {
+    fun `a merged-away folder the merge emptied is set aside under a hidden name`(type: Type) = runTest {
         type.chapter(sourceDir(type).dir(KEPT), CH1, "kept")
         type.chapter(sourceDir(type).dir(OLD), CH2, "old")
 
         downloads.carryFolders(listOf(duplicate(type, OLD)))
 
-        sourceDir(type).names() shouldBe listOf(KEPT)
+        sourceDir(type).names().sorted() shouldBe listOf(".moved-$OLD", KEPT)
     }
 
     @ParameterizedTest
@@ -461,9 +472,13 @@ class MergedDuplicateDownloadsTest {
         every { DiskUtil.getAvailableStorageSpace(any<UniFile>()) } returns bytes
     }
 
+    @BeforeEach
+    fun stubStatics() = stubUniFileStatics()
+
     @AfterEach
     fun tearDown() {
         unmockkObject(DiskUtil)
+        unstubUniFileStatics()
     }
 
     /** How the fake storage writes: whole, throwing after the first byte, or silently a byte short. */
@@ -507,6 +522,7 @@ class MergedDuplicateDownloadsTest {
 
         val file: UniFile = mockk {
             every { this@mockk.name } answers { this@FakeDir.name }
+            every { uri } returns mockk()
             every { isDirectory } returns isDir
             every { isFile } returns !isDir
             every { exists() } answers { parent == null || parent.children[this@FakeDir.name] === this@FakeDir }

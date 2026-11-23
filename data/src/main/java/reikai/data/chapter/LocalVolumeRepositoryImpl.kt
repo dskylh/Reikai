@@ -1,0 +1,114 @@
+package reikai.data.chapter
+
+import app.cash.sqldelight.async.coroutines.awaitAsList
+import app.cash.sqldelight.coroutines.asFlow
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.ContributesBinding
+import dev.zacsweers.metro.Inject
+import dev.zacsweers.metro.SingleIn
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import mihon.core.metro.AppCoroutineScope
+import reikai.data.HeldRows
+import reikai.data.toContentType
+import reikai.data.toDbValue
+import reikai.domain.chapter.LocalVolume
+import reikai.domain.chapter.LocalVolumeRepository
+import reikai.domain.chapter.LooseFiles
+import reikai.domain.library.ContentType
+import reikai.domain.local.VolumeOwner
+import tachiyomi.data.Database
+
+@Inject
+@SingleIn(AppScope::class)
+@ContributesBinding(AppScope::class)
+class LocalVolumeRepositoryImpl(
+    private val database: Database,
+    @AppCoroutineScope scope: CoroutineScope,
+) : LocalVolumeRepository {
+
+    private val queries = database.local_volumeQueries
+
+    private val byType = HeldRows(
+        queries.getAll { type, series, key, position, label, notes ->
+            Triple(type.toContentType(), series, LocalVolume(key, position, label, notes))
+        }.asFlow()
+            .map { query -> query.awaitAsList().groupBy { it.first } }
+            .map { rows -> rows.mapValues { (_, typed) -> typed.groupBy({ it.second }, { it.third }) } },
+        scope,
+        emptyMap(),
+    )
+
+    private val flows = ContentType.entries.associateWith { type ->
+        byType.held.map { it[type].orEmpty() }.stateIn(scope, SharingStarted.Eagerly, emptyMap())
+    }
+
+    override fun volumes(type: ContentType): StateFlow<Map<String, List<LocalVolume>>> = flows.getValue(type)
+
+    override suspend fun loadedVolumes(type: ContentType) = byType.loaded()[type].orEmpty()
+
+    override suspend fun setOrder(type: ContentType, series: String, keys: List<String>) {
+        database.transaction {
+            keys.forEachIndexed { index, key -> queries.setPosition(type.toDbValue(), series, key, index.toLong()) }
+        }
+    }
+
+    override suspend fun setLabel(type: ContentType, series: String, key: String, label: String?) {
+        queries.setLabel(type.toDbValue(), series, key, label?.trim()?.ifEmpty { null })
+    }
+
+    override suspend fun setNotes(type: ContentType, series: String, key: String, notes: String) {
+        queries.setNotes(type.toDbValue(), series, key, notes.ifBlank { null })
+    }
+
+    override suspend fun all(type: ContentType): List<VolumeOwner> =
+        database.local_volume_ownerQueries.getAll(type.toDbValue()) { folder, volume, owner ->
+            VolumeOwner(folder, volume, owner)
+        }.awaitAsList()
+
+    private val loose = HeldRows(
+        database.local_manga_looseQueries.getAll().asFlow()
+            .map { query -> query.awaitAsList().associate { it.series to LooseFiles.of(it.mode) } },
+        scope,
+        emptyMap(),
+    )
+
+    override fun looseFiles(): StateFlow<Map<String, LooseFiles>> = loose.held
+
+    override suspend fun loadedLooseFiles() = loose.loaded()
+
+    override suspend fun setLooseFiles(series: String, mode: LooseFiles) {
+        // The default is no row, so a series left as it was carries nothing.
+        if (mode == LooseFiles.ONE_VOLUME) {
+            database.local_manga_looseQueries.clear(series)
+        } else {
+            database.local_manga_looseQueries.setMode(series, mode.stored)
+        }
+    }
+
+    override suspend fun restore(type: ContentType, series: String, volumes: List<LocalVolume>) {
+        if (volumes.isEmpty()) return
+        database.transaction {
+            // The device's ordered volumes the backup does not name, ones added since it was taken, move after
+            // its order in their own, or a position they share with a restored volume ties.
+            val restoredEnd = volumes.mapNotNull { it.position }.maxOrNull()?.plus(1)
+            if (restoredEnd != null) {
+                val named = volumes.mapTo(HashSet()) { it.key }
+                queries.positionsOf(type.toDbValue(), series).awaitAsList()
+                    .filter { it.volume_key !in named }
+                    .forEachIndexed { i, row ->
+                        queries.setPosition(type.toDbValue(), series, row.volume_key, restoredEnd + i)
+                    }
+            }
+            // Only what the backup holds, so a field it lacks keeps the one set on this device.
+            volumes.forEach {
+                it.position?.let { position -> queries.setPosition(type.toDbValue(), series, it.key, position) }
+                it.label?.let { label -> queries.setLabel(type.toDbValue(), series, it.key, label) }
+                it.notes?.let { notes -> queries.setNotes(type.toDbValue(), series, it.key, notes) }
+            }
+        }
+    }
+}

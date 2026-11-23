@@ -78,17 +78,17 @@ This allows you to control how the screen is going to be oriented.
 
 ::: tabs
 == Free
-TBA
+Follows your device's own rotation setting.
 == Portrait
-TBA
+Stays upright, turning either way up as you turn the device.
 == Landscape
-TBA
+Stays sideways, turning to either side as you turn the device.
 == Locked portrait
-TBA
+Stays upright, the normal way up, however you hold the device.
 == Locked landscape
-TBA
+Stays sideways, to one side only, however you hold the device.
 == Reverse portrait
-TBA
+Stays upright, but upside down.
 :::
 
 ### Background color <Badge type="info" text="Black" />
@@ -116,6 +116,15 @@ Keeps the screen from going to sleep.
 ### Show page number <Badge type="info" text="On" />
 Shows the current page number at the bottom of the screen.
 
+### Show time left in chapter <Badge type="info" text="Off" />
+Shows how long the rest of the chapter should take, from how long you spent on the pages of chapters you finished. It reads **Learning reading speed** until you have finished three chapters.
+
+### Progress size <Badge type="info" text="Default" />
+How large the progress line at the bottom of the screen draws, from **Default** up to 2.5×. The novel reader has its own copy of this setting.
+
+### Background behind progress <Badge type="info" text="Off" />
+Draws the progress line on a strip of the page's colour, so the page under it never shows through.
+
 ### Chapter title <Badge type="info" text="Name" />
 What the reader's bar calls the open chapter: its **Name**, its **Number**, or **Number and name**. The novel reader has its own copy of this setting.
 
@@ -124,13 +133,26 @@ What the reader's bar calls the open chapter: its **Name**, its **Number**, or *
 Flashes the screen on page change to reduce ghosting on E-ink displays. The three settings below only appear once this is on.
 
 ### Flash duration <Badge type="info" text="100 ms" />
-How long each flash lasts.
+How long each flash lasts, from 20 ms to 1.5 s.
 
 ### Flash every <Badge type="info" text="1 page" />
 How many pages pass between flashes. Higher is less distracting and lets more ghosting build up.
 
 ### Flash with <Badge type="info" text="Black" />
 Whether the flash is **Black**, **White**, or **White and Black**.
+
+## Filters
+
+On the **Filters** tab of the reader's settings sheet only. They change the page, never the menus drawn over it, and work with the high quality renderer too. Novels have their own.
+
+### Grayscale <Badge type="info" text="Off" />
+Draws pages in shades of gray. It can also sit in the bottom bar, through **Bottom bar buttons**.
+
+### Inverted <Badge type="info" text="Off" />
+Swaps light and dark.
+
+### Contrast <Badge type="info" text="100%" />
+From 50% to 200%. Higher turns light grays white and dark grays black, which can make pages crisper on e-ink and other black-and-white screens.
 
 ## Reading
 
@@ -141,19 +163,10 @@ Skips over already read chapters while reading.
 Skips over filtered chapters while reading.
 
 ### Skip duplicate chapters <Badge type="info" text="Off" />
-Skips over chapters detected as duplicates. With **Downloaded only** on, the copy on your device is the one kept.
+Skips over chapters detected as duplicates. With **Downloaded only** on, the copy on your device is the one kept. To see which chapters count as copies, turn on **Settings -> Advanced -> Show duplicate chapters the reader skips**. While it is on, select a chapter the rule gets wrong and pick **Never skip**, or select several and pick **Mark as copies**, from the menu at the top.
 
 ### Mark chapter read when skipping ahead <Badge type="info" text="Off" />
 When you jump to the next chapter, marks the one you skipped as read.
-
-### Start auto-scroll when opening a chapter <Badge type="info" text="Off" />
-Starts auto-scroll each time you open the reader. **Auto-scroll** in the reader's Controls tab starts or stops it until you leave the reader, without changing this setting, and so does its bottom bar button once you add it under **Bottom bar buttons**. It pauses while the menu is open and while your finger is on the screen.
-
-### Page turn interval <Badge type="info" text="5 s" />
-Paged modes only. How long a page stays on screen before auto-scroll turns it, counted from when the page has loaded, so it never turns past a page that is still loading.
-
-### Scroll speed <Badge type="info" text="1.0x" />
-Long strip modes only. How fast auto-scroll moves the strip. It waits at a page that is still loading and scrolls on past one that failed, so its Retry button comes into view.
 
 ### Auto webtoon mode <Badge type="info" text="On" />
 Opens manhwa, manhua and webtoons in **Long strip** without you setting it per series.
@@ -161,10 +174,19 @@ Opens manhwa, manhua and webtoons in **Long strip** without you setting it per s
 It goes by what the source says, not by the pictures: a "Manhwa", "Manhua", "Webtoon" or "Long strip" genre tag, or a source name that gives it away. A "Manga" genre tag rules it out, and a "Comic" tag or comic source rules out a Manhwa or Manhua guess. Genres you changed with **Edit info** count instead of the source's, and in a merged series one source saying it is enough. A mode you picked for a series always wins.
 
 ### Bottom bar buttons
-Which buttons sit in the reader's bottom bar, and in what order. Rotation, reading mode, view chapters and crop borders are on by default. The settings gear can be moved like the others but not switched off.
+Which buttons sit in the reader's bottom bar, and in what order. Rotation, reading mode, view chapters and crop borders are on by default. The settings gear can be moved like the others but not switched off. **Fill buttons that are on**, at the top of the list, draws Grayscale, Keep screen on and the other on/off buttons as a dark square with a light icon while they are on (light on dark in a dark theme), which shows on black-and-white screens where the tint does not.
 
 ### Resume reading position <Badge type="info" text="Off" />
 Reopens a chapter where you left it, even one already marked read.
+
+### Start auto-scroll when opening a chapter <Badge type="info" text="Off" />
+Starts auto-scroll each time you open the reader. **Auto-scroll** in the reader's Controls tab starts or stops it until you leave the reader, without changing this setting, and so does its bottom bar button once you add it under **Bottom bar buttons**. It pauses while the menu is open and while your finger is on the screen.
+
+### Auto-scroll page interval <Badge type="info" text="5 s" />
+Paged modes only. How long a page stays on screen before auto-scroll turns it, counted from when the page has loaded, so it never turns past a page that is still loading.
+
+### Auto-scroll speed <Badge type="info" text="1.0x" />
+Long strip modes only. How fast auto-scroll moves the strip. It waits at a page that is still loading and scrolls on past one that failed, so its Retry button comes into view.
 
 ### Always show chapter transition <Badge type="info" text="On" />
 Shows chapter transitions regardless of whether the next chapter is loaded or not.
@@ -198,7 +220,7 @@ Only a strip along the bottom opens the menu, as tall as **Bottom zone height** 
 :::
 
 ### Invert tap zones <Badge type="info" text="None" /> {#invert-tap-zones-pages}
-Hidden for layouts it would not change: **Disabled**, **Center** and **Large center**. **Bottom** only flips vertically.
+Hidden for layouts it would not change: **Disabled**, **Center** and **Large center**. **Top and bottom** and **Bottom** only flip vertically, and **Right and left** only horizontally.
 
 ::: tabs
 == None
@@ -222,18 +244,6 @@ How tall the menu zone is. Only shown for the **Bottom** layout. One height serv
 == On
 <img src="/docs/guides/reader-settings/crop-borders_on.webp" alt="Cropping borders" width="512" height="788" loading="lazy" decoding="async" />
 :::
-
-### Split wide pages <Badge type="info" text="Off" /> {#split-wide-pages}
-TBA
-
-### Invert split page placement <Badge type="info" text="Off" /> {#invert-split-page-placement}
-Swaps which half of a split double-page spread comes first. Only useful once **Split wide pages** is on.
-
-### Rotate wide pages to fit <Badge type="info" text="Off" /> {#rotate-wide-pages}
-TBA
-
-### Flip orientation of rotated wide pages <Badge type="info" text="Off" /> {#flip-rotated-wide-pages}
-Rotates those pages the other way round. Only useful once **Rotate wide pages to fit** is on.
 
 ### Scale type <Badge type="info" text="Fit screen" />
 
@@ -266,36 +276,51 @@ Starts at the left of the page in **Paged (left to right)**, at the right in **P
 :::
 
 ### Automatically zoom into wide images <Badge type="info" text="On" />
-TBA
+Shown while **Scale type** is **Fit screen**. A page wider than it is tall zooms in to the height of the screen once it opens, starting where **Zoom start position** says.
 
 ### Pan wide images <Badge type="info" text="On" />
-TBA
+When a page is wider than the screen, tapping a tap zone first moves across it and only turns the page once you reach its edge.
+
+### Split wide pages <Badge type="info" text="Off" /> {#split-wide-pages}
+Shows a wide page, such as a double-page spread, as two pages, one after the other. Turning it on turns off **Rotate wide pages to fit**.
+
+### Invert split page placement <Badge type="info" text="Off" /> {#invert-split-page-placement}
+Swaps which half of a split double-page spread comes first. Only useful once **Split wide pages** is on.
+
+### Rotate wide pages to fit <Badge type="info" text="Off" /> {#rotate-wide-pages}
+Turns a wide page sideways so it fills more of an upright screen. Turning it on turns off **Split wide pages**.
+
+### Flip orientation of rotated wide pages <Badge type="info" text="Off" /> {#flip-rotated-wide-pages}
+Rotates those pages the other way round. Only useful once **Rotate wide pages to fit** is on.
 
 ## Long strip
 
-**Tap zones**, **Invert tap zones**, **Crop borders**, **Split wide pages**, **Invert split page placement**, **Rotate wide pages to fit** and **Flip orientation of rotated wide pages** appear here as well as under **Paged**, and each mode keeps its own answer. They work as described above. While **Use high quality renderer** in <nav to="advanced"> is on, every mode uses the **Paged** answers for all of these apart from **Crop borders**, so changing them here has no effect.
+**Tap zones**, **Invert tap zones**, **Crop borders**, **Split wide pages**, **Invert split page placement**, **Rotate wide pages to fit** and **Flip orientation of rotated wide pages** appear here as well as under **Paged**, and each mode keeps its own answer. They work as described above. While **Use high quality renderer** in <nav to="advanced"> is on, the long strip uses the **Paged** tap zones, so **Tap zones**, **Invert tap zones** and **Bottom zone height** are hidden here.
 
 ### Side padding <Badge type="info" text="0%" />
 Adds the specified padding to the left and right of the screen. Shown while **Use high quality renderer** in <nav to="advanced"> is off.
 
 ### Min width <Badge type="info" text="100%" />
-How wide the strip is drawn, as a share of the screen. Shown in place of **Side padding** while **Use high quality renderer** is on.
+How wide the strip is drawn, as a share of the screen, from 10% to 100%. Shown in place of **Side padding** while **Use high quality renderer** is on.
 
 ### Sensitivity for hiding menu on scroll <Badge type="info" text="Low" />
-How quickly you have to scroll a long strip before the menu hides: **Highest** hides it on the slightest scroll, **Lowest** only on a fast one. A change applies the next time the reader opens. It has no effect while **Use high quality renderer** in <nav to="advanced"> is on.
+How quickly you have to scroll or fling a long strip before the menu hides: **Highest** hides it on the slightest scroll, **Lowest** only on a fast one. A change applies the next time the reader opens.
 
 ### Double tap to zoom <Badge type="info" text="On" />
-Zooms into the image on double tap. It has no effect while **Use high quality renderer** in <nav to="advanced"> is on.
+Zooms into the image on double tap. Hidden while **Use high quality renderer** in <nav to="advanced"> is on.
 
 ### Disable zoom out <Badge type="info" text="Off" />
 Stops a pinch from zooming a long strip out smaller than its normal width.
 
 ## High quality renderer
 
-**Use high quality renderer** in <nav to="advanced"> <Badge type="info" text="Off" /> draws every reading mode with a newer renderer. While it is on, the reader's settings sheet adds a few options of its own, which are not on the settings screen.
+**Use high quality renderer** in <nav to="advanced"> <Badge type="info" text="Off" /> draws every reading mode with a newer renderer. While it is on, the reader's settings sheet adds a few options of its own. All but **Gap**, **Crop instead of zoom** (which sits beside **Crop borders** under **Paged**) and the filters also appear in <nav to="manga-reader"> under **High quality renderer**.
 
 ### Dual page view <Badge type="info" text="Never" />
-On the **Reading** tab, for **Paged (left to right)** and **Paged (right to left)** only. **Always** shows two pages side by side, and **When wide** does so only while the screen is wider than it is tall.
+On the **Reading** tab, for the three **Paged** modes only. **Always** shows two pages side by side, and **When wide** does so only while the screen is wider than it is tall.
+
+### Space between pages <Badge type="info" text="0%" />
+On the **Reading** tab, while **Dual page view** shows two pages. The space between them, as a share of a page's width, from 0% to 20%.
 
 ### Gap <Badge type="info" text="10%" />
 On the **Reading** tab, for **Long strip with gaps** only. The space between pages, as a share of the screen.
@@ -307,10 +332,22 @@ On the **Appearance** tab, paged modes only. How the page turns: **Basic**, **Pa
 On the **Appearance** tab, paged modes only. How the page sits around the camera cutout: **Ignore** draws under it, while **Avoid** and **Shift** keep the page clear of it. While two pages are shown, **Display cutout mode (dual)** <Badge type="info" text="Ignore" /> takes over.
 
 ### Disable double tap gestures <Badge type="info" text="Off" />
-On the **Controls** tab, paged modes only, and not while two pages are shown. Turns off double tap zoom.
+On the **Controls** tab, in every reading mode. Turns off double tap zoom.
+
+### Crop instead of zoom <Badge type="info" text="Off" />
+On the **Reading** tab, for single pages in the paged modes, once **Crop borders** is on. Cuts a page's borders off instead of zooming in past them.
+
+### Disable tiles <Badge type="info" text="Off" />
+On the **Filters** tab. Draws pages through the fast path alone, with no tiles and no shaders, so the shader settings below are hidden while it is on.
 
 ### Image filters and Tile filters
-On the **Filters** tab. **Add shader** loads a WGSL shader file from your device. Image filters run on the whole page and tile filters on each tile, in list order, and you can drag or delete them.
+On the **Filters** tab. **Add shader** loads a WGSL shader file from your device. Image filters run on the whole page and tile filters on each tile, in list order, and you can drag or delete them. A shader with settings of its own has an arrow that opens them, each with its range and default.
+
+### Upscaler and Downscaler
+On the **Filters** tab. **Choose shader** replaces the built-in shader that scales a page up or down with one of your own, and the bin icon puts the built-in one back.
+
+### Show all tiles together <Badge type="info" text="Off" />
+On the **Filters** tab. Once a page stops moving, keeps showing it as it is until all its tiles are ready, rather than drawing them in as they finish.
 
 ## Navigation
 
@@ -346,4 +383,4 @@ Shows the following options on long tap while the reader is open.
 - Save
 
 ### Save pages into separate folders <Badge type="info" text="Off" />
-Saves each page you save from the reader into its own folder named after the series, inside Pictures/Reikai, instead of putting every page directly in Pictures/Reikai.
+Saves each page you save from the reader into its own folder named after the series, inside Pictures/Reikai, instead of putting every page directly in Pictures/Reikai. A picture saved from a novel chapter follows this setting too, going into a folder named after the novel.

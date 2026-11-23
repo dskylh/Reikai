@@ -17,6 +17,7 @@ import org.junit.jupiter.params.provider.EnumSource
 import reikai.data.chapter.ChapterNumberOverrideRepositoryImpl
 import reikai.data.merge.MergedChapterUnitRepositoryImpl
 import reikai.data.novel.NovelChapterRepositoryImpl
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.NovelRepositoryImpl
 import reikai.data.novel.syncChaptersWithNovelSource
 import reikai.domain.library.ContentType
@@ -140,6 +141,8 @@ class ChapterNumberOverrideConformanceTest {
                     getExcludedScanlators = mockk(relaxed = true),
                     libraryPreferences = LibraryPreferences(InMemoryPreferenceStore()),
                     chapterNumberOverrides = ChapterNumberOverrideRepositoryImpl(database),
+                    chapterCopyMarks = InMemoryChapterCopyMarks(),
+                    localTombstones = NoChapterTombstones,
                 ).await(
                     chapters.map { (url, number) ->
                         SChapter.create().apply {
@@ -190,7 +193,11 @@ class ChapterNumberOverrideConformanceTest {
                     NovelChapterRepositoryImpl(database),
                     NovelRepositoryImpl(database),
                     LibraryPreferences(InMemoryPreferenceStore()),
-                    ChapterNumberOverrideRepositoryImpl(database),
+                    NovelChapterSyncRules(
+                        ChapterNumberOverrideRepositoryImpl(database),
+                        InMemoryChapterCopyMarks(),
+                        NoChapterTombstones,
+                    ),
                 ).changed
 
             override suspend fun number(database: Database, url: String) =

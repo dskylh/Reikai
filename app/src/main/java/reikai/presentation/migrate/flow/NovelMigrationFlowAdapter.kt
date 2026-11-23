@@ -6,11 +6,15 @@ import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.data.cache.CoverCache
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.refreshNovelFromSource
 import reikai.data.novel.toNovel
 import reikai.data.novel.toSourceChapters
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.LocalChapterTombstones
 import reikai.domain.entry.EntryId
+import reikai.domain.entry.GetEntryCustomInfo
 import reikai.domain.library.ContentType
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelMergeManager
@@ -31,6 +35,7 @@ import reikai.novel.install.LnPluginInstaller
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.novel.source.SmartNovelSearchEngine
+import reikai.novel.source.toLangCode
 import reikai.presentation.migrate.PickMember
 import reikai.util.runCatchingCancellable
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -57,12 +62,13 @@ class NovelMigrationFlowAdapter(
     private val novelRepository: NovelRepository,
     private val chapterRepository: NovelChapterRepository,
     private val libraryPreferences: LibraryPreferences,
-    private val chapterNumberOverrides: ChapterNumberOverrideRepository,
+    private val syncRules: NovelChapterSyncRules,
     private val coverCache: CoverCache,
     private val downloadManagerProvider: () -> NovelDownloadManager,
     private val migrateNovel: MigrateNovelUseCase,
     private val mergeManager: NovelMergeManager,
     private val installer: LnPluginInstaller,
+    private val getEntryCustomInfo: GetEntryCustomInfo,
 ) : MigrationFlowAdapter {
 
     // Building the manager restores the persisted queue and can start the download worker, which
@@ -98,8 +104,8 @@ class NovelMigrationFlowAdapter(
 
     override fun pinnedKeys(): Set<String> = sourcePreferences.pinnedNovelSources.get()
 
-    override suspend fun mergeGroupMembers(ids: List<Long>): List<PickMember> =
-        mergeGroupPickMembers(ids, novelRepository::getById, mergeManager::computeRelatedIds) { novel ->
+    override suspend fun mergeGroupMembers(ids: List<Long>): List<PickMember>? =
+        mergeGroupPickMembers(ids, mergeManager.relatedIdsOf(ids), novelRepository::getById) { novel ->
             PickMember(
                 id = novel.id,
                 title = novel.title,
@@ -124,9 +130,19 @@ class NovelMigrationFlowAdapter(
         novelPreferences.novelMigrationHideWithoutUpdates().set(tuning.hideWithoutUpdates)
     }
 
+    // With its language once the enabled sources span more than one, as a manga row names its source.
     override suspend fun sourceDisplayName(sourceKey: String): String {
-        return sourceManager.nameOf(sourceKey)
+        val name = sourceManager.nameOf(sourceKey)
+        val lang = sourceManager.langOf(sourceKey).toLangCode()
+        return if (lang.isNotEmpty() && activeLanguages().size > 1) "$name (${lang.uppercase()})" else name
     }
+
+    // Read once: every row asks, and the enabled sources do not change while a migration is set up.
+    private var languages: Set<String>? = null
+
+    private suspend fun activeLanguages(): Set<String> = languages
+        ?: getEnabledNovelSources.get().mapNotNullTo(HashSet()) { it.lang.toLangCode().ifEmpty { null } }
+            .also { languages = it }
 
     override fun favorites(sourceKey: String): Flow<List<MigrationFavorite>> {
         return novelRepository.getFavoritesBySourceAsFlow(sourceKey).map { list ->
@@ -142,8 +158,10 @@ class NovelMigrationFlowAdapter(
     }
 
     override suspend fun loadEntries(ids: List<Long>): List<MigrationEntry> {
+        val customInfo = getEntryCustomInfo.awaitAll()
         return ids.mapNotNull { id ->
             val novel = novelRepository.getById(id) ?: return@mapNotNull null
+            val custom = customInfo[EntryId.Novel(id)]
             val summary = chapterRepository.getChapterSummaryByNovelId(id)
             MigrationEntry(
                 id = EntryId.Novel(id),
@@ -154,6 +172,14 @@ class NovelMigrationFlowAdapter(
                 latestChapter = shownLatestChapter(summary.latestChapterNumber),
                 cover = novel.asNovelCover(),
                 payload = MigrationPayload.OfNovel(novel),
+                otherTitles = migrationOtherTitles(
+                    novel.title,
+                    custom,
+                    migrationMemberTitles(id, novel.title, mergeManager.computeRelatedIds(id)) {
+                        novelRepository.getById(it)?.title
+                    },
+                ),
+                hasCustomInfo = custom != null,
             )
         }
     }
@@ -171,9 +197,14 @@ class NovelMigrationFlowAdapter(
         // altogether when a source returns a single candidate, so a plugin repeating one wrong
         // listing would dedupe down to that one hit and have it accepted unscored. Pinned by
         // BaseSmartSearchEngine for the extra query and MigrationAdapterConformanceTest for the own listing.
-        val match = SmartNovelSearchEngine(tuning.extraQuery).bestMatch(entry.title, tuning.deepSearch) { query ->
-            source.search(query, 1, filters = null).items
-        } ?: return null
+        val engine = SmartNovelSearchEngine(tuning.extraQuery)
+        val search: suspend (String) -> List<NovelItem> = { query -> source.search(query, 1, filters = null).items }
+        val match = searchPrimaryThenFallback(
+            entry.title,
+            entry.otherTitles,
+            single = { engine.bestMatch(it, tuning.deepSearch, search) },
+            multi = { engine.bestMatchAny(it, tuning.deepSearch, search) },
+        ) ?: return null
         if (entry.isOwnListing(sourceKey, match.path)) return null
         val candidate = match.toCandidate(sourceKey)
         // Ranking needs every candidate's count, as manga fetches each one's chapter list here. Only
@@ -253,7 +284,7 @@ class NovelMigrationFlowAdapter(
                     chapterRepository,
                     novelRepository,
                     libraryPreferences,
-                    chapterNumberOverrides,
+                    syncRules,
                     coverCache,
                     novelDownloadManager = downloadManager,
                 )
@@ -326,12 +357,16 @@ class NovelMigrationFlowAdapter(
         )
     }
 
-    override suspend fun applicableFlags(entries: List<MigrationEntry>): Set<MigrationDataFlag> = applicableFlagsOf(
-        entries.mapNotNull { (it.payload as? MigrationPayload.OfNovel)?.novel },
-        hasCustomCover = { it.hasCustomCover(coverCache) },
-        hasNotes = { it.notes.isNotBlank() },
-        hasDownloads = { downloadManager.getDownloadCount(it) > 0 },
-    )
+    override suspend fun applicableFlags(entries: List<MigrationEntry>): Set<MigrationDataFlag> {
+        val withCustomInfo = entries.filter { it.hasCustomInfo }.mapTo(HashSet()) { it.id.rawId }
+        return applicableFlagsOf(
+            entries.mapNotNull { (it.payload as? MigrationPayload.OfNovel)?.novel },
+            hasCustomCover = { it.hasCustomCover(coverCache) },
+            hasNotes = { it.notes.isNotBlank() },
+            hasDownloads = { downloadManager.getDownloadCount(it) > 0 },
+            hasCustomInfo = { it.id in withCustomInfo },
+        )
+    }
 
     override suspend fun migrate(
         entry: MigrationEntry,
@@ -359,6 +394,7 @@ class NovelMigrationFlowAdapter(
         NovelMigrationFlag.COVER -> MigrationDataFlag.CUSTOM_COVER
         NovelMigrationFlag.NOTES -> MigrationDataFlag.NOTES
         NovelMigrationFlag.REMOVE_DOWNLOAD -> MigrationDataFlag.REMOVE_DOWNLOAD
+        NovelMigrationFlag.CUSTOM_INFO -> MigrationDataFlag.CUSTOM_INFO
     }
 
     private fun MigrationDataFlag.toNovelFlag(): NovelMigrationFlag = when (this) {
@@ -367,5 +403,6 @@ class NovelMigrationFlowAdapter(
         MigrationDataFlag.CUSTOM_COVER -> NovelMigrationFlag.COVER
         MigrationDataFlag.NOTES -> NovelMigrationFlag.NOTES
         MigrationDataFlag.REMOVE_DOWNLOAD -> NovelMigrationFlag.REMOVE_DOWNLOAD
+        MigrationDataFlag.CUSTOM_INFO -> NovelMigrationFlag.CUSTOM_INFO
     }
 }

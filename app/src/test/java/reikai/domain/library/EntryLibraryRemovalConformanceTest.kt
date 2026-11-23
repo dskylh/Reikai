@@ -8,10 +8,14 @@ import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
+import reikai.domain.entry.CoverColors
 import reikai.domain.entry.EntryId
+import reikai.domain.entry.signedKey
+import reikai.domain.local.LocalVolumeHandBack
 import reikai.domain.manga.MangaMergeManager
 import reikai.domain.manga.RemoveMangaFromLibrary
 import reikai.domain.novel.NovelMergeManager
@@ -101,6 +105,33 @@ class EntryLibraryRemovalConformanceTest {
         table.coverStamps shouldBe emptyList()
     }
 
+    /** No cover load follows a removal, so the removal itself moves the colour under the browse cap. */
+    @ParameterizedTest
+    @EnumSource(ContentType::class, names = ["MANGA", "NOVELS"])
+    fun `a removed entry's cover colour is evicted by browsing past the cap`(type: ContentType) = runTest {
+        val table = table(type).apply { put(ID) }
+        val key = table.entryId(ID).signedKey()
+        CoverColors.put(key, COLOR, inLibrary = true)
+
+        table.removal.await(listOf(ID))
+        (1L..CoverColors.CAP).forEach { CoverColors.put(BROWSE_BASE + it, COLOR, inLibrary = false) }
+
+        CoverColors[key] shouldBe null
+    }
+
+    @ParameterizedTest
+    @EnumSource(ContentType::class, names = ["MANGA", "NOVELS"])
+    fun `an undone removal keeps the cover colour past the browse cap`(type: ContentType) = runTest {
+        val table = table(type).apply { put(ID) }
+        val key = table.entryId(ID).signedKey()
+        CoverColors.put(key, COLOR, inLibrary = true)
+
+        table.removal.restore(table.removal.takeOut(listOf(ID)))
+        (1L..CoverColors.CAP).forEach { CoverColors.put(BROWSE_BASE + it, COLOR, inLibrary = false) }
+
+        CoverColors[key] shouldBe COLOR
+    }
+
     @ParameterizedTest
     @EnumSource(ContentType::class, names = ["MANGA", "NOVELS"])
     fun `a refused write takes none of the batch out`(type: ContentType) = runTest {
@@ -181,6 +212,26 @@ class EntryLibraryRemovalConformanceTest {
         table.favoriteAt(ID) shouldBe JOINED_AT
     }
 
+    @ParameterizedTest
+    @EnumSource(ContentType::class, names = ["MANGA", "NOVELS"])
+    fun `a removal made final hands a local series' volumes in other folders back`(type: ContentType) = runTest {
+        val table = table(type).apply { put(ID) }
+
+        table.removal.await(listOf(ID))
+
+        table.handedBack shouldBe listOf(type to listOf(ID))
+    }
+
+    @ParameterizedTest
+    @EnumSource(ContentType::class, names = ["MANGA", "NOVELS"])
+    fun `an undone removal hands nothing back`(type: ContentType) = runTest {
+        val table = table(type).apply { put(ID) }
+
+        table.removal.restore(table.removal.takeOut(listOf(ID)))
+
+        table.handedBack shouldBe emptyList()
+    }
+
     private fun table(type: ContentType): Table = when (type) {
         ContentType.MANGA -> MangaTable(coverCache())
         else -> NovelTable(coverCache())
@@ -199,6 +250,13 @@ class EntryLibraryRemovalConformanceTest {
         val coverStamps = mutableListOf<Long>()
         val inLibraryAtHandOut = mutableListOf<Boolean>()
         val toldSourceTracker = mutableListOf<Pair<EntryId, Boolean>>()
+        val handedBack = mutableListOf<Pair<ContentType, List<Long>>>()
+
+        protected val localVolumes = object : LocalVolumeHandBack {
+            override suspend fun handBack(type: ContentType, ids: List<Long>) {
+                handedBack += type to ids
+            }
+        }
 
         protected val sourceTracker = mockk<SourceTrackerDispatcher> {
             every { favoriteChanged(any(), any()) } answers { toldSourceTracker += firstArg<EntryId>() to secondArg() }
@@ -240,6 +298,7 @@ class EntryLibraryRemovalConformanceTest {
             getManga = mockk<GetManga> { coEvery { await(any<Long>()) } answers { rows[firstArg()] } },
             updateManga = UpdateManga(repository, mockk(), mockk(relaxed = true)),
             coverCache = cache,
+            localVolumes = { localVolumes },
         )
 
         override fun entryId(id: Long) = EntryId.Manga(id)
@@ -284,6 +343,7 @@ class EntryLibraryRemovalConformanceTest {
             sourceTracker = sourceTracker,
             novelRepository = repository,
             coverCache = cache,
+            localVolumes = { localVolumes },
         )
 
         override fun entryId(id: Long) = EntryId.Novel(id)
@@ -301,5 +361,12 @@ class EntryLibraryRemovalConformanceTest {
         const val ID = 5L
         const val OTHER_ID = 6L
         val JOINED_AT = Instant.fromEpochMilliseconds(100L)
+        const val COLOR = 0x123456
+        const val BROWSE_BASE = 10_000L
+    }
+
+    @AfterEach
+    fun clearColors() {
+        CoverColors.clear()
     }
 }

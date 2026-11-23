@@ -1,6 +1,6 @@
 package reikai.data.novel
 
-import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.model.Novel
@@ -9,44 +9,65 @@ import reikai.novel.source.NovelSource
 import reikai.util.runCatchingCancellable
 import tachiyomi.domain.library.service.LibraryPreferences
 
+/** What [walkNovelPages] synced, and the page count the next walk starts from. */
+data class NovelPageWalk(val synced: NovelChapterSyncResult, val walkedThrough: Long)
+
 /**
- * Walk a paged source's chapter pages [fromPage]..[toPage] inclusive, syncing each into the novel's
- * stored chapters (tagged with its transport index). Callers pass `fromPage = oldTotalPages` so the
- * previously-last page is re-fetched too, surfacing chapters appended to it before a new page opened.
- * Page 1 is the caller's responsibility, coming from `parseNovel` rather than `parsePage`. A page that
- * throws or returns nothing is skipped rather than fatal, so one flaky page cannot abort the rest.
- * Returns the pages' sync results added together.
+ * Walk a paged source's chapter pages from the stored mark [walkedThrough] to [toPage], syncing each into the novel's
+ * stored chapters (tagged with its transport index). The mark page is fetched again, so chapters appended to it are
+ * picked up, and a page past it counts as opened since. [alsoPage], the page a user views, is synced too. Page 1 is
+ * the caller's. A page that throws is skipped, but the returned mark stops below it, so the next walk fetches it again.
+ * [dropsPagesPastLast] walks from page 2, re-tagging chapters that moved down, then drops the rows still past [toPage]
+ * only when no page failed or came back empty, since such a page may be where they moved (library.md).
  */
 suspend fun walkNovelPages(
     novel: Novel,
     source: NovelSource,
-    fromPage: Long,
+    walkedThrough: Long,
     toPage: Long,
     novelChapterRepository: NovelChapterRepository,
     novelRepository: NovelRepository,
     libraryPreferences: LibraryPreferences,
-    numberOverrides: ChapterNumberOverrideRepository,
+    syncRules: NovelChapterSyncRules,
     novelDownloadManager: NovelDownloadManager? = null,
-): NovelChapterSyncResult {
-    var walked = NovelChapterSyncResult.UNCHANGED
-    if (toPage <= 1L) return walked
-    for (p in maxOf(fromPage, 1L)..toPage) {
+    alsoPage: Long? = null,
+    dropsPagesPastLast: Boolean = false,
+): NovelPageWalk {
+    val range = maxOf(2L, walkedThrough)..toPage
+    val walked = if (dropsPagesPastLast) 2L..toPage else range
+    val pages = listOfNotNull(alsoPage?.takeIf { it in 2L..toPage && it !in walked }) + walked
+    var synced = NovelChapterSyncResult.UNCHANGED
+    var mark = walkedThrough
+    var failed = false
+    var anyFailed = false
+    for (p in pages) {
         val key = p.toString()
-        val chapters = runCatchingCancellable { source.parsePage(novel.url, key)?.chapters }.getOrNull().orEmpty()
-        if (chapters.isNotEmpty()) {
-            runCatchingCancellable {
+        val result = runCatchingCancellable {
+            val chapters = source.parsePage(novel.url, key)?.chapters.orEmpty()
+            if (chapters.isEmpty()) {
+                // A challenge page loads without an error and lists nothing, so a dropping walk counts it as failed.
+                NovelChapterSyncResult.UNCHANGED.takeUnless { dropsPagesPastLast }
+            } else {
                 syncChaptersWithNovelSource(
                     chapters,
                     novel,
                     novelChapterRepository,
                     novelRepository,
                     libraryPreferences,
-                    numberOverrides,
+                    syncRules,
                     page = key,
+                    pageOpened = p > walkedThrough,
                     novelDownloadManager = novelDownloadManager,
+                    dropPagesAbove = toPage.takeIf { dropsPagesPastLast && p == toPage && !anyFailed },
                 )
-            }.onSuccess { walked += it }
+            }
+        }.getOrNull()
+        if (result != null) synced += result
+        anyFailed = anyFailed || result == null
+        if (p in range) {
+            failed = failed || result == null
+            if (!failed) mark = maxOf(mark, p)
         }
     }
-    return walked
+    return NovelPageWalk(synced, mark)
 }

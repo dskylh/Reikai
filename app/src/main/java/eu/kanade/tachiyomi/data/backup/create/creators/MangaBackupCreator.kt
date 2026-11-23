@@ -6,9 +6,7 @@ import eu.kanade.tachiyomi.data.backup.models.BackupManga
 import eu.kanade.tachiyomi.data.backup.models.BackupSearchMetadata
 import eu.kanade.tachiyomi.data.backup.models.BackupSearchTag
 import eu.kanade.tachiyomi.data.backup.models.BackupSearchTitle
-import eu.kanade.tachiyomi.data.backup.models.customInfo
 import eu.kanade.tachiyomi.data.backup.models.toBackupChapter
-import eu.kanade.tachiyomi.data.backup.models.toBackupCustomInfo
 import eu.kanade.tachiyomi.data.backup.models.toBackupReadingSession
 import eu.kanade.tachiyomi.data.backup.models.toBackupTracking
 import eu.kanade.tachiyomi.ui.reader.setting.ReadingMode
@@ -16,9 +14,21 @@ import kotlinx.coroutines.flow.first
 import mihon.core.common.extensions.toByteArray
 import mihon.core.common.extensions.toEpochMillisOrZero
 import reikai.data.backup.BackupEntryParts
+import reikai.data.backup.ChapterTombstoneBackupParts
+import reikai.data.backup.ChunkRead
+import reikai.data.backup.writeCategories
+import reikai.data.backup.writeCustomInfo
+import reikai.data.backup.writeLocalVolumes
 import reikai.data.backup.writeRows
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.ChapterTombstoneRepository
+import reikai.domain.chapter.LocalVolumeRepository
+import reikai.domain.chapter.VolumePickRepository
+import reikai.domain.chapter.toBackupValue
 import reikai.domain.library.ContentType
+import reikai.domain.library.LibraryHiddenRepository
+import reikai.domain.library.LibraryManualOrderRepository
 import reikai.domain.merge.MergeGroupRepository
 import reikai.domain.readinglog.ReadingLogRepository
 import tachiyomi.domain.category.repository.CategoryRepository
@@ -26,11 +36,13 @@ import tachiyomi.domain.chapter.repository.ChapterRepository
 import tachiyomi.domain.history.repository.HistoryRepository
 import tachiyomi.domain.manga.interactor.GetFavorites
 import tachiyomi.domain.manga.interactor.GetManga
+import tachiyomi.domain.manga.model.CustomMangaInfo
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.manga.repository.CustomMangaInfoRepository
 import tachiyomi.domain.manga.repository.MangaMetadataRepository
 import tachiyomi.domain.manga.repository.MangaRepository
 import tachiyomi.domain.track.repository.TrackRepository
+import tachiyomi.source.local.isLocal
 
 @Inject
 class MangaBackupCreator(
@@ -50,14 +62,35 @@ class MangaBackupCreator(
     private val mergeGroupRepository: MergeGroupRepository,
     // RK: chapter numbers the user corrected, carried beside the source's own.
     private val chapterNumberOverrides: ChapterNumberOverrideRepository,
+    // RK: the user's corrections to the duplicate rule, carried on each chapter.
+    private val copyMarks: ChapterCopyMarkRepository,
+    // RK: a local series' volume order and names, carried with it.
+    private val localVolumes: LocalVolumeRepository,
+    // RK: the volume chip a local series was left on, carried with it.
+    private val volumePicks: VolumePickRepository,
     // RK: the reading log, carried with history.
     private val readingLog: ReadingLogRepository,
+    // RK: each entry's places in Manual library orders, carried with its categories.
+    private val manualOrder: LibraryManualOrderRepository,
+    // RK: a local series' removed chapters' kept reading state, carried with its chapters.
+    private val tombstones: ChapterTombstoneRepository,
+    // RK: whether each entry is hidden from the library view.
+    private val libraryHides: LibraryHiddenRepository,
 ) : BackupEntryParts<Manga, BackupManga> { // RK
+
+    // RK: history keys by chapter url, so it reuses the chapters part's read of the same chunk, as upstream reads once
+    private val chunkChapters = ChunkRead { chapterRepository.getChaptersByMangaIds(it) }
+
+    // RK: kept states, with their history only under History too, shared with novels
+    private val keptStates =
+        ChapterTombstoneBackupParts(ContentType.MANGA, tombstones, Manga::id, BackupManga::chapterTombstones)
 
     // RK --> the option gates, the choice of which manga to back up and the chunking live in the driver
     // shared with novels (reikai.data.backup.backupEntries), so this class answers one part at a time for
     // a whole chunk.
     override suspend fun favorites(): List<Manga> = getFavorites.await()
+
+    override fun identity(entry: Manga): Any = entry.id
 
     override suspend fun readNotInLibrary(): List<Manga> = mangaRepository.getReadMangaNotInLibrary()
 
@@ -69,11 +102,13 @@ class MangaBackupCreator(
 
     override suspend fun base(entries: List<Manga>): List<BackupManga> {
         val excludedScanlatorsByMangaId = mangaRepository.getExcludedScanlatorsByMangaIds(entries.map { it.id })
-        return entries.map { entry ->
+        val hiddenIds = libraryHides.subscribe(ContentType.MANGA).first() // RK
+        val backups = entries.map { entry ->
             // Entry for this manga
             val mangaObject = entry.toBackupManga()
 
             mangaObject.excludedScanlators = excludedScanlatorsByMangaId[entry.id].orEmpty()
+            mangaObject.libraryHidden = entry.id in hiddenIds // RK
 
             // Carry captured adult/EXH gallery metadata so a restore brings the tags back.
             mangaMetadataRepository.getMetadataById(entry.id)?.let { meta ->
@@ -91,24 +126,37 @@ class MangaBackupCreator(
 
             mangaObject
         }
+        // A local series' grouping describes the series, not its chapters, so it rides with every entry.
+        val batch = entries.zip(backups)
+        batch.writeLocalVolumes(ContentType.MANGA, localVolumes, volumePicks, { it.isLocal() }, Manga::id, Manga::url)
+        val looseBySeries = localVolumes.loadedLooseFiles()
+        batch.forEach { (entry, backup) -> if (entry.isLocal()) backup.looseFiles = looseBySeries[entry.url]?.stored }
+        return backups
     }
 
     override suspend fun chapters(batch: List<Pair<Manga, BackupManga>>) {
         val mangaIds = batch.map { it.first.id }
         val overridesByMangaId = chapterNumberOverrides.getByOwners(ContentType.MANGA, mangaIds)
-        batch.writeRows(chapterRepository.getChaptersByMangaIds(mangaIds), Manga::id) { entry, backup, chapters ->
+        val marksByMangaId = copyMarks.loadedMarks(ContentType.MANGA) // RK
+        batch.writeRows(chunkChapters(mangaIds), Manga::id) { entry, backup, chapters ->
             val overrides = overridesByMangaId[entry.id].orEmpty()
+            val marks = marksByMangaId[entry.id].orEmpty() // RK
             backup.chapters = chapters.map { chapter ->
-                chapter.toBackupChapter().apply { sourceChapterNumber = overrides[chapter.url]?.sourceNumber }
+                chapter.toBackupChapter().apply {
+                    sourceChapterNumber = overrides[chapter.url]?.sourceNumber
+                    copyMark = marks[chapter.url]?.toBackupValue() // RK
+                }
             }
         }
+        keptStates.chapters(batch)
     }
 
     override suspend fun categories(batch: List<Pair<Manga, BackupManga>>) {
         val categoriesByMangaId = categoryRepository.getCategoriesByMangaIds(batch.map { it.first.id })
-        batch.writeRows(categoriesByMangaId, Manga::id) { _, backup, categories ->
-            backup.categories = categories.map { it.order }
-        }
+        // RK: the step both types share, which also writes each entry's places in Manual orders
+        batch.writeCategories(ContentType.MANGA, Manga::id, categoriesByMangaId, {
+            categories = it
+        }, manualOrder, categoryRepository)
     }
 
     override suspend fun tracking(batch: List<Pair<Manga, BackupManga>>) {
@@ -128,13 +176,7 @@ class MangaBackupCreator(
         val mangaIds = batch.map { it.first.id }
         val historyByMangaId = historyRepository.getHistoryByMangaIds(mangaIds)
         // History is backed up by chapter URL, so it needs the chapters too
-        val chaptersByMangaId = if (historyByMangaId.isEmpty()) {
-            emptyMap()
-        } else {
-            chapterRepository.getChaptersByMangaIds(
-                mangaIds,
-            )
-        }
+        val chaptersByMangaId = if (historyByMangaId.isEmpty()) emptyMap() else chunkChapters(mangaIds)
         val sessionsByMangaId = readingLog.sessionsByUrl(ContentType.MANGA, mangaIds)
         batch.forEach { (entry, backup) ->
             val chapterUrlsById = chaptersByMangaId[entry.id].orEmpty().associate { it.id to it.url }
@@ -149,13 +191,11 @@ class MangaBackupCreator(
             // Sessions ride the history option, keyed by url as history is
             backup.readingSessions = sessionsByMangaId[entry.id].orEmpty().map { it.toBackupReadingSession() }
         }
+        keptStates.history(batch)
     }
 
     override suspend fun customInfo(batch: List<Pair<Manga, BackupManga>>) {
-        batch.forEach { (entry, backup) ->
-            customMangaInfoRepository.getByMangaIdAsFlow(entry.id).first()
-                ?.let { backup.customInfo = it.toBackupCustomInfo() }
-        }
+        batch.writeCustomInfo(customMangaInfoRepository.getAllAsFlow().first(), CustomMangaInfo::mangaId, Manga::id)
     }
     // RK <--
 }

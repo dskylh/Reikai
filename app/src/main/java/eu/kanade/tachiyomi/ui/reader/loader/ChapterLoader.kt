@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.ui.reader.loader
 
 import android.content.Context
 import eu.kanade.domain.chapter.model.toSChapter
-import eu.kanade.tachiyomi.data.cache.ChapterCache
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.download.DownloadProvider
 import eu.kanade.tachiyomi.source.Source
@@ -12,7 +11,10 @@ import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import kotlinx.coroutines.CoroutineScope
 import mihon.core.archive.archiveReader
 import mihon.core.archive.epubReader
+import mihon.data.cache.ChapterCache
 import reikai.presentation.reader.ReaderResume
+import reikai.source.local.isLocalVolumeExtras
+import reikai.source.local.volumeExtras
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
@@ -43,7 +45,7 @@ class ChapterLoader(
      * is already loaded.
      */
     // RK: fromSource reads the source even when the chapter is downloaded, for a reload from the source
-    suspend fun loadChapter(chapter: ReaderChapter, fromSource: Boolean = false) {
+    suspend fun loadChapter(chapter: ReaderChapter, fromSource: Boolean) {
         if (chapterIsReady(chapter)) {
             return
         }
@@ -98,6 +100,7 @@ class ChapterLoader(
         )
         return when {
             isDownloaded -> DownloadPageLoader(
+                context,
                 chapter,
                 manga,
                 source,
@@ -106,7 +109,12 @@ class ChapterLoader(
             )
             source is LocalSource -> source.getFormat(chapter.chapter.toSChapter()).let { format ->
                 when (format) {
-                    is Format.Directory -> DirectoryPageLoader(format.file)
+                    // RK: an Extras chapter, addressed by its volume folder, opens that folder without its cover
+                    is Format.Directory -> if (isLocalVolumeExtras(chapter.chapter.url)) {
+                        DirectoryPageLoader(format.file, pages = ::volumeExtras)
+                    } else {
+                        DirectoryPageLoader(format.file)
+                    }
                     is Format.Archive -> ArchivePageLoader(format.file.archiveReader(context))
                     is Format.Epub -> EpubPageLoader(format.file.epubReader(context))
                 }

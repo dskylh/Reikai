@@ -58,6 +58,10 @@ HISTORY_WORDS="used to (be|sit|have|always)|previously|was found by|found by an 
 SUBSYSTEM_HISTORY='\b20[0-9]{2}-[0-9]{2}-[0-9]{2}\b|`[0-9a-f]{7,40}`|\bstep[[:space:]]+[0-9]|\bround[[:space:]]+(one|two|[0-9])|\bphase[[:space:]]+[0-9]|\(owner,|^#+[[:space:]]+status\b'
 SUBSYSTEM_MAX_LINES=300
 
+# A one-type decision with no reason on its line, or a table cell that waves a type away. The write-once
+# rule (content-layer.md) only accepts a named mechanism, so a claim standing alone is a gap in disguise.
+PARITY_BARE='\*\*[^*]*\b(manga|novels?)[ -]only[.!]?\*\*[[:space:]]*$|\|[[:space:]]*N/A[[:space:]]*\|'
+
 # Shared awk prologue for the checks that read either a unified diff (git diff -U0, the hook's feed) or
 # whole files (tree=1). It sets `file`, `line` (without the diff's '+') and `where` (path:line) for each
 # added or scanned line, and calls the program's own boundary() wherever a run of lines is broken.
@@ -216,6 +220,28 @@ case "$cmd" in
         exit 1
       fi
     fi
+    ;;
+
+  live-twins)
+    # A twin row is what tells a sync where a Mihon fix also belongs, so a row naming a file that moved
+    # sends that fix nowhere, and a format that stops matching reads as nothing to check.
+    file="${1:?file}"
+    rows=$(grep -E '^\|[[:space:]]*[a-z0-9-]+/' "$file" || true)
+    if [ -z "$rows" ]; then
+      report "$file has no machine-readable rows, so the sync check would silently pass."
+      exit 1
+    fi
+    fail=0
+    while IFS='|' read -r _ mihon twin _; do
+      for path in "$mihon" "$twin"; do
+        path=$(echo "$path" | tr -d ' ')
+        if [ ! -e "$path" ]; then
+          report "$file names $path, which does not exist."
+          fail=1
+        fi
+      done
+    done <<< "$rows"
+    exit "$fail"
     ;;
 
   manifest-rows)
@@ -436,6 +462,10 @@ case "$cmd" in
       [ -f "$file" ] || continue
       if hits=$(grep -niE "$SUBSYSTEM_HISTORY" "$file"); then
         report "$file carries history (a date, a commit SHA, a step, round or phase, an owner ruling, or a Status section); leave the history to git and describe what is." "$hits"
+        fail=1
+      fi
+      if hits=$(grep -niE "$PARITY_BARE" "$file"); then
+        report "$file marks something for one content type with no reason; name the mechanism that stops the other type (content-layer.md, write once)." "$hits"
         fail=1
       fi
       lines=$(awk 'END { print NR }' "$file")

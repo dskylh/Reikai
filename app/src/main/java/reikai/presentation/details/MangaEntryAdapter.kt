@@ -3,6 +3,7 @@ package reikai.presentation.details
 import androidx.compose.runtime.Immutable
 import eu.kanade.presentation.manga.DownloadAction
 import eu.kanade.presentation.manga.components.ChapterDownloadAction
+import eu.kanade.presentation.manga.components.SearchMetadataChips
 import eu.kanade.tachiyomi.data.track.Tracker
 import eu.kanade.tachiyomi.data.track.model.TrackMangaMetadata
 import eu.kanade.tachiyomi.source.Source
@@ -16,8 +17,12 @@ import kotlinx.coroutines.flow.StateFlow
 import reikai.domain.chapter.ChapterNumberEdit
 import reikai.domain.chapter.ChapterNumberHint
 import reikai.domain.entry.EntryId
+import reikai.domain.entry.seriesAltTitles
+import reikai.domain.library.ContentType
+import reikai.domain.library.tagKey
 import reikai.domain.merge.coverFallbacks
 import reikai.domain.reader.ChapterProgress
+import reikai.presentation.components.DownloadProgress
 import reikai.presentation.components.UndatedChapterDate
 import reikai.presentation.components.chapterSubtitle
 import reikai.presentation.components.mergeSourceLabels
@@ -40,20 +45,39 @@ import tachiyomi.source.local.isLocal
 class MangaEntryAdapter(
     private val model: MangaViewModel,
     private val coverViewModelFactory: MangaEntryCoverViewModel.Factory,
+    override val duplicateMarking: DuplicateMarking,
+    override val volumePicking: VolumePicking,
 ) : EntryDetailsBehavior {
 
-    override val state: StateFlow<EntryDetailsScreenState> = model.neutralDetailsState(model.state) { it.toNeutral() }
+    private val duplicatesMemo = DuplicateMarksMemo<Chapter>()
 
-    override val downloadProgress = EntryDownloadProgress.Live(model::getDownloadProgress)
+    private val volumeInputs = DetailsVolumeInputs(volumePicking, ContentType.MANGA)
 
-    private fun MangaViewModel.State.toNeutral(): EntryDetailsScreenState = when (this) {
+    override val state: StateFlow<EntryDetailsScreenState> =
+        model.neutralDetailsState(model.state, duplicateMarking.marks, volumeInputs) { state, marks ->
+            state.toNeutral(marks)
+        }
+
+    override fun setOnlyCopies(on: Boolean) = volumeInputs.setOnlyCopies(on)
+
+    override fun downloadProgress(chapterId: Long) = DownloadProgress.Live { model.getDownloadProgress(chapterId) }
+
+    private fun MangaViewModel.State.toNeutral(marks: CopyMarks?): EntryDetailsScreenState = when (this) {
         MangaViewModel.State.Loading -> EntryDetailsScreenState.Loading
-        is MangaViewModel.State.Success -> toNeutralLoaded()
+        MangaViewModel.State.NotFound -> EntryDetailsScreenState.NotFound
+        is MangaViewModel.State.Success -> toNeutralLoaded(marks)
     }
 
-    private fun MangaViewModel.State.Success.toNeutralLoaded(): EntryDetailsScreenState.Loaded {
+    private fun MangaViewModel.State.Success.toNeutralLoaded(marks: CopyMarks?): EntryDetailsScreenState.Loaded {
         // Header, description, tags and the gallery chips all read this one entry; actions keep the raw `manga`.
         val shown = shownManga(manga, siblingChip(), customInfo, chipCustomInfo)
+        val tags = shownTags(
+            wholeGroup = headerNamesWholeGroup(mergeSources.size, selectedSourceMangaId),
+            shown = shown.genre,
+            custom = customInfo?.genre,
+            anchor = manga.genre,
+            members = mergedMangaById.values.map { it.genre },
+        )
         // The inline carousel shows only for inline placement; in-menu still loads the pool, just hides it.
         val showInlineRelated = !model.recommendationsInMenu && (relatedLoading || relatedItems.isNotEmpty())
         return EntryDetailsScreenState.Loaded(
@@ -70,6 +94,17 @@ class MangaEntryAdapter(
                     } else {
                         emptyList()
                     },
+                    altTitles = seriesAltTitles(
+                        shown.title,
+                        altTitleMembers(
+                            mergeSources.size,
+                            selectedSourceMangaId,
+                            mergedMangaById.values.toList(),
+                            shownManga,
+                        )
+                            .map { it.title },
+                        customInfo?.altTitles.orEmpty(),
+                    ),
                 ),
                 favorite = manga.favorite,
                 trackingCount = trackingCount,
@@ -77,20 +112,41 @@ class MangaEntryAdapter(
                 nextUpdate = intervalManga.expectedNextUpdate,
                 isUserIntervalMode = intervalManga.fetchInterval < 0,
                 description = shown.description,
-                tags = shown.genre,
-                notes = manga.notes,
+                tags = tags,
+                notes = shown.notes,
                 // Expand by default for EH/EXH galleries (tags are the content, no description).
                 descriptionDefaultExpanded = isFromSource || isMetadataSource,
             ),
             chapters = EntryChapterListUiState(
                 items = chapterSourceNames().let { names ->
-                    chapterListItems.map { it.toNeutralItem(names, numberHints) }
+                    val owners = chapterOwners()
+                    chapterListItems.map { it.toNeutralItem(names, owners, numberHints) }
                 },
                 missingChapterCount = missingChapterCount,
                 showHidden = showHidden,
                 hasHiddenChapters = hasHiddenChapters,
                 hiddenChapterIds = hiddenChapterIds,
                 undatedChapterDate = UndatedChapterDate.NotApplicable,
+                // The arguments the reader's skip-duplicate rule takes (ReaderViewModel.navigable)
+                duplicates = marks?.let {
+                    val rows = chapters.map { item -> item.chapter }
+                    duplicatesMemo.get(rows, it) {
+                        rows.duplicateMarks(
+                            it,
+                            numberOf = { it.chapterNumber },
+                            nameOf = { it.name },
+                            originOf = { it.scanlator },
+                            ownerOf = { it.mangaId },
+                            urlOf = { it.url },
+                            idOf = { it.id },
+                        )
+                    }
+                },
+                volumes = chapterOwners().let { owners ->
+                    chapters.mapNotNull {
+                        mangaChapterVolume(owners[it.chapter.mangaId], it.chapter.url, it.chapter.name)
+                    }
+                },
             ),
             capabilities = EntryCapabilities(
                 mangaPagePreviews = if (pagePreviewsState !is PagePreviewState.Unused && previewsRowCount > 0) {
@@ -108,6 +164,7 @@ class MangaEntryAdapter(
                 mangaGallery = MangaGalleryCapability(
                     sourceId = shownSource.id,
                     rawGenre = shown.genre,
+                    otherTags = tagsBeyond(tags, shown.genre),
                     metadata = galleryMetadata,
                     tagQuery = shownSource.getMainSource<MetadataSource<*, *>>()?.let { it::tagSearchQuery },
                 ),
@@ -129,14 +186,20 @@ class MangaEntryAdapter(
         )
     }
 
+    private fun MangaViewModel.State.Success.chapterOwners(): Map<Long, Manga> =
+        mergedMangaById + (manga.id to manga)
+
     private fun MangaViewModel.State.Success.chapterSourceNames(): Map<Long, String> =
         mergeSourceLabels(mergeSources.associate { it.id to it.sourceName })
 
     private fun ChapterList.toNeutralItem(
         sourceNames: Map<Long, String>,
+        owners: Map<Long, Manga>,
         numberHints: Map<Long, ChapterNumberHint.Hint>,
     ): EntryChapterListItem = when (this) {
-        is ChapterList.Item -> toEntryChapter(sourceNames[chapter.mangaId], numberHinted = id in numberHints)
+        is ChapterList.Item -> toEntryChapter(sourceNames[chapter.mangaId], numberHinted = id in numberHints).copy(
+            volume = mangaChapterVolume(owners[chapter.mangaId], chapter.url, chapter.name),
+        )
         is ChapterList.MissingCount -> EntryChapterListItem.Missing(id = id, count = count)
     }
 
@@ -147,6 +210,12 @@ class MangaEntryAdapter(
         successState()?.chapters?.firstOrNull { it.id == id }
 
     private fun chapterById(id: Long): Chapter? = itemById(id)?.chapter
+
+    // One pass over the list, where a lookup per id would walk it once for each.
+    private fun chaptersByIds(ids: List<Long>): List<Chapter> {
+        val wanted = ids.toSet()
+        return successState()?.chapters.orEmpty().filter { it.id in wanted }.map { it.chapter }
+    }
 
     /** The selection over the filtered rows on screen, never over the full chapter list behind them. */
     private fun MangaViewModel.State.Success.visibleSelection(): Set<Long> = EntrySelection.selectedAmong(
@@ -162,18 +231,29 @@ class MangaEntryAdapter(
 
     private fun selectedChapters(): List<Chapter> = selectedItems().map { it.chapter }
 
+    override fun selectedMarkable() = selectedChapters().map { MarkableChapter(it.mangaId, it.url) }
+
+    override fun toggleChapterBlock(chapterIds: List<Long>) {
+        val shown = successState()?.processedChapters?.map { it.id } ?: return
+        model.toggleBlock(chapterIds, visible = shown)
+    }
+
+    override fun markChaptersRead(chapterIds: List<Long>, read: Boolean) {
+        model.markChaptersRead(chaptersByIds(chapterIds), read)
+    }
+
     // --- EntryDetailsBehavior: forward to the model (reconciling neutral ids -> the model's shapes). ---
 
-    override fun toggleSelection(chapterId: Long, fromLongPress: Boolean) {
+    override fun toggleSelection(chapterId: Long, fromLongPress: Boolean, shown: List<Long>) {
         val item = itemById(chapterId) ?: return
-        model.toggleSelection(item, fromLongPress)
+        model.toggleSelection(item, fromLongPress, shown)
     }
 
-    override fun selectAll() {
-        model.toggleAllSelection(true)
+    override fun selectAll(shown: List<Long>) {
+        model.selectAll(shown)
     }
-    override fun invertSelection() {
-        model.invertSelection()
+    override fun invertSelection(shown: List<Long>) {
+        model.invertSelection(shown)
     }
     override fun clearSelection() {
         model.toggleAllSelection(false)
@@ -247,8 +327,8 @@ class MangaEntryAdapter(
         model.showChangeCategoryDialog()
     }
 
-    override fun showCoverDialog() {
-        model.showCoverDialog()
+    override fun showCoverDialog(volume: EntryChapterListItem.Volume?) {
+        model.showCoverDialog(volume)
     }
     override fun createCoverViewModel(): EntryCoverViewModel<*> =
         coverViewModelFactory.create(shownCover()?.id ?: 0L)
@@ -271,9 +351,7 @@ class MangaEntryAdapter(
         model.resetMangaInfo(manga)
     }
 
-    override fun showTrackDialog() {
-        model.showTrackDialog()
-    }
+    override suspend fun mergedSourceTags(): List<String>? = model.mergedSourceTags()
 
     override suspend fun autofillCandidates(): List<Pair<Track, Tracker>> = model.autofillCandidates()
 
@@ -302,24 +380,14 @@ class MangaEntryAdapter(
         model.setFetchInterval(manga, days)
     }
 
+    override fun relinkSeries(folder: String) {
+        model.relinkSeries(folder)
+    }
+
     override fun showManageSourcesDialog() {
         model.showManageSourcesDialog()
     }
-    override fun reorderSources(orderedIds: List<Long>) {
-        model.reorderSources(orderedIds)
-    }
-    override fun resetSourceOrder() {
-        model.resetSourceOrder()
-    }
-    override fun splitSources(targetIds: List<Long>) {
-        model.splitSources(targetIds)
-    }
-    override fun removeSourcesFromLibrary(targetIds: List<Long>) {
-        model.removeSourcesFromLibrary(targetIds)
-    }
-    override fun removeAllSourcesFromLibrary() {
-        model.removeAllSourcesFromLibrary()
-    }
+    override val mergeActions get() = model.mergeActions
 
     override fun refresh() {
         model.fetchAllFromSource()
@@ -352,7 +420,8 @@ data class MangaRelatedCarouselCapability(
  * A manga's namespaced-tag + gallery inputs. Present for every manga; the grouped tag chips build from
  * [rawGenre] (an adult source stores genre as "namespace:tag") even before [metadata] loads, and the
  * gallery-info card renders only once [metadata] is non-null. Both produce nothing for a normal manga.
- * [tagQuery] is the viewed metadata source's own tag grammar, null for any other source.
+ * [tagQuery] is the viewed metadata source's own tag grammar, null for any other source. [otherTags]
+ * are the series' tags [rawGenre] lacks, kept out of it, since the grouped chips need every tag namespaced.
  */
 @Immutable
 data class MangaGalleryCapability(
@@ -360,7 +429,19 @@ data class MangaGalleryCapability(
     val rawGenre: List<String>?,
     val metadata: RaisedSearchMetadata?,
     val tagQuery: ((namespace: String, tag: String) -> String)?,
-)
+    val otherTags: List<String>,
+) {
+    fun chips(): SearchMetadataChips? = SearchMetadataChips(metadata, sourceId, rawGenre, tagQuery, otherTags)
+}
+
+/**
+ * The page's [tags] the viewed entry's [own] lack: under All, the other sources' tags, which a gallery's
+ * grouped chips (built from its own namespaced tags) cannot carry, so they show in a row of their own.
+ */
+private fun tagsBeyond(tags: List<String>?, own: List<String>?): List<String> {
+    val owned = own.orEmpty().mapTo(HashSet(), ::tagKey)
+    return tags.orEmpty().filterNot { tagKey(it) in owned }
+}
 
 /** A details row for a manga chapter, read and bookmarked as the merge group answers for it. */
 internal fun ChapterList.Item.toEntryChapter(sourceName: String?, numberHinted: Boolean) = EntryChapterListItem.Chapter(

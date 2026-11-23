@@ -1,61 +1,68 @@
 package eu.kanade.tachiyomi.ui.webview
 
+import android.widget.Toast
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
-import eu.kanade.presentation.util.AssistContentScreen
-import eu.kanade.presentation.util.Screen
 import eu.kanade.presentation.webview.WebViewScreenContent
+import eu.kanade.tachiyomi.util.system.WebViewUtil
+import eu.kanade.tachiyomi.util.system.toast
+import mihon.core.navigation.LocalAssistUrl
+import mihon.core.navigation.WebViewRoute
+import reikai.navigation.NovelWebTarget
 import reikai.presentation.webview.rememberNovelPageActions
 import reikai.presentation.webview.rememberPluginStorageCapture
+import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.screens.LoadingScreen
 
-class WebViewScreen(
-    private val url: String,
-    private val initialTitle: String? = null,
-    private val sourceId: Long? = null,
-    // RK: a novel's page, which a source taking pages can read the novel's details and chapters from
-    private val novelId: Long? = null,
-    // RK: a novel source's text id, so the page opens with that source's headers
-    private val novelSourceId: String? = null,
-    // RK: a light-novel plugin, installed or not, that keeps this site's storage, as LNReader's WebView does
-    private val pluginId: String? = null,
-) : Screen(), AssistContentScreen {
+@Composable
+fun WebViewScreen(
+    route: WebViewRoute,
+    onNavigateUp: () -> Unit,
+) {
+    val setAssistUrl = LocalAssistUrl.current
+    val context = LocalContext.current
 
-    private var assistUrl: String? = null
-
-    override fun onProvideAssistUrl() = assistUrl
-
-    @Composable
-    override fun Content() {
-        val navigator = LocalNavigator.currentOrThrow
-        val context = LocalContext.current
-        val viewModel = assistedMetroViewModel<WebViewViewModel, WebViewViewModel.Factory> {
-            create(sourceId = sourceId, novelSourceId = novelSourceId) // RK
+    if (!remember { WebViewUtil.supportsWebView(context) }) {
+        LaunchedEffect(Unit) {
+            context.toast(MR.strings.information_webview_required, Toast.LENGTH_LONG)
+            onNavigateUp()
         }
-
-        val headers by viewModel.headers.collectAsState()
-        if (headers == null) {
-            LoadingScreen()
-            return
-        }
-
-        WebViewScreenContent(
-            onNavigateUp = { navigator.pop() },
-            initialTitle = initialTitle,
-            url = url,
-            headers = headers.orEmpty(),
-            defaultUserAgentProvider = viewModel::defaultUserAgentProvider,
-            onUrlChange = { assistUrl = it },
-            onShare = { viewModel.shareWebpage(context, it) },
-            onOpenInBrowser = { viewModel.openInBrowser(context, it) },
-            onClearCookies = viewModel::clearCookies,
-            pageActions = rememberNovelPageActions(novelId), // RK
-            onPageFinished = rememberPluginStorageCapture(pluginId, novelSourceId), // RK
-        )
+        return
     }
+
+    val page = route.novel as? NovelWebTarget.Page // RK: what the novel target carries, for the helpers below
+    val viewModel =
+        assistedMetroViewModel<WebViewViewModel, WebViewViewModel.Factory> {
+            // RK: a novel source's page, a plugin's site among them, opens under the agent its fetches send
+            create(
+                sourceId = route.sourceId,
+                url = route.url,
+                novelSourceId = page?.sourceId,
+            )
+        }
+
+    val headers by viewModel.headers.collectAsState()
+    if (headers == null) {
+        LoadingScreen()
+        return
+    }
+
+    WebViewScreenContent(
+        onNavigateUp = onNavigateUp,
+        initialTitle = route.initialTitle,
+        url = route.url,
+        headers = headers.orEmpty(),
+        defaultUserAgentProvider = viewModel::defaultUserAgentProvider,
+        onUrlChange = setAssistUrl,
+        onShare = { viewModel.shareWebpage(context, it) },
+        onOpenInBrowser = { viewModel.openInBrowser(context, it) },
+        onClearCookies = viewModel::clearCookies,
+        pageActions = rememberNovelPageActions(page?.novelId, page?.chapterId), // RK
+        onPageFinished = rememberPluginStorageCapture(page?.sourceId), // RK
+    )
 }

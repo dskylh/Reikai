@@ -46,8 +46,10 @@ fun LazyListScope.entryInfoItems(
     onWebViewClicked: (() -> Unit)?,
     onWebViewLongClicked: (() -> Unit)?,
     onTagSearch: (String) -> Unit,
+    onFilterLibraryByTag: ((tag: String, show: Boolean) -> Unit)?,
     onCopyTagToClipboard: (String) -> Unit,
     onEditNotes: () -> Unit,
+    descriptionImages: Boolean,
     searchMetadataChips: SearchMetadataChips? = null,
     aboveDescription: (@Composable () -> Unit)? = null,
 ) {
@@ -88,9 +90,11 @@ fun LazyListScope.entryInfoItems(
             tagsProvider = { state.tags },
             notes = state.notes,
             onTagSearch = onTagSearch,
+            onFilterLibraryByTag = onFilterLibraryByTag.takeIf { searchMetadataChips == null },
             onCopyTagToClipboard = onCopyTagToClipboard,
             onEditNotes = onEditNotes,
             onGlobalSearch = onGlobalSearch,
+            loadImages = descriptionImages,
             searchMetadataChips = searchMetadataChips,
         )
     }

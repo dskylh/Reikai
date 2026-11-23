@@ -24,6 +24,7 @@ The machine-enforced conventions (commits, CHANGELOG, screen rules) live in [`.c
 | [upstream-sync.md](upstream-sync.md) | the Mihon sync process, the deliberate divergences and the frontier (sole owner of "synced through X") | you port a Mihon commit |
 | [feature-ports.md](feature-ports.md) | what was borrowed from Komikku / Tsundoku / IReader / LNReader, per feature | you port from a non-Mihon ref |
 | [off-path-manifest.md](off-path-manifest.md) | Mihon files deleted for a `reikai.*` twin, and the sync check that guards them | you delete a Mihon file for a twin |
+| [live-twins.md](live-twins.md) | Mihon files kept live on the manga path with a Reikai-owned novel twin, and the pin that holds each pair | a Reikai file starts mirroring a Mihon one |
 | [parked.md](parked.md) | items set aside or declined, with the reason and what would revive them | you park, decline or revive an item |
 | [plans/](plans/README.md) | design still in flight; a plan is folded into its subsystem doc and deleted once the work lands | you start or finish a substantial piece of work |
 
@@ -33,7 +34,7 @@ The machine-enforced conventions (commits, CHANGELOG, screen rules) live in [`.c
 |---|---|
 | Shipped a feature | its [subsystem doc](subsystems/README.md) (rewrite the parts that changed; fold in and delete the plan, if there was one) → [CHANGELOG](../../CHANGELOG.md) (user-facing headline) → remove its line from [ROADMAP](../../ROADMAP.md) |
 | Changed how an area behaves | its [subsystem doc](subsystems/README.md), in place: the flow, invariants or decisions that changed, never an appended note |
-| Synced a Mihon commit | a [upstream-sync.md](upstream-sync.md) ledger row → [CHANGELOG](../../CHANGELOG.md) credit (`synced from Mihon, mihonapp/mihon#N`). Do **not** record the frontier anywhere else |
+| Synced a Mihon commit | a [upstream-sync.md](upstream-sync.md) ledger row → [CHANGELOG](../../CHANGELOG.md) credit (`(from Mihon)` inside the bold headline, then `Upstream: mihonapp/mihon#N`). Do **not** record the frontier anywhere else |
 | Ported from Komikku / Tsundoku / IReader / LNReader | a [feature-ports.md](feature-ports.md) row → credit in the commit body, [README](../../README.md), and the [CHANGELOG](../../CHANGELOG.md) headline |
 | Deleted a Mihon file for a `reikai.*` twin | a [off-path-manifest.md](off-path-manifest.md) row (or the next sync silently misses upstream's change to it) |
 | Started a substantial piece of work | a [plans/](plans/README.md) doc + a [ROADMAP](../../ROADMAP.md) line |

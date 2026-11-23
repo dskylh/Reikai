@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.Contextual
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromByteArray
@@ -40,29 +41,30 @@ import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encodeToByteArray
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.modules.SerializersModule
 import kotlinx.serialization.protobuf.ProtoBuf
 import logcat.LogPriority
 import mihon.core.metro.AppCoroutineScope
 import reikai.domain.download.DownloadIndexRules
+import reikai.storage.recoverInFlightRenames
 import tachiyomi.core.common.storage.extension
 import tachiyomi.core.common.storage.nameWithoutExtension
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.chapter.model.Chapter
+import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.storage.service.StorageManager
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import java.io.File
 import kotlin.time.Duration.Companion.seconds
 
 /**
  * Cache where we dump the downloads directory from the filesystem. This class is needed because
  * directory checking is expensive and it slows down the app. The cache is invalidated by the time
- * defined in [DownloadIndexRules.RENEW_INTERVAL_MS] as we don't have any control over the filesystem
+ * set in [DownloadPreferences.downloadIndexRenewHours] as we don't have any control over the filesystem
  * and the user can delete the folders at any time without the app noticing.
- * RK: the interval lives in DownloadIndexRules, which the novel download index shares.
+ * RK: the interval is a setting, read through DownloadIndexRules, which the novel download index shares.
  */
 @Inject
 @SingleIn(AppScope::class)
@@ -72,6 +74,7 @@ class DownloadCache(
     private val provider: DownloadProvider,
     private val sourceManager: SourceManager,
     private val storageManager: StorageManager,
+    private val downloadPreferences: DownloadPreferences, // RK
 ) {
 
     private val _changes: Channel<Unit> = Channel(Channel.UNLIMITED)
@@ -79,7 +82,7 @@ class DownloadCache(
         .onStart { emit(Unit) }
         .shareIn(scope, SharingStarted.Lazily, 1)
 
-    // RK: renewInterval moved to DownloadIndexRules.RENEW_INTERVAL_MS, which the novel index shares
+    // RK: renewInterval moved to DownloadPreferences.downloadIndexRenewHours, read by DownloadIndexRules.isStale
 
     /**
      * The last time the cache was refreshed.
@@ -96,6 +99,14 @@ class DownloadCache(
     private val diskCacheFile: AtomicFile
         get() = AtomicFile(File(context.cacheDir, "dl_index_cache_v3"))
 
+    private val protoBuf = ProtoBuf {
+        serializersModule = SerializersModule {
+            // Registered as non-null, but decodes an unresolvable uri to null so only that dir is dropped
+            @Suppress("UNCHECKED_CAST")
+            contextual(UniFile::class, UniFileAsStringSerializer(context) as KSerializer<UniFile>)
+        }
+    }
+
     private val rootDownloadsDirMutex = Mutex()
 
     @Volatile
@@ -108,7 +119,7 @@ class DownloadCache(
                 try {
                     if (diskCacheFile.baseFile.exists()) {
                         val diskCache = diskCacheFile.openRead().use {
-                            ProtoBuf.decodeFromByteArray<RootDirectory>(it.readBytes())
+                            protoBuf.decodeFromByteArray<RootDirectory>(it.readBytes())
                         }
                         rootDownloadsDir = diskCache
                         // RK --> take the persisted scan time rather than treating a restore as a
@@ -376,8 +387,10 @@ class DownloadCache(
      */
     private fun renewCache(deleteDiskCache: Boolean = false) {
         // Avoid renewing cache if in the process nor too often
-        // RK: the novel index renews by the same rule
-        if (!DownloadIndexRules.isStale(lastRenew, System.currentTimeMillis()) || renewalJob?.isActive == true) {
+        // RK: the novel index renews by the same rule, at the interval the user set
+        val renewHours = downloadPreferences.downloadIndexRenewHours.get()
+        val isStale = DownloadIndexRules.isStale(lastRenew, System.currentTimeMillis(), renewHours)
+        if (!isStale || renewalJob?.isActive == true) {
             return
         }
 
@@ -402,7 +415,8 @@ class DownloadCache(
             rootDownloadsDirMutex.withLock {
                 val updatedRootDir = RootDirectory(storageManager.getDownloadsDirectory())
 
-                updatedRootDir.sourceDirs = updatedRootDir.dir?.listFiles().orEmpty()
+                // RK: a source or series folder a killed case-only rename left in flight is put back first
+                updatedRootDir.sourceDirs = recoverInFlightRenames(updatedRootDir.dir?.listFiles().orEmpty().toList())
                     .filter { it.isDirectory && !it.name.isNullOrBlank() }
                     .flatMap { dir ->
                         val sourceDir = SourceDirectory(dir)
@@ -412,7 +426,8 @@ class DownloadCache(
 
                 updatedRootDir.sourceDirs.values.distinct().map { sourceDir ->
                     async {
-                        sourceDir.mangaDirs = sourceDir.dir?.listFiles().orEmpty()
+                        // RK: as the source folders above
+                        sourceDir.mangaDirs = recoverInFlightRenames(sourceDir.dir?.listFiles().orEmpty().toList())
                             .filter { it.isDirectory && !it.name.isNullOrBlank() }
                             .associate { it.name!! to MangaDirectory(it) }
 
@@ -476,7 +491,7 @@ class DownloadCache(
         updateDiskCacheJob = scope.launchIO {
             delay(1.seconds)
             val bytes = rootDownloadsDirMutex.withLock {
-                ProtoBuf.encodeToByteArray(rootDownloadsDir)
+                protoBuf.encodeToByteArray(rootDownloadsDir)
             }
             ensureActive()
             try {
@@ -497,7 +512,7 @@ class DownloadCache(
  */
 @Serializable
 private class RootDirectory(
-    @Serializable(with = UniFileAsStringSerializer::class)
+    @Contextual
     val dir: UniFile?,
     @Volatile
     var sourceDirs: Map<Long, SourceDirectory> = mapOf(),
@@ -511,7 +526,7 @@ private class RootDirectory(
  */
 @Serializable
 private class SourceDirectory(
-    @Serializable(with = UniFileAsStringSerializer::class)
+    @Contextual
     val dir: UniFile?,
     @Volatile
     var mangaDirs: Map<String, MangaDirectory> = mapOf(),
@@ -522,29 +537,22 @@ private class SourceDirectory(
  */
 @Serializable
 private class MangaDirectory(
-    @Serializable(with = UniFileAsStringSerializer::class)
+    @Contextual
     val dir: UniFile?,
     // Replaced rather than changed in place, so the lock-free lookups always read a consistent set
     @Volatile
     var chapterDirs: Set<String> = emptySet(),
 )
 
-private object UniFileAsStringSerializer : KSerializer<UniFile?> {
+private class UniFileAsStringSerializer(private val context: Context) : KSerializer<UniFile?> {
     override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("UniFile", PrimitiveKind.STRING)
 
+    // Null fields are skipped by ProtoBuf before reaching this serializer
     override fun serialize(encoder: Encoder, value: UniFile?) {
-        return if (value == null) {
-            encoder.encodeNull()
-        } else {
-            encoder.encodeString(value.uri.toString())
-        }
+        encoder.encodeString(value!!.uri.toString())
     }
 
     override fun deserialize(decoder: Decoder): UniFile? {
-        return if (decoder.decodeNotNullMark()) {
-            UniFile.fromUri(Injekt.get<Context>(), decoder.decodeString().toUri())
-        } else {
-            decoder.decodeNull()
-        }
+        return UniFile.fromUri(context, decoder.decodeString().toUri())
     }
 }

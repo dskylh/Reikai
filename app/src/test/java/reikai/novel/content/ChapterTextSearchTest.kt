@@ -5,6 +5,8 @@ import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
 import java.util.regex.PatternSyntaxException
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.TimeSource
 
 class ChapterTextSearchTest {
 
@@ -17,7 +19,7 @@ class ChapterTextSearchTest {
     ) = ChapterTextSearch.findMatches(
         text,
         NovelRegexReplacements.findRegex(query, isRegex, wholeWord, caseSensitive),
-    ).count
+    )!!.count
 
     @Test
     fun `a plain query matches literally`() {
@@ -70,7 +72,7 @@ class ChapterTextSearchTest {
     @Test
     fun `a snippet carries its match bounds`() {
         val text = "x".repeat(100) + "needle" + "y".repeat(100)
-        val snippet = ChapterTextSearch.findMatches(text, Regex("needle")).snippets.single()
+        val snippet = ChapterTextSearch.findMatches(text, Regex("needle"))!!.snippets.single()
 
         snippet.text.substring(snippet.matchStart, snippet.matchEnd) shouldBe "needle"
     }
@@ -78,19 +80,20 @@ class ChapterTextSearchTest {
     @Test
     fun `a snippet is cut with ellipses at both ends`() {
         val text = "x".repeat(100) + "needle" + "y".repeat(100)
-        val snippet = ChapterTextSearch.findMatches(text, Regex("needle")).snippets.single()
+        val snippet = ChapterTextSearch.findMatches(text, Regex("needle"))!!.snippets.single()
 
         (snippet.text.first() to snippet.text.last()) shouldBe ('…' to '…')
     }
 
     @Test
     fun `every match is counted past the snippet cap`() {
-        ChapterTextSearch.findMatches("a ".repeat(10), Regex("a"), maxSnippets = 2).count shouldBe 10
+        ChapterTextSearch.findMatches("a ".repeat(10), Regex("a"))!!.count shouldBe 10
     }
 
     @Test
     fun `snippets stop at the cap`() {
-        ChapterTextSearch.findMatches("a ".repeat(10), Regex("a"), maxSnippets = 2).snippets.size shouldBe 2
+        ChapterTextSearch.findMatches("a ".repeat(10), Regex("a"))!!.snippets.size shouldBe
+            ChapterTextSearch.MAX_SNIPPETS_PER_CHAPTER
     }
 
     @Test
@@ -98,5 +101,24 @@ class ChapterTextSearchTest {
         shouldThrow<CancellationException> {
             ChapterTextSearch.findMatches("a".repeat(100_000), Regex("b"), isActive = { false })
         }
+    }
+
+    @Test
+    fun `a scan cancelled while it is matching aborts`() {
+        val started = TimeSource.Monotonic.markNow()
+
+        shouldThrow<CancellationException> {
+            ChapterTextSearch.findMatches(
+                "g".repeat(40),
+                Regex("(.*g){12}h"),
+                isActive = { started.elapsedNow() < 200.milliseconds },
+            )
+        }
+    }
+
+    /** One matcher walks every match, and must still count and place them as a match-per-matcher walk did. */
+    @Test
+    fun `every match is placed where it falls`() {
+        ChapterTextSearch.findMatches("ab ab", Regex("b"))!!.snippets.map { it.matchStart } shouldBe listOf(1, 4)
     }
 }

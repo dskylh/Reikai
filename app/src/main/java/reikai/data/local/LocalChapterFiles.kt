@@ -1,0 +1,92 @@
+package reikai.data.local
+
+import android.content.Context
+import com.hippo.unifile.UniFile
+import dev.zacsweers.metro.Inject
+import reikai.domain.library.ContentType
+import reikai.domain.local.VolumeOwner
+import reikai.domain.local.localVolumeContainer
+import reikai.novel.local.LocalNovelSource
+import reikai.source.local.isLocalVolumeExtras
+import reikai.source.local.localChapterFile
+import reikai.source.local.localChapterUnit
+import reikai.storage.FolderUnreadableException
+import reikai.storage.list
+import tachiyomi.core.common.util.lang.withIOContext
+import tachiyomi.domain.storage.service.StorageManager
+
+/**
+ * Whether the file a local chapter row names is still in its folder, for both local sources' address shapes: a
+ * manga chapter is series/file or series/volume/file, with a volume's Extras the volume folder itself (a trailing
+ * slash); a novel chapter is inside its volume's book, so its file is the book, or the series itself for a loose
+ * book. Answered from a listing of the folder trusted whole, never from the file's own query, which a provider
+ * hiccup answers "absent"; a listing that cannot be trusted fails the refresh instead.
+ */
+@Inject
+class LocalChapterFiles(
+    private val context: Context,
+    private val storageManager: StorageManager,
+) {
+
+    /** The address prefix of the container [url] is read out of, or null for a chapter that is its own file. */
+    fun containerOf(type: ContentType, url: String): String? = when (type) {
+        ContentType.NOVELS -> LocalNovelSource.parseChapterPath(url)
+            ?.let { (series, volume) -> LocalNovelSource.volumePathPrefix(series, volume) }
+        else -> url.takeIf(::isLocalVolumeExtras)
+    }
+
+    /** The names in the type's local folder, from a listing trusted whole; one that cannot be trusted fails the refresh. */
+    fun rootNames(type: ContentType): Set<String> =
+        (
+            storageManager.localRoot(
+                type,
+            ) ?: throw FolderUnreadableException("No local folder")
+            ).list(context).mapTo(HashSet()) {
+            it.name.orEmpty()
+        }
+
+    /** One refresh's listings, each folder read once however many removed chapters sit in it. */
+    fun listings(): Listings = Listings()
+
+    inner class Listings {
+        private val entries = HashMap<Pair<ContentType, List<String>>, Map<String, UniFile>?>()
+
+        /** Whether the file the chapter at [url] is read from is in its folder, by that folder's trusted listing. */
+        suspend fun present(type: ContentType, url: String): Boolean = withIOContext {
+            val (parent, name) = place(type, url) ?: return@withIOContext false
+            entriesOf(type, parent)?.containsKey(name) == true
+        }
+
+        /** The folder at [path] under the type's root as name to file, or null when a listing above shows it absent. */
+        private fun entriesOf(type: ContentType, path: List<String>): Map<String, UniFile>? {
+            val key = type to path
+            // Not getOrPut, which re-runs its body for a stored null, and an absent folder is stored as null.
+            if (key in entries) return entries[key]
+            val folder = if (path.isEmpty()) {
+                storageManager.localRoot(type) ?: throw FolderUnreadableException("No local folder")
+            } else {
+                entriesOf(type, path.dropLast(1))?.get(path.last())
+            }
+            return folder?.list(context)?.associateBy { it.name.orEmpty() }.also { entries[key] = it }
+        }
+    }
+
+    /** The folder path and the name of the file [url] is read from, or null for an address no local file has. */
+    private fun place(type: ContentType, url: String): Pair<List<String>, String>? = when (type) {
+        ContentType.NOVELS -> {
+            val (series, volume) = LocalNovelSource.parseChapterPath(url) ?: return null
+            if (!LocalNovelSource.isChildName(series) || !LocalNovelSource.isChildName(volume)) return null
+            localVolumeContainer(type, series, volume) to volume
+        }
+        else -> {
+            val (folder, volume) = localChapterUnit(url)
+            val file = localChapterFile(url)
+            when {
+                volume == VolumeOwner.LOOSE -> listOf(folder) to file
+                // A volume's Extras chapter is read from the volume folder itself
+                file.isEmpty() -> listOf(folder) to volume
+                else -> listOf(folder, volume) to file
+            }
+        }
+    }
+}

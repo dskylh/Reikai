@@ -19,14 +19,15 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import reikai.domain.source.ReikaiSourcePreferences
 import reikai.domain.source.ToggleNovelSource
+import reikai.novel.local.LocalNovelSource
 import reikai.novel.registry.LnRepoRegistries
-import reikai.novel.registry.LnRepoResult
+import reikai.novel.registry.listedPlugins
 import reikai.novel.source.NovelExtensionFormat
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
-import reikai.novel.source.groupByLanguage
 import reikai.novel.source.toLangCode
-import reikai.presentation.browse.compareBrowseLanguages
+import reikai.presentation.browse.sourcesFilterLanguageOrder
+import reikai.presentation.browse.sourcesFilterSourceOrder
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -54,7 +55,7 @@ class NovelSourcesFilterViewModel(
         registries.results.onStart { emit(emptyMap()) },
         extensionManager.availableNovelExtensionsFlow,
     ) { results, apps ->
-        results.values.flatMap { (it as? LnRepoResult.Reached)?.entries.orEmpty().map { entry -> entry.lang } } +
+        results.listedPlugins().map { it.lang } +
             apps.flatMap { app -> app.sources.map { it.lang } }
     }
 
@@ -64,10 +65,11 @@ class NovelSourcesFilterViewModel(
         sourcePreferences.disabledNovelSources.changes(),
         sourcePreferences.disabledNovelLanguages.changes(),
     ) { sources, listed, disabled, disabledLanguages ->
+        val disabledCodes = disabledLanguages.mapTo(HashSet()) { it.toLangCode() }
         State.Success(
-            items = filterLanguages(sources, listed),
+            items = filterLanguages(sources, listed, disabled, disabledCodes),
             disabledSources = disabled,
-            disabledLanguages = disabledLanguages.mapTo(HashSet()) { it.toLangCode() },
+            disabledLanguages = disabledCodes,
         )
     }
         .flowOn(Dispatchers.IO)
@@ -102,14 +104,22 @@ class NovelSourcesFilterViewModel(
 
 /**
  * The installed [sources] by language, plus each language a listing declares with nothing installed in
- * it, as Mihon's extension filter lists every language its stores offer.
+ * it, as Mihon's extension filter lists every language its stores offer. Ordered as the manga half of the
+ * screen is, by the sources filter's own order: switched-off languages and sources after the rest. The
+ * local source is left out, as manga's online-only list leaves its own: nothing can switch it off.
  */
 internal fun filterLanguages(
     sources: List<NovelSource>,
     listed: Collection<String>,
+    disabledSources: Set<String>,
+    disabledLanguages: Set<String>,
 ): List<Pair<String, List<NovelSource>>> {
-    val installed = groupByLanguage(sources, ::compareBrowseLanguages).toMap()
+    val sourceOrder = sourcesFilterSourceOrder<NovelSource>({ it.id in disabledSources }, { it.name })
+    val installed = sources
+        .filterNot { LocalNovelSource.isLocal(it.id) }
+        .groupBy { it.lang }
+        .mapValues { (_, inLanguage) -> inLanguage.sortedWith(sourceOrder) }
     return (installed.keys + listed.map { it.toLangCode() })
-        .sortedWith(::compareBrowseLanguages)
+        .sortedWith(sourcesFilterLanguageOrder { it in disabledLanguages })
         .map { it to installed[it].orEmpty() }
 }

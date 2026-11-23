@@ -1,6 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- RK: page count + language/page count for E-Hentai enhanced browse rows (Phase B2) -->
+    <!-- RK: importing files into the local sources -->
+    <plurals name="local_import_file_count">
+        <item quantity="one">%d file</item>
+        <item quantity="other">%d files</item>
+    </plurals>
+    <plurals name="delete_volumes_confirm">
+        <item quantity="one">Delete %d volume from the device? This can\'t be undone</item>
+        <item quantity="other">Delete %d volumes from the device? This can\'t be undone</item>
+    </plurals>
+    <plurals name="local_import_newer_copies">
+        <item quantity="one">%d book is a newer copy of one in that series</item>
+        <item quantity="other">%d books are newer copies of ones in that series</item>
+    </plurals>
+    <plurals name="local_import_duplicates">
+        <item quantity="one">%d file is already in that series</item>
+        <item quantity="other">%d files are already in that series</item>
+    </plurals>
+    <plurals name="export_epub_done">
+        <item quantity="one">Exported %d novel</item>
+        <item quantity="other">Exported %d novels</item>
+    </plurals>
+    <plurals name="export_epub_failed_count">
+        <item quantity="one">Could not export %d novel</item>
+        <item quantity="other">Could not export %d novels</item>
+    </plurals>
+    <plurals name="local_import_done">
+        <item quantity="one">Imported %d series</item>
+        <item quantity="other">Imported %d series</item>
+    </plurals>
+    <!-- RK --><plurals name="repos_hidden_by_show">
+        <item quantity="one">%d repo hidden by Content shown</item>
+        <item quantity="other">%d repos hidden by Content shown</item>
+    </plurals>
+    <!-- RK: page count + language/page count for E-Hentai enhanced browse rows -->
     <plurals name="num_pages">
         <item quantity="one">%1$d page</item>
         <item quantity="other">%1$d pages</item>
@@ -43,9 +76,14 @@
         <item quantity="other">Next %d unread chapters</item>
     </plurals>
 
-    <plurals name="pref_novel_source_delay_count">
+    <plurals name="pref_source_delay_count">
         <item quantity="one">%d source has its own delay</item>
         <item quantity="other">%d sources have their own delay</item>
+    </plurals>
+
+    <plurals name="pref_download_delay_rate">
+        <item quantity="one">Up to %d chapter a minute per source</item>
+        <item quantity="other">Up to %d chapters a minute per source</item>
     </plurals>
 
     <plurals name="restore_completed_message">

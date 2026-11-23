@@ -36,14 +36,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.result.ResultEffect
 import dev.zacsweers.metrox.viewmodel.metroViewModel
 import eu.kanade.presentation.components.AdaptiveSheet
 import eu.kanade.presentation.components.AppBar
-import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.util.system.copyToClipboard
 import eu.kanade.tachiyomi.util.system.openInBrowser
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.Add
 import mihon.icons.materialsymbols.rounded.ContentCopy
@@ -66,111 +65,122 @@ import tachiyomi.presentation.core.screens.LoadingScreen
 import tachiyomi.presentation.core.util.plus
 import tachiyomi.presentation.core.util.shouldExpandFAB
 
-/** Every extension store and LN plugin repo; [url] is an address a deep link asks to add. */
-class RepositoriesScreen(private val url: String? = null) : Screen() {
+/** An address a deep link asks the repos screen to add, sent after it is opened, as upstream's store link is. */
+data class ExtensionStoreDeepLinkEvent(val url: String)
 
-    @Composable
-    override fun Content() {
-        val context = LocalContext.current
-        val navigator = LocalNavigator.currentOrThrow
-        val model = metroViewModel<RepositoriesViewModel>()
-        val state by model.state.collectAsStateWithLifecycle()
-        val listState = rememberLazyListState()
+/** Every extension store and LN plugin repo, which upstream's extension store route opens. */
+@Composable
+fun RepositoriesScreen() {
+    val context = LocalContext.current
+    val navigator = LocalNavigator.current
+    val model = metroViewModel<RepositoriesViewModel>()
+    val state by model.state.collectAsStateWithLifecycle()
+    val listState = rememberLazyListState()
 
-        LaunchedEffect(url) {
-            url?.let(model::showAdd)
-        }
+    ResultEffect<ExtensionStoreDeepLinkEvent> { model.showAdd(it.url) }
 
-        Scaffold(
-            topBar = { scrollBehavior ->
-                AppBar(
-                    titleContent = { RepositoriesTitle(count = state.cards.size) },
-                    navigateUp = navigator::pop,
-                    actions = {
-                        IconButton(onClick = model::refresh) {
-                            Icon(
-                                imageVector = MaterialSymbols.Rounded.Refresh,
-                                contentDescription = stringResource(MR.strings.action_webview_refresh),
-                            )
-                        }
-                    },
-                    scrollBehavior = scrollBehavior,
-                )
-            },
-            floatingActionButton = {
-                SmallExtendedFloatingActionButton(
-                    text = { Text(text = stringResource(MR.strings.action_add_repo)) },
-                    icon = { Icon(imageVector = MaterialSymbols.Rounded.Add, contentDescription = null) },
-                    onClick = { model.showAdd() },
-                    expanded = listState.shouldExpandFAB(),
-                )
-            },
-        ) { contentPadding ->
-            when {
-                state.isLoading -> LoadingScreen(Modifier.padding(contentPadding))
-                state.cards.isEmpty() -> EmptyScreen(
-                    stringRes = MR.strings.ext_no_repos,
-                    modifier = Modifier.padding(contentPadding),
-                )
-                else -> Column(Modifier.padding(top = contentPadding.calculateTopPadding())) {
-                    if (state.isRefreshing) LinearProgressIndicator(Modifier.fillMaxWidth())
-                    LazyColumn(
-                        state = listState,
-                        contentPadding = PaddingValues(bottom = contentPadding.calculateBottomPadding()) +
-                            PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 88.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        items(state.cards, key = { it.address }) { card ->
-                            RepoCard(
-                                card = card,
-                                showTypeBadges = state.showTypeBadges,
-                                onOpen = { model.openDetails(card) },
-                                onOpenWebsite = { card.website?.let(context::openInBrowser) },
-                                onCopy = { context.copyToClipboard(card.address, card.address) },
-                                onRemove = { model.confirmRemove(card) },
-                                modifier = Modifier.animateItem(),
+    Scaffold(
+        topBar = { scrollBehavior ->
+            AppBar(
+                titleContent = { RepositoriesTitle(count = state.cards.size) },
+                navigateUp = navigator::pop,
+                actions = {
+                    IconButton(onClick = model::refresh) {
+                        Icon(
+                            imageVector = MaterialSymbols.Rounded.Refresh,
+                            contentDescription = stringResource(MR.strings.action_webview_refresh),
+                        )
+                    }
+                },
+                scrollBehavior = scrollBehavior,
+            )
+        },
+        floatingActionButton = {
+            SmallExtendedFloatingActionButton(
+                text = { Text(text = stringResource(MR.strings.action_add_repo)) },
+                icon = { Icon(imageVector = MaterialSymbols.Rounded.Add, contentDescription = null) },
+                onClick = { model.showAdd() },
+                expanded = listState.shouldExpandFAB(),
+            )
+        },
+    ) { contentPadding ->
+        when {
+            state.isLoading -> LoadingScreen(Modifier.padding(contentPadding))
+            state.cards.isEmpty() && state.hiddenCount == 0 -> EmptyScreen(
+                stringRes = MR.strings.ext_no_repos,
+                modifier = Modifier.padding(contentPadding),
+            )
+            else -> Column(Modifier.padding(top = contentPadding.calculateTopPadding())) {
+                if (state.isRefreshing) LinearProgressIndicator(Modifier.fillMaxWidth())
+                LazyColumn(
+                    state = listState,
+                    contentPadding = PaddingValues(bottom = contentPadding.calculateBottomPadding()) +
+                        PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 88.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(state.cards, key = { it.address }) { card ->
+                        RepoCard(
+                            card = card,
+                            showTypeBadges = state.showTypeBadges,
+                            onOpen = { model.openDetails(card) },
+                            onOpenWebsite = { card.website?.let(context::openInBrowser) },
+                            onCopy = { context.copyToClipboard(card.address, card.address) },
+                            onRemove = { model.confirmRemove(card) },
+                            modifier = Modifier.animateItem(),
+                        )
+                    }
+                    if (state.hiddenCount > 0) {
+                        item(key = "hidden") {
+                            Text(
+                                text = pluralStringResource(
+                                    MR.plurals.repos_hidden_by_show,
+                                    state.hiddenCount,
+                                    state.hiddenCount,
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
                 }
             }
         }
+    }
 
-        state.details?.let { card ->
-            RepoDetailsSheet(
-                card = card,
-                onOpenDiscord = { card.discord?.let(context::openInBrowser) },
-                onDismissRequest = model::closeDetails,
-            )
-        }
+    state.details?.let { card ->
+        RepoDetailsSheet(
+            card = card,
+            onOpenDiscord = { card.discord?.let(context::openInBrowser) },
+            onDismissRequest = model::closeDetails,
+        )
+    }
 
-        when (val dialog = state.dialog) {
-            null -> {}
-            is RepoDialog.Add -> AddRepoDialog(
-                dialog = dialog,
-                addedAddresses = state.cards.mapTo(HashSet()) { it.address },
-                onAdd = model::add,
-                onDismissRequest = model::dismissDialog,
-            )
-            is RepoDialog.Remove -> AlertDialog(
-                onDismissRequest = model::dismissDialog,
-                title = { Text(text = stringResource(MR.strings.repo_remove_title)) },
-                // The address too, since two plugin repos from one owner or host share a name.
-                text = {
-                    Text(text = stringResource(MR.strings.repo_remove_body, dialog.card.name, dialog.card.address))
-                },
-                confirmButton = {
-                    TextButton(onClick = { model.remove(dialog.card) }) {
-                        Text(text = stringResource(MR.strings.action_ok))
-                    }
-                },
-                dismissButton = {
-                    TextButton(onClick = model::dismissDialog) {
-                        Text(text = stringResource(MR.strings.action_cancel))
-                    }
-                },
-            )
-        }
+    when (val dialog = state.dialog) {
+        null -> {}
+        is RepoDialog.Add -> AddRepoDialog(
+            dialog = dialog,
+            addedAddresses = state.addedAddresses,
+            onAdd = model::add,
+            onDismissRequest = model::dismissDialog,
+        )
+        is RepoDialog.Remove -> AlertDialog(
+            onDismissRequest = model::dismissDialog,
+            title = { Text(text = stringResource(MR.strings.repo_remove_title)) },
+            // The address too, since two plugin repos from one owner or host share a name.
+            text = {
+                Text(text = stringResource(MR.strings.repo_remove_body, dialog.card.name, dialog.card.address))
+            },
+            confirmButton = {
+                TextButton(onClick = { model.remove(dialog.card) }) {
+                    Text(text = stringResource(MR.strings.action_ok))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = model::dismissDialog) {
+                    Text(text = stringResource(MR.strings.action_cancel))
+                }
+            },
+        )
     }
 }
 
@@ -226,7 +236,7 @@ private fun RepoCard(
             Text(
                 text = statusText(card),
                 style = MaterialTheme.typography.bodySmall,
-                color = if (card.status is RepoStatus.Unreachable) {
+                color = if (card.status is RepoStatus.Unreachable || card.status is RepoStatus.KeyChanged) {
                     MaterialTheme.colorScheme.error
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
@@ -272,6 +282,7 @@ private fun RepoCard(
 private fun statusText(card: RepoCardUi): String = when (val status = card.status) {
     RepoStatus.Checking -> stringResource(MR.strings.repo_checking)
     is RepoStatus.Unreachable -> stringResource(MR.strings.repo_unreachable)
+    is RepoStatus.KeyChanged -> stringResource(MR.strings.repo_key_changed)
     is RepoStatus.Reached -> when (card.format) {
         RepoFormat.STORE -> (status.manga + status.novels).let {
             pluralStringResource(MR.plurals.repo_extensions, it, it)
@@ -281,7 +292,7 @@ private fun statusText(card: RepoCardUi): String = when (val status = card.statu
 }
 
 @Composable
-private fun RepoDetailsSheet(
+internal fun RepoDetailsSheet(
     card: RepoCardUi,
     onOpenDiscord: () -> Unit,
     onDismissRequest: () -> Unit,
@@ -297,9 +308,18 @@ private fun RepoDetailsSheet(
             (card.status as? RepoStatus.Unreachable)?.let {
                 DetailLine(label = stringResource(MR.strings.repo_unreachable), value = it.message)
             }
+            (card.status as? RepoStatus.KeyChanged)?.let {
+                DetailLine(
+                    label = stringResource(MR.strings.repo_key_changed),
+                    value = stringResource(MR.strings.repo_key_changed_detail, it.servedName),
+                )
+            }
             if (card.discord != null) {
                 IconButton(onClick = onOpenDiscord) {
-                    Icon(imageVector = SimpleIcons.Discord, contentDescription = null)
+                    Icon(
+                        imageVector = SimpleIcons.Discord,
+                        contentDescription = stringResource(MR.strings.repo_open_discord),
+                    )
                 }
             }
         }
@@ -319,7 +339,7 @@ internal fun DetailLine(label: String, value: String) {
 }
 
 @Composable
-private fun AddRepoDialog(
+internal fun AddRepoDialog(
     dialog: RepoDialog.Add,
     addedAddresses: Set<String>,
     onAdd: (String) -> Unit,
@@ -351,6 +371,10 @@ private fun AddRepoDialog(
                         }
                         dialog.failed != null -> {
                             { Text(text = stringResource(MR.strings.repo_add_failed)) }
+                        }
+                        // Allowed, since a local test server has no certificate, but nothing checks what it serves.
+                        address.startsWith("http://", ignoreCase = true) -> {
+                            { Text(text = stringResource(MR.strings.repo_add_cleartext)) }
                         }
                         else -> null
                     },

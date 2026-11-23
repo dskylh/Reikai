@@ -5,6 +5,8 @@ import android.content.Intent
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
 import kotlinx.coroutines.flow.Flow
+import reikai.domain.reader.ChapterLength
+import reikai.domain.reader.ReaderProgressLook
 import tachiyomi.core.common.preference.Preference
 
 /**
@@ -28,6 +30,9 @@ interface ReaderProvider {
      * own selection and order, so a manga action cannot surface in a novel session or the reverse.
      */
     val bottomButtons: Flow<List<ReaderBottomButton>>
+
+    /** Whether the bar fills its on/off buttons while they are on, this type's own choice. */
+    val bottomButtonsFilled: Flow<Boolean>
 
     /** Whose buttons those are, which is the pair of preferences the in-reader editor changes. */
     val bottomButtonScope: ReaderBottomButton.Scope
@@ -90,6 +95,9 @@ interface ReaderProvider {
     /** Starts the read clock again. The host calls it on resume, since pausing stopped it. */
     fun restartReadTimer()
 
+    /** Told when the reader's menu opens or closes: time spent in the menu is not reading, so the clock holds. */
+    fun setMenuOpen(open: Boolean)
+
     /** Told when the user leaves the reader, which is when both types delete the chapters "after reading
      *  automatically delete" queued while it was open. */
     fun onActivityFinish()
@@ -107,6 +115,18 @@ interface ReaderProvider {
      * stores its own answer, which is why the host cannot read one preference for both.
      */
     val showProgress: Flow<Boolean>
+
+    /** Whether to show the open chapter's time left beside that readout, likewise each type's own setting. */
+    val showTimeLeft: Flow<Boolean>
+
+    /** How that readout looks, likewise each type's own setting. */
+    val progressLook: Flow<ReaderProgressLook>
+
+    /**
+     * The open chapter's length in this type's pace unit, null until it has one. The engine learns the
+     * reading pace against it, and keeps it where the type stores no length of its own.
+     */
+    val chapterLength: Flow<ChapterLength?>
 
     /**
      * Whether a chapter is in flight and whether the last attempt failed. Shared because a blank

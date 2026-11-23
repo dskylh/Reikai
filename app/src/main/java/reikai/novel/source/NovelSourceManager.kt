@@ -12,6 +12,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -30,7 +32,6 @@ import reikai.novel.source.ireader.IReaderNovelSource
 import reikai.novel.source.ireader.IReaderSourceHolder
 import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.util.system.logcat
-import tachiyomi.domain.source.model.SourceNotInstalledException
 
 /**
  * In-memory registry of installed [NovelSource]s, keyed by `source.id`, over both kinds: LNReader
@@ -49,9 +50,11 @@ class NovelSourceManager(
     private val installer: () -> LnPluginInstaller,
     extensionManager: ExtensionManager,
     private val prefs: NovelPreferences,
+    // The graph hands the local source; a test building a manager by hand starts with none.
+    builtIn: List<NovelSource> = emptyList(),
 ) {
 
-    private val sourcesFlow = MutableStateFlow<Map<String, NovelSource>>(emptyMap())
+    private val sourcesFlow = MutableStateFlow(builtIn.associateBy { it.id })
 
     val sources: Flow<List<NovelSource>> = sourcesFlow.map { it.values.toList() }
 
@@ -99,11 +102,34 @@ class NovelSourceManager(
         appsRegistered.await()
     }
 
+    /**
+     * Whether the first plugin load and the apps' registration have both finished, without starting the
+     * load: before then a source missing from [sources] may only not have loaded yet.
+     */
+    val firstLoadDone: Flow<Boolean> = combine(
+        flow { emitAll(installer().firstLoadDone) },
+        flow {
+            emit(false)
+            appsRegistered.await()
+            emit(true)
+        },
+    ) { plugins, apps -> plugins && apps }
+        .distinctUntilChanged()
+
+    private val builtInIds = builtIn.mapTo(HashSet()) { it.id }
+
+    /** Throws for a built-in source's id, which a plugin registered under it would replace. */
+    fun requireRegistrable(id: String) {
+        check(id !in builtInIds) { "A source cannot use the id $id" }
+    }
+
     fun register(source: NovelSource) {
+        requireRegistrable(source.id)
         sourcesFlow.update { it + (source.id to source) }
     }
 
     fun unregister(id: String) {
+        if (id in builtInIds) return
         sourcesFlow.update { it - id }
     }
 
@@ -117,9 +143,6 @@ class NovelSourceManager(
         awaitFirstLoad()
         return sourcesFlow.value[id]
     }
-
-    /** Twin of manga's `getOrStub`, pinned by NovelSourceManagerTest: both throw SourceNotInstalledException. */
-    suspend fun getOrThrow(id: String): NovelSource = get(id) ?: throw SourceNotInstalledException()
 
     /**
      * A source's name: its own, else the one it had when last seen installed, else its id, as a manga
@@ -169,17 +192,15 @@ class NovelSourceManager(
     }
 
     /**
-     * The names a restored backup recorded, for sources this device has no record of, so a novel whose
+     * The records a restored backup carries, for sources this device has no record of, so a novel whose
      * source is not installed shows that name, as a restored manga's stub source does. A record already
-     * here is left alone, since it carries more than a name.
+     * here is left alone, since the backup may be someone else's and this device's was seen first-hand.
      */
-    suspend fun rememberBackedUpNames(names: Map<String, String>) {
+    suspend fun rememberBackedUp(records: Map<String, LnSourceIdentity>) {
         seenMutex.withLock {
             val current = prefs.seenNovelSources().get()
-            val absent = names.filter { (id, name) -> name.isNotBlank() && id !in current }
-            if (absent.isNotEmpty()) {
-                prefs.seenNovelSources().set(current + absent.mapValues { LnSourceIdentity(it.value) })
-            }
+            val absent = records.filter { (id, record) -> record.name.isNotBlank() && id !in current }
+            if (absent.isNotEmpty()) prefs.seenNovelSources().set(current + absent)
         }
     }
 

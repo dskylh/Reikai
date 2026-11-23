@@ -21,9 +21,9 @@ import kotlinx.coroutines.flow.update
 import mihon.domain.extension.interactor.AddExtensionStore
 import mihon.domain.extension.interactor.GetExtensionStores
 import mihon.domain.extension.interactor.RemoveExtensionStore
-import mihon.domain.extension.interactor.UpdateExtensionStores
 import reikai.domain.extension.RepoStatus
 import reikai.domain.extension.toRepoStatus
+import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.novel.NovelPreferences
 import reikai.novel.registry.LnRepoRegistries
 import tachiyomi.core.common.util.lang.launchIO
@@ -41,10 +41,10 @@ class RepositoriesViewModel(
     getExtensionStores: GetExtensionStores,
     private val addExtensionStore: AddExtensionStore,
     private val removeExtensionStore: RemoveExtensionStore,
-    private val updateExtensionStores: UpdateExtensionStores,
     private val extensionManager: ExtensionManager,
     private val registries: LnRepoRegistries,
     prefs: NovelPreferences,
+    reikaiLibraryPreferences: ReikaiLibraryPreferences,
 ) : ViewModel() {
 
     private val dialog = MutableStateFlow<RepoDialog?>(null)
@@ -55,7 +55,7 @@ class RepositoriesViewModel(
         .map<_, Map<String, RepoStatus>?> { results -> results.mapValues { it.value.toRepoStatus() } }
         .onStart { emit(null) }
 
-    private val cards = combine(
+    private val allCards = combine(
         getExtensionStores.subscribe(),
         extensionManager.storeStatuses,
         prefs.addedRepoUrls().changes(),
@@ -63,12 +63,18 @@ class RepositoriesViewModel(
         ::repoCards,
     )
 
+    private val listed = allCards.combine(reikaiLibraryPreferences.shownContent.changes()) { cards, shown ->
+        ListedRepos(cards.shownIn(shown), cards.mapTo(HashSet()) { it.address })
+    }
+
     private val refreshing = combine(storesRefreshing, registries.isRefreshing) { stores, plugins -> stores || plugins }
 
-    val state: StateFlow<State> = combine(cards, refreshing, dialog, details) { cards, refreshing, dialog, details ->
+    val state: StateFlow<State> = combine(listed, refreshing, dialog, details) { listed, refreshing, dialog, details ->
+        val cards = listed.cards
         State(
             isLoading = false,
             cards = cards,
+            addedAddresses = listed.addresses,
             showTypeBadges = showTypeBadges(cards),
             isRefreshing = refreshing,
             dialog = dialog,
@@ -87,7 +93,7 @@ class RepositoriesViewModel(
         viewModelScope.launchIO {
             storesRefreshing.value = true
             try {
-                updateExtensionStores()
+                extensionManager.refreshStores()
                 extensionManager.findAvailableExtensions()
             } finally {
                 storesRefreshing.value = false
@@ -150,11 +156,18 @@ class RepositoriesViewModel(
     data class State(
         val isLoading: Boolean = true,
         val cards: List<RepoCardUi> = emptyList(),
+        /** Every added repo, listed or not, so the Add dialog still refuses one Show keeps out of the list. */
+        val addedAddresses: Set<String> = emptySet(),
         val showTypeBadges: Boolean = false,
         val isRefreshing: Boolean = false,
         val dialog: RepoDialog? = null,
         val details: RepoCardUi? = null,
-    )
+    ) {
+        /** Repos Show keeps out of the list, which the screen owns up to, so a new one does not just vanish. */
+        val hiddenCount: Int get() = addedAddresses.size - cards.size
+    }
+
+    private data class ListedRepos(val cards: List<RepoCardUi>, val addresses: Set<String>)
 }
 
 sealed interface RepoDialog {

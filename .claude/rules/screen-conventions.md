@@ -4,7 +4,7 @@ alwaysApply: true
 
 # Reikai screen conventions on Mihon
 
-Mihon is already Compose + Voyager throughout, so there is no legacy-to-Compose "port checklist" anymore. This file is the canonical version of the conventions every Reikai screen (ported from the `design/library-compose` reference, or net-new) must follow so it blends into the Mihon base. The short list in [CLAUDE.md](../../CLAUDE.md) is the index.
+Mihon is already Compose + Navigation 3 throughout, so there is no legacy-to-Compose "port checklist" anymore. This file is the canonical version of the conventions every Reikai screen (ported from the `design/library-compose` reference, or net-new) must follow so it blends into the Mihon base. The short list in [CLAUDE.md](../../CLAUDE.md) is the index.
 
 ## When this applies
 
@@ -13,11 +13,17 @@ Mihon is already Compose + Voyager throughout, so there is no legacy-to-Compose 
 
 ## The conventions
 
-### 1. A Voyager `Screen` / `Tab` class
+### 1. A route and a screen function
 
-The entry point is a class extending Voyager's `Screen` / `Tab` (`cafe.adriel.voyager.core.screen.Screen`, `eu.kanade.presentation.util.Tab`), not a bare `@Composable fun FooScreen()`. The navigator only routes `Screen` instances; a bare composable can't be pushed, can't survive process death cleanly, and forces callers to thread arguments through composable parameters instead of constructor properties. A `@Composable` building block consumed by a `Screen.Content()` body is fine; the top-level entry must be a `Screen` / `Tab`.
+A page is a `@Serializable` route, a `data class FooRoute(...) : NavKey` (a `data object` when it takes nothing), and a top-level `@Composable fun FooScreen(<the route's fields>)`, the shape upstream's routes take (`MangaRoute` / `MangaScreen`). A page the main display draws is registered once, in `reikai/navigation/ReikaiNavGraph.kt` `reikaiEntries()`; a bottom-bar tab is a `TopLevelRoute` on Home's navigator, and a track-sheet page is drawn by the sheet's own. Pushing a route registered nowhere crashes, and `RouteListGuardTest` (in `ReikaiRoutesTest.kt`) fails on a declared route missing from `ReikaiRoutesTest.routes`, so a new one is registered and listed together. Navigate with `LocalNavigator.current` (`mihon.core.navigation`).
 
-Voyager `Screen` constructor args must be serializable (no lambdas: they crash on state-save). Route navigation via the local navigator inside `Content()`.
+**Routes carry identity, never editable content.** A field is what names the page (an id, a content type, a source key), so the back stack Android saves and restores holds nothing that can go stale; a page reads its content when it opens. Every field type is `@Serializable`, so no lambdas. A random default (a migration's `flowId`) survives a restore, because the encoder writes a field whose value differs from a freshly drawn default; `MigrationFlowIdTest` pins that. A check on what is shown (incognito, the migration flow, `shows`) is a function over the route's fields.
+
+**Results go over the bus.** A page that answers the one below it sends a `ResultEventBus` result and pops; the page below collects it with `ResultEffect`, at most one composed collector per result key, and only in a route-level composable. Never reach into the stack for another page's state.
+
+**An `ON_RESUME` effect also fires when an overlay is dismissed** (the track sheet is drawn over the details page, which pauses beneath it), so keep such an effect idempotent or gate it on an armed flag.
+
+**A details page is addressed by row id; a listing open stores first.** Build every details page through `reikai/presentation/details/DetailsRoutes.kt` (`DetailsRoutesGuardTest` fails on any other construction), and open a tap on a listing through its `rememberDetailsOpener`, which stores a novel's row before it pushes.
 
 ### 2. Business logic in a `ViewModel`
 
@@ -33,7 +39,7 @@ Dependencies arrive as constructor parameters on the ViewModel, which the Metro 
 
 ### 4. State via `StateFlow`
 
-State exposed by the ViewModel is a `StateFlow`, declared on the model itself with a Kotlin explicit backing field (`val state: StateFlow<State>` then `field = MutableStateFlow<State>(...)`, as in `MangaViewModel`). There is no state base class to extend: `StateViewModel<S>` and the `core:viewmodel` module were removed upstream (see [architecture.md](architecture.md)). Trivial UI-only state (a text field value, a tab index) may use `mutableStateOf` / `rememberSaveable` in the composable. No RxJava `Observable` / `Subject` / `Flowable` on the screen path; adapt at the boundary with `.asFlow()` if a dependency still returns Rx.
+State exposed by the ViewModel is a `StateFlow`, declared on the model itself with a Kotlin explicit backing field (`val state: StateFlow<State>` then `field = MutableStateFlow<State>(...)`, as in `DeepLinkViewModel`). There is no state base class to extend: `StateViewModel<S>` and the `core:viewmodel` module were removed upstream (see [architecture.md](architecture.md)). Trivial UI-only state (a text field value, a tab index) may use `mutableStateOf` / `rememberSaveable` in the composable. No RxJava `Observable` / `Subject` / `Flowable` on the screen path; adapt at the boundary with `.asFlow()` if a dependency still returns Rx.
 
 ### 5. No preferences inside `@Composable`
 
@@ -53,16 +59,12 @@ Ported code is re-typed against Mihon's immutable domain models and interactors.
 
 ## Reference screen
 
-A clean example of conventions 1-7 on the Mihon base is the library: [LibraryTab.kt](../../app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryTab.kt) (a Voyager `Tab` resolving `LibraryViewModel` via `metroViewModel<T>()`, rendering over `state.collectAsState()`) plus [LibraryViewModel.kt](../../app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryViewModel.kt) (interactors as constructor parameters off the graph, state exposed as `StateFlow`, coroutines via `viewModelScope`). For the assisted shape, read [MangaScreen.kt](../../app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaScreen.kt) beside `MangaViewModel`. Read these before adding or porting a screen.
+A clean example of conventions 1-7 on the Mihon base is the library: [LibraryTab.kt](../../app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryTab.kt) (a tab's screen function resolving `LibraryViewModel` via `metroViewModel<T>()`, rendering over `state.collectAsState()`) plus [LibraryViewModel.kt](../../app/src/main/java/eu/kanade/tachiyomi/ui/library/LibraryViewModel.kt) (interactors as constructor parameters off the graph, state exposed as `StateFlow`, coroutines via `viewModelScope`). For the assisted shape, read [MangaScreen.kt](../../app/src/main/java/eu/kanade/tachiyomi/ui/manga/MangaScreen.kt) beside `MangaViewModel`. Read these before adding or porting a screen.
 
-**Voyager still routes; only the models moved.** Screens and tabs remain Voyager `Screen` / `Tab` classes, and `viewModel()` inside one resolves against that Screen's own `ViewModelStore`, because `voyager-navigator` gives every Screen an `AndroidScreenLifecycleOwner` that clears the store on pop. That holds only under a `Navigator`: content hosted outside one (`ReaderActivity`, `WebViewActivity`) falls through to the Activity store silently. A `Tab` is a `Screen`, so it gets its own store on the same terms: `TabNavigator` builds a real `Navigator`, and the per-screen `AndroidScreenLifecycleOwner` is keyed by `Screen.key`, which defaults to the class name. **Two tabs resolving the same ViewModel type therefore get two separate instances**, and those survive tab switches, because `TabNavigator` passes `disposeSteps = false` so the replace that switches tabs does not dispose the outgoing one. (Verified against voyager 2.2.21 sources 2026-08-08, correcting an earlier note here that claimed tabs share one store.)
-
-## Sanctioned exception: the edit-info form is native XML
-
-One surface is deliberately not Compose: the shared manga/novel **edit-info form** ([EntryEditInfoDialog.kt](../../app/src/main/java/reikai/presentation/details/EntryEditInfoDialog.kt), inflating [edit_entry_info.xml](../../app/src/main/res/layout/edit_entry_info.xml) via `AndroidView`, ported from Komikku's `EditMangaDialog`). A pure-Compose form could not keep the soft keyboard stable on the user's edge-to-edge Android 15+ device: the keyboard closed and reopened on every field switch, and the focused field either hid behind the keyboard or left a keyboard-height gap (reproduced on Samsung and SwiftKey keyboards, so app-side, not keyboard-specific). Native `EditText` handles IME focus cleanly where Compose's `bringIntoView` on A15+ does not. The known-good host is Komikku's exact shape: a Compose Material3 `AlertDialog` (wrap-content, floats over the details page) whose scrolling `Column` wraps the native `LinearLayout` form. A full-screen Voyager `Screen` host was tried and rejected: its edge-to-edge window does not resize for the IME, so the short native form sat above a keyboard-height void. Only the field UI is native; the dialog chrome (Save/Cancel) stays Compose, and it is dispatched from the details `ViewModel` as a `Dialog` case exactly like the novel `EditInfo` dialog. Do not re-attempt a pure-Compose editor form or a full-screen-Screen host; both paths are exhausted. This is the only view-based holdout besides the reader.
+**Where a model's store comes from.** `viewModel()` inside a route resolves against that entry's own `ViewModelStore`, which the main display's `rememberViewModelStoreNavEntryDecorator` gives every entry and clears when the entry is popped. Content outside the main display (`ReaderActivity`, `WebViewActivity`) falls through to the Activity's store. **Each bottom-bar tab keeps a store of its own** (`reikai/navigation/TabViewModelStores.kt`), so two tabs resolving the same ViewModel type get two separate instances, which survive tab switches. Upstream's tabs share Home's store instead, and the Updates, History and Recents tabs each need their own feed models. The track sheet's pages each get their own store too, or every picker would reuse the first one's model.
 
 ## What this is not
 
 - Not a license to refactor Mihon's screens. Touch Mihon code only to attach a Reikai feature, fenced with `// RK`.
 - Not a justification for a standalone "fix the screens" sprint. Convention gaps get fixed when the screen is next touched for a feature or bug.
-- Not a general licence for native XML UI. The edit-info form above is the single sanctioned exception (keyboard/IME maturity); every other new or ported screen is Compose + Voyager.
+- Not a licence for native XML UI. Every new or ported screen is Compose, on a route; the reader's page views and the novel renderers are the View-based holdouts.

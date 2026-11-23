@@ -31,6 +31,7 @@ import reikai.domain.novel.model.NovelTrack
 import reikai.domain.novel.track.NovelDelayedTrackingStore
 import reikai.domain.novel.track.TrackNovelChapter
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
+import tachiyomi.core.common.preference.InMemoryPreferenceStore.InMemoryPreference
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
 import tachiyomi.data.chapter.ChapterRepositoryImpl
@@ -74,6 +75,20 @@ class TrackedChapterNumberConformanceTest {
         pairedGroup(side)
 
         side.tracked(this@TrackedChapterNumberConformanceTest, SIBLING_COPY) shouldBe side.trunkNumber(3)
+    }
+
+    /** A preferred source takes the trunk though it has fewer chapters, so its numbers are the ones pushed. */
+    @ParameterizedTest
+    @EnumSource(Side::class)
+    fun `a preferred source's copy gives the number a merged chapter pushes`(side: Side) = runTest {
+        pairedGroup(side)
+        preferences = ReikaiLibraryPreferences(
+            InMemoryPreferenceStore(
+                sequenceOf(InMemoryPreference(side.preferredKey, listOf(side.sourceOf(SIBLING)), emptyList<Any>())),
+            ),
+        )
+
+        side.tracked(this@TrackedChapterNumberConformanceTest, TRUNK_COPY) shouldBe side.siblingNumber(3)
     }
 
     @ParameterizedTest
@@ -137,6 +152,10 @@ class TrackedChapterNumberConformanceTest {
 
     enum class Side(val type: ContentType) {
         MANGA(ContentType.MANGA) {
+            override val preferredKey = "preferred_manga_sources"
+
+            override fun sourceOf(entry: Long): Any = 100 + entry
+
             // A parsed number is a double and a source-reported one a float, which the stitch pairs.
             override fun trunkNumber(n: Int) = n + 0.1
 
@@ -173,6 +192,8 @@ class TrackedChapterNumberConformanceTest {
                 val chapter = ChapterRepositoryImpl(t.database).getChapterById(chapterId)!!
                 TrackChapter(
                     getTracks = mockk {
+                        coEvery { groupIds(any()) } answers { listOf(firstArg()) }
+
                         coEvery { await(chapter.mangaId) } returns listOf(mangaTrack(chapter.mangaId))
                     },
                     trackerManager = refusingTracker(),
@@ -189,6 +210,10 @@ class TrackedChapterNumberConformanceTest {
             override fun newStore(): DelayedTrackingStore = mockk(relaxed = true)
         },
         NOVELS(ContentType.NOVELS) {
+            override val preferredKey = "preferred_novel_sources"
+
+            override fun sourceOf(entry: Long): Any = "${100 + entry}"
+
             // Each source numbers its own list, here a hundred apart.
             override fun trunkNumber(n: Int) = n.toDouble()
 
@@ -221,6 +246,8 @@ class TrackedChapterNumberConformanceTest {
                 val chapter = NovelChapterRepositoryImpl(t.database).getById(chapterId)!!
                 TrackNovelChapter(
                     getNovelTracks = mockk {
+                        coEvery { groupIds(any()) } answers { listOf(firstArg()) }
+
                         coEvery { awaitGroup(chapter.novelId) } returns listOf(novelTrack(chapter.novelId))
                     },
                     trackerManager = refusingTracker(),
@@ -237,6 +264,11 @@ class TrackedChapterNumberConformanceTest {
             override fun newStore(): DelayedTrackingStore = mockk<NovelDelayedTrackingStore>(relaxed = true)
         },
         ;
+
+        /** The preference holding this type's source ranking. */
+        abstract val preferredKey: String
+
+        abstract fun sourceOf(entry: Long): Any
 
         abstract fun trunkNumber(n: Int): Double
 
@@ -265,7 +297,7 @@ class TrackedChapterNumberConformanceTest {
         fun gapChapter(entry: Long, first: Boolean) = Row(chapterId(entry, GAP), "Chapter 9: Title 9", gapNumber(first))
     }
 
-    private val preferences = ReikaiLibraryPreferences(InMemoryPreferenceStore())
+    private var preferences = ReikaiLibraryPreferences(InMemoryPreferenceStore())
 
     private fun subject(): TrackedChapterNumber {
         val mangaMerge = MangaMergeManager(groups, preferences, onMerged = {}) {}

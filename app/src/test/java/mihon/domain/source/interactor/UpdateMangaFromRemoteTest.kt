@@ -1,12 +1,22 @@
 package mihon.domain.source.interactor
 
 import eu.kanade.tachiyomi.source.Source
+import eu.kanade.tachiyomi.source.model.SManga
+import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.coEvery
+import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.entry.EntryId
+import reikai.domain.entry.signedKey
+import reikai.domain.local.LocalSeriesLocks
+import tachiyomi.core.common.preference.InMemoryPreferenceStore
+import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.manga.model.Manga
+import tachiyomi.domain.manga.model.MangaCover
 
 class UpdateMangaFromRemoteTest {
 
@@ -16,13 +26,16 @@ class UpdateMangaFromRemoteTest {
         mangaRepository = mockk(relaxed = true),
         syncChaptersWithSource = mockk(relaxed = true),
         coverCache = mockk(relaxed = true),
-        libraryPreferences = mockk(relaxed = true),
+        libraryPreferences = LibraryPreferences(InMemoryPreferenceStore()),
         downloadManager = mockk(relaxed = true),
+        seriesLocks = LocalSeriesLocks(NoLocalVolumes).apply { open() },
     )
 
     @Test
     fun `an extension built against a missing app method fails as an Exception callers already handle`() = runTest {
+        // An online source, so the lock asks nothing of it and the refresh reaches the extension's call.
         val source = mockk<Source> {
+            every { id } returns 7L
             coEvery { getMangaUpdate(any(), any(), any(), any()) } throws NoSuchMethodError("okhttp3.Foo.bar")
         }
 

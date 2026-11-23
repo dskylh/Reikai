@@ -2,16 +2,21 @@ package reikai.presentation.reader.web
 
 import android.content.Context
 import android.view.ViewConfiguration
-import com.google.android.material.color.MaterialColors
+import androidx.compose.ui.graphics.toArgb
 import dev.icerock.moko.resources.StringResource
+import eu.kanade.domain.ui.UiPreferences
+import eu.kanade.presentation.theme.appColorScheme
 import org.json.JSONObject
 import reikai.presentation.components.toHexRgb
+import reikai.presentation.reader.FrameScroller
 import reikai.presentation.reader.NovelReaderSettings
 import reikai.presentation.reader.NovelTextScale
 import reikai.presentation.reader.text.CHAPTER_IMAGE_WAIT_MS
 import reikai.presentation.reader.text.CHAPTER_SWIPE_MIN_DP
 import reikai.presentation.reader.text.CHAPTER_SWIPE_SIDEWAYS
+import reikai.presentation.reader.text.MIN_PAGE_FIT_SCALE
 import reikai.presentation.reader.text.NovelChapterSeamView
+import reikai.presentation.reader.text.NovelPictureGesture
 import reikai.presentation.reader.text.PAGE_SWIPE_MIN_DP
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
@@ -29,6 +34,8 @@ object NovelWebDocument {
 
     fun build(
         context: Context,
+        /** The app theme, whose scheme the page's own markers are drawn in. */
+        uiPreferences: UiPreferences,
         chapterId: Long,
         /** Echoed by the page's ready report, so only this document's engine can open the host's gate. */
         documentToken: String,
@@ -45,6 +52,8 @@ object NovelWebDocument {
         textSelectable: Boolean,
         /** Paged reading, which the page's engine measures and moves the column for. */
         paged: Boolean,
+        /** Two pages side by side, which halves the page the engine measures (NovelSpreadHost). */
+        spread: Boolean = false,
         /** The chapter source's own stylesheet, which the page sets ahead of the user's snippets. */
         sourceStylesheet: String? = null,
         /** The trusted base the document loads under, whose address plus a fragment is a jump in the chapter. */
@@ -55,17 +64,22 @@ object NovelWebDocument {
             context,
             "reader.js",
             mapOf(
-                "__SWIPE__" to settings.swipeGestures.toString(),
+                "__SETTINGS__" to behaviourJson(settings).toString(),
                 "__PAGED__" to paged.toString(),
+                "__SPREAD__" to spread.toString(),
                 "__SWIPE_MIN_PX__" to CHAPTER_SWIPE_MIN_DP.toString(),
                 "__SWIPE_SIDEWAYS__" to CHAPTER_SWIPE_SIDEWAYS.toString(),
                 "__PAGE_SWIPE_MIN_PX__" to PAGE_SWIPE_MIN_DP.toString(),
                 "__TOUCH_SLOP_PX__" to touchSlopDp(context).toString(),
-                "__BIONIC__" to settings.bionicReading.toString(),
-                "__READ_ALOUD__" to readAloudJson(settings).toString(),
+                "__LONG_PRESS_MS__" to ViewConfiguration.getLongPressTimeout().toString(),
+                "__PICTURE_OPENS_ON_TAP__" to NovelPictureGesture.opensOnTap(paged).toString(),
+                "__MIN_PAGE_FIT_SCALE__" to MIN_PAGE_FIT_SCALE.toString(),
                 "__INITIAL_FRACTION__" to initialFraction.coerceIn(0f, 1f).toString(),
                 "__INITIAL_LINE__" to (initialLine?.coerceAtLeast(0) ?: -1).toString(),
                 "__IMAGE_WAIT_MS__" to CHAPTER_IMAGE_WAIT_MS.toString(),
+                "__FRAMES_PER_SECOND__" to FrameScroller.FRAMES_PER_SECOND.toString(),
+                "__IMAGE_ROUTE__" to NovelWebSnippets.jsLiteral(NovelWebImages.PAGE_ROUTE),
+                "__RETRY_PARAM__" to NovelWebSnippets.jsLiteral(NovelWebImages.RETRY),
                 "__DOCUMENT_TOKEN__" to NovelWebSnippets.jsLiteral(documentToken),
                 // The seam names both chapters under these, the way TransitionText does. Resolved
                 // here because the page has no resources of its own.
@@ -96,7 +110,7 @@ object NovelWebDocument {
             appendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, maximum-scale=1\">")
             appendLine("<style id=\"rk-font-face\">${fontFace(settings.fontFamily, fontSource)}</style>")
             appendLine("<style>")
-            appendLine(":root { ${variables(settings, statusBarHeightPx)} ${chromeVariables(context)} }")
+            appendLine(":root { ${variables(settings, statusBarHeightPx)} ${chromeVariables(context, uiPreferences)} }")
             appendLine(css)
             appendLine(overrides(useOriginalFonts, sourceCssPriority))
             appendLine(if (textSelectable) "" else "body { -webkit-user-select: none; user-select: none; }")
@@ -153,24 +167,14 @@ object NovelWebDocument {
      * seam view), written once; the error and primary colours are the app theme's, as the text
      * renderer's gap warning and no-next notice draw their icons in them.
      */
-    private fun chromeVariables(context: Context): String = buildString {
+    internal fun chromeVariables(context: Context, uiPreferences: UiPreferences): String = buildString {
         append("--rk-seam-padding-vertical:").append(NovelChapterSeamView.PADDING_VERTICAL_DP).append("px;")
         append("--rk-seam-padding-horizontal:").append(NovelChapterSeamView.PADDING_HORIZONTAL_DP).append("px;")
-        // Both attrs are read off appcompat rather than material: material 1.14.0 stopped declaring
-        // colorError and colorPrimary in its own R, keeping only the ones it owns (colorOnBackground).
-        val error = MaterialColors.getColor(context, androidx.appcompat.R.attr.colorError, FALLBACK_ERROR)
-        append("--rk-error:").append(error.toHexRgb()).append(';')
-        val primary = MaterialColors.getColor(
-            context,
-            androidx.appcompat.R.attr.colorPrimary,
-            FALLBACK_PRIMARY,
-        )
-        append("--rk-primary:").append(primary.toHexRgb()).append(';')
+        // Off the Compose scheme, not the View theme: Custom exists only in Compose, its View theme the default.
+        val colors = appColorScheme(context, uiPreferences)
+        append("--rk-error:").append(colors.error.toArgb().toHexRgb()).append(';')
+        append("--rk-primary:").append(colors.primary.toArgb().toHexRgb()).append(';')
     }
-
-    /** Material's baseline error red and primary purple, for a context whose theme names neither. */
-    private const val FALLBACK_ERROR = 0xFFB3261E.toInt()
-    private const val FALLBACK_PRIMARY = 0xFF6750A4.toInt()
 
     /**
      * How the reader's display settings hold their ground against a chapter's own CSS, which wins a tie

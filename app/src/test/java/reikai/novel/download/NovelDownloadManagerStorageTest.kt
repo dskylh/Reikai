@@ -27,6 +27,7 @@ import reikai.domain.novel.model.NovelChapter
 import reikai.domain.source.ReikaiSourcePreferences
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
+import reikai.util.realTimeSourceContacts
 import reikai.util.testAppScope
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.download.service.DownloadPreferences
@@ -73,11 +74,15 @@ class NovelDownloadManagerStorageTest {
         downloadPreferences = DownloadPreferences(InMemoryPreferenceStore()),
         sourcePreferences = ReikaiSourcePreferences(InMemoryPreferenceStore()),
         novelPreferences = NovelPreferences(InMemoryPreferenceStore()),
-        saver = mockk { coEvery { save(any(), any(), any(), any()) } returns NovelChapterSaver.SaveResult.SAVED },
+        saver = mockk {
+            coEvery { prepare(any(), any(), any()) } answers { secondArg() }
+            coEvery { write(any(), any(), any()) } returns NovelChapterSaver.SaveResult.SAVED
+        },
         securityPreferences = SecurityPreferences(InMemoryPreferenceStore()),
         adultChecker = mockk { coEvery { adultNovelIdsAmong(any()) } returns emptySet() },
         sourceTitles = mockk(),
         getEntryCustomInfo = mockk { coEvery { await(any()) } returns null },
+        sourceContacts = realTimeSourceContacts(),
     )
 
     @BeforeEach

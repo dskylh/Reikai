@@ -16,8 +16,15 @@ import reikai.data.novel.NovelChapterRepositoryImpl
 import reikai.data.novel.NovelHistoryRepositoryImpl
 import reikai.data.novel.NovelRepositoryImpl
 import reikai.data.novel.mapLibraryNovel
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
+import reikai.domain.library.FakeLibraryManualOrderRepository
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
 
@@ -50,6 +57,16 @@ class NovelLegacyLastReadRestoreTest {
         lastRead() shouldBe 500L
     }
 
+    // Chapter 2 is the later one, so landing on chapter 1 shows the read state chose it.
+    @Test
+    fun `an old backup's Last read stamp lands on its latest read chapter`() = runTest {
+        restorer().restore(backup(history = emptyList()), emptyList())
+
+        val novelId = NovelRepositoryImpl(database).getByUrlAndSource("novel", "src")!!.id
+        NovelHistoryRepositoryImpl(database).getUrlKeyedHistoryByNovelIds(listOf(novelId))
+            .getValue(novelId).map { it.chapterUrl } shouldBe listOf("c1")
+    }
+
     @Test
     fun `a backup with history keeps its history's Last read`() = runTest {
         restorer().restore(backup(history = listOf(BackupNovelHistory(url = "c1", lastRead = 300L))), emptyList())
@@ -73,6 +90,9 @@ class NovelLegacyLastReadRestoreTest {
             ?.toEpochMilliseconds()
 
     private fun restorer() = NovelRestorer(
+
+        tombstones = NoChapterTombstoneRepository,
+        manualOrder = FakeLibraryManualOrderRepository(),
         novelRepository = NovelRepositoryImpl(database),
         novelChapterRepository = NovelChapterRepositoryImpl(database),
         categoryRepository = mockk(),
@@ -81,6 +101,11 @@ class NovelLegacyLastReadRestoreTest {
         setCustomNovelInfo = mockk(),
         novelHistoryRepository = NovelHistoryRepositoryImpl(database),
         chapterNumberOverrides = NoChapterNumberOverrides,
+        copyMarks = InMemoryChapterCopyMarks(),
+        localVolumes = NoLocalVolumes,
+        volumePicks = NoVolumePicks,
         readingLog = NoReadingLog,
+        readingPace = NoReadingPace,
+        localNovelLanguages = NoLocalNovelLanguages,
     )
 }

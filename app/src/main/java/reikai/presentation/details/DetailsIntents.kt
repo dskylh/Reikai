@@ -2,9 +2,9 @@ package reikai.presentation.details
 
 import android.content.Context
 import android.content.Intent
-import eu.kanade.tachiyomi.ui.main.MainActivity
+import reikai.domain.entry.EntryId
 import reikai.domain.novel.NovelRepository
-import reikai.presentation.novel.details.NovelScreen
+import reikai.util.MainActivityTarget
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.util.lang.withIOContext
 
@@ -12,26 +12,27 @@ import tachiyomi.core.common.util.lang.withIOContext
 // their own flags, categories and notification extras.
 
 fun mangaDetailsIntent(context: Context, mangaId: Long): Intent =
-    Intent(context, MainActivity::class.java)
+    Intent(context, MainActivityTarget::class.java)
         .setAction(Constants.SHORTCUT_MANGA)
         .putExtra(Constants.MANGA_EXTRA, mangaId)
 
-// By source and url rather than row id, since that is what the novel screen is pushed with.
-fun novelDetailsIntent(context: Context, source: String, url: String): Intent =
-    Intent(context, MainActivity::class.java)
+fun novelDetailsIntent(context: Context, novelId: Long): Intent =
+    Intent(context, MainActivityTarget::class.java)
         .setAction(Constants.SHORTCUT_NOVEL)
-        .putExtra(Constants.NOVEL_SOURCE_EXTRA, source)
-        .putExtra(Constants.NOVEL_URL_EXTRA, url)
+        .putExtra(Constants.NOVEL_EXTRA, novelId)
+
+/** The novel a [novelDetailsIntent] opens, or null when it names none, as manga's intent names its id. */
+fun Intent.novelToOpen(): EntryId.Novel? =
+    getLongExtra(Constants.NOVEL_EXTRA, -1L).takeIf { it > 0L }?.let(EntryId::Novel)
 
 /**
- * The screen a [novelDetailsIntent] opens, or null when either extra is missing or names a novel this
- * device has not saved. MainActivity is exported, so any app can send one, and a novel page opened on an
- * unsaved url fetches it from the source and saves it; Mihon's manga shortcut carries a row id for the same
- * reason.
+ * The novel an intent an older build wrote (a pinned widget, a posted notification) opens, by the source and
+ * url it carries, read back only to a novel this device has saved: MainActivity is exported, so any app can
+ * send one, and no url it sends is ever fetched unless a row already holds it.
  */
-suspend fun Intent.novelDetailsScreen(novels: NovelRepository): NovelScreen? {
+suspend fun Intent.legacyNovelToOpen(novels: NovelRepository): EntryId.Novel? {
     val source = getStringExtra(Constants.NOVEL_SOURCE_EXTRA) ?: return null
     val url = getStringExtra(Constants.NOVEL_URL_EXTRA) ?: return null
-    withIOContext { novels.getByUrlAndSource(url, source) } ?: return null
-    return NovelScreen(source, url)
+    val stored = withIOContext { novels.getByUrlAndSource(url, source) } ?: return null
+    return EntryId.Novel(stored.id)
 }

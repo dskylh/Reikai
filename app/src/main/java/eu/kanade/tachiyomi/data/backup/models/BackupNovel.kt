@@ -1,5 +1,5 @@
 // Novel backup. Net-new Reikai file: the light-novel twin of BackupManga, type only, re-typed
-// to the novel domain model (String source id, text-reader fields, no viewer/scanlator fields).
+// to the novel domain model (String source id, text-reader fields).
 package eu.kanade.tachiyomi.data.backup.models
 
 import eu.kanade.tachiyomi.source.model.UpdateStrategy
@@ -30,10 +30,9 @@ class BackupNovel(
     // Read only, from backups made before the Last read sort came from history: NovelRestorer seeds a
     // history row from it for a novel that has none. Nothing writes it any more.
     @ProtoNumber(17) var lastReadAt: Long? = null,
-    // Retired lock bitmask, kept as a reserved proto slot for backup round-trip compatibility with
-    // older backups (and upstream Yokai). Novel edits now live in the custom_novel_info overlay
-    // (backed up in the custom fields below); this field is written 0 and ignored on restore.
-    @ProtoNumber(18) var editedFlags: Long = 0,
+    // Read only, from Reikai 0.1.x and 0.2.x: which of the novel's own fields above held the user's edits, by bit
+    // (author, artist, description, genres, status). Edits ride in the custom fields below since.
+    @ProtoNumber(18) var legacyEditedFlags: Long = 0,
     @ProtoNumber(19) var favorite: Boolean = true,
     @ProtoNumber(20) var chapters: List<BackupNovelChapter> = emptyList(),
     @ProtoNumber(21) var categories: List<Long> = emptyList(),
@@ -44,6 +43,21 @@ class BackupNovel(
     // @ProtoNumber(26) var version: Long, dropped with the manga edit count (mihon c67a33f3d)
     @ProtoNumber(27) var nextUpdate: Long = 0,
     @ProtoNumber(28) var readingSessions: List<BackupReadingSession> = emptyList(),
+    // A local novel's language as its files name it (local_novel_language), which a local manga keeps in
+    // its memo. Null for an online novel, and in a backup made before it was carried.
+    @ProtoNumber(29) var language: String? = null,
+    // The entry's places in Manual library orders, on the number BackupManga uses (BackupManualOrderFields).
+    @ProtoNumber(702) override var manualOrder: List<BackupManualPosition> = emptyList(),
+    // A local series' volume order and names, on the number BackupManga uses (BackupLocalVolume).
+    @ProtoNumber(703) override var localVolumes: List<BackupLocalVolume> = emptyList(),
+    // A local series' removed chapters' kept reading state, on the number BackupManga uses (BackupChapterTombstone).
+    @ProtoNumber(704) var chapterTombstones: List<BackupChapterTombstone> = emptyList(),
+    // The volumes a local series lists from other folders, on the number BackupManga uses (BackupVolumeOwner).
+    @ProtoNumber(705) override var volumeOwners: List<BackupVolumeOwner> = emptyList(),
+    // A local series' remembered volume chip, by its key, which a restore finds again by the series' address.
+    @ProtoNumber(706) override var volumePick: String? = null,
+    // Hidden from the library view, on manga's number; false on an older backup, which leaves the device's hides alone.
+    @ProtoNumber(708) var libraryHidden: Boolean = false,
     // The user's custom info, on the same numbers BackupManga uses (see BackupCustomInfoFields).
     @ProtoNumber(602) override var customStatus: Int = 0,
     @ProtoNumber(603) override var customThumbnailUrl: String? = null,
@@ -52,7 +66,8 @@ class BackupNovel(
     @ProtoNumber(802) override var customAuthor: String? = null,
     @ProtoNumber(804) override var customDescription: String? = null,
     @ProtoNumber(805) override var customGenre: List<String>? = null,
-) : BackupCustomInfoFields {
+    @ProtoNumber(806) override var customAltTitles: List<String> = emptyList(),
+) : BackupCustomInfoFields, BackupManualOrderFields, BackupLocalVolumeFields {
     fun toNovelImpl(): Novel {
         return Novel.create().copy(
             source = this@BackupNovel.source,
@@ -81,4 +96,18 @@ class BackupNovel(
             nextUpdate = this@BackupNovel.nextUpdate.toInstantOrNull(),
         )
     }
+}
+
+/** The edits a 0.1.x or 0.2.x backup kept in the novel's own fields, as the custom info a refresh leaves alone. */
+fun BackupNovel.legacyEdits(): BackupCustomInfo? {
+    val flags = legacyEditedFlags
+    if (flags == 0L) return null
+    fun edited(bit: Int) = flags and (1L shl bit) != 0L
+    return BackupCustomInfo(
+        author = author.takeIf { edited(0) },
+        artist = artist.takeIf { edited(1) },
+        description = description.takeIf { edited(2) },
+        genre = genre.takeIf { edited(3) },
+        status = status.takeIf { edited(4) },
+    )
 }

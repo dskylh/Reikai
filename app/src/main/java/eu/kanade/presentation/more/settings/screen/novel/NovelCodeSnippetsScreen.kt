@@ -15,13 +15,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import eu.kanade.presentation.more.settings.screen.novel.components.NovelToggleList
-import eu.kanade.presentation.util.Screen
+import kotlinx.serialization.Serializable
 import reikai.novel.content.NovelCodeSnippet
 import reikai.novel.content.NovelSnippetKind
 import tachiyomi.i18n.MR
@@ -34,32 +36,32 @@ import java.util.UUID
  * The WebView reader's CSS or JavaScript snippets. Novel-only and WebView-only by mechanism: the text
  * renderer has no stylesheet or script to add them to, and a manga page is an image.
  */
-data class NovelCodeSnippetsScreen(private val kind: NovelSnippetKind) : Screen() {
+@Serializable
+data class NovelCodeSnippetsRoute(val kind: NovelSnippetKind) : NavKey
 
-    @Composable
-    override fun Content() {
-        val viewModel = assistedMetroViewModel<NovelCodeSnippetsViewModel, NovelCodeSnippetsViewModel.Factory>(
-            key = kind.name,
-        ) {
-            create(kind)
-        }
-        NovelToggleList(
-            viewModel = viewModel,
-            title = stringResource(kind.titleRes),
-            emptyRes = MR.strings.information_empty_novel_snippets,
-            deleteConfirmationRes = MR.strings.novel_snippet_delete_confirmation,
-            summary = { snippet -> snippet.code.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() },
-            summaryFontFamily = FontFamily.Monospace,
-            editDialog = { snippet ->
-                SnippetEditDialog(
-                    snippet = snippet,
-                    kind = kind,
-                    onDismissRequest = viewModel::dismissDialog,
-                    onSave = viewModel::save,
-                )
-            },
-        )
+@Composable
+fun NovelCodeSnippetsScreen(kind: NovelSnippetKind) {
+    val viewModel = assistedMetroViewModel<NovelCodeSnippetsViewModel, NovelCodeSnippetsViewModel.Factory>(
+        key = kind.name,
+    ) {
+        create(kind)
     }
+    NovelToggleList(
+        viewModel = viewModel,
+        title = stringResource(kind.titleRes),
+        emptyRes = MR.strings.information_empty_novel_snippets,
+        deleteConfirmationRes = MR.strings.novel_snippet_delete_confirmation,
+        summary = { snippet -> snippet.code.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() },
+        summaryFontFamily = FontFamily.Monospace,
+        editDialog = { snippet ->
+            SnippetEditDialog(
+                snippet = snippet,
+                kind = kind,
+                onDismissRequest = viewModel::dismissDialog,
+                onSave = viewModel::save,
+            )
+        },
+    )
 }
 
 private val NovelSnippetKind.titleRes
@@ -76,9 +78,9 @@ private fun SnippetEditDialog(
     onDismissRequest: () -> Unit,
     onSave: (NovelCodeSnippet) -> Unit,
 ) {
-    var title by remember { mutableStateOf(snippet?.title.orEmpty()) }
-    var code by remember { mutableStateOf(snippet?.code.orEmpty()) }
-    var runOnAppend by remember { mutableStateOf(snippet?.runOnAppend ?: false) }
+    var title by rememberSaveable { mutableStateOf(snippet?.title.orEmpty()) }
+    var code by rememberSaveable { mutableStateOf(snippet?.code.orEmpty()) }
+    var runOnAppend by rememberSaveable { mutableStateOf(snippet?.runOnAppend ?: false) }
     // Held across recompositions: a fresh id per frame would make every save look like a new snippet.
     val newId = remember { UUID.randomUUID().toString() }
 
@@ -113,7 +115,7 @@ private fun SnippetEditDialog(
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text(stringResource(MR.strings.novel_regex_rule_name)) },
+                    label = { Text(stringResource(MR.strings.name)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )

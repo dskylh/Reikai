@@ -30,6 +30,7 @@ import tachiyomi.i18n.MR
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
@@ -55,6 +56,17 @@ class CloudflareInterceptor(
     // one WebView instead of each opening their own
     private val hostLocks = ConcurrentHashMap<String, ReentrantReadWriteLock>()
 
+    // RK --> when each host was last solved, numbered by [solveCount]. A WebView fetch reads its landing site's
+    // clearance only once it returns, outside any lock, so a sibling's solve that finished meanwhile looks like the
+    // clearance it was challenged under; a solve numbered after its fetch began means retry, not solve again.
+    private val solveCount = AtomicLong()
+    private val solvedAt = ConcurrentHashMap<String, Long>()
+
+    private fun markSolved(host: String) {
+        solvedAt[host] = solveCount.incrementAndGet()
+    }
+    // RK <--
+
     private val listenerScript = """
         addEventListener("message", ({data}) => {
             if (data?.source === "cloudflare-challenge") {
@@ -73,30 +85,62 @@ class CloudflareInterceptor(
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
         val lock = hostLocks.computeIfAbsent(request.url.host) { ReentrantReadWriteLock() }
+        val since = solveCount.get() // RK: see solvedAt
 
         val (response, clearance) = lock.read {
             val response = chain.proceed(request)
             if (!shouldIntercept(response)) return response
-            response to clearance(request.url)
+            // RK: the challenged page's, since a redirect can put the challenge on another site
+            response to clearance(response.request.url)
         }
+
+        // RK -->
+        // A host a route already answers needs no solve, so its answers are fetched outside the write lock,
+        // side by side, rather than one at a time under it. Only a first solve is single-flight.
+        answerKnown(chain, request, response)?.let { return it }
+        // RK <--
 
         // write releases the read hold of a request made from within another to the same host, like an extension
         // refreshing a token, which would otherwise wait on itself
-        lock.write {
-            // Another request may have solved the challenge while this one waited
-            if (isCleared(request.url, clearance)) {
-                response.close()
-            } else {
-                if (!prepareWebView()) return response
-                solve(chain, request, response)?.let { return it } // RK: a route that answers the request itself
+        // RK --> a sibling's solve may have left the host to a route that answers itself, whose answer is
+        //     fetched outside the lock too; one that turned out challenged again forgot the host, so the
+        //     request starts over. The clearance is the challenged page's.
+        //     A challenge a redirect put on another host is solved under that host's lock too, as a WebView
+        //     fetch's hop is, or requests sent there from different hosts each ran a WebView.
+        val challenged = response.request.url
+        val known = lock.write {
+            when {
+                knowsRoute(request, response.request) -> true
+                // Another request may have solved the challenge while this one waited
+                cleared(challenged, clearance, since) -> {
+                    response.close()
+                    false
+                }
+                else -> underHostLock(challenged.host.takeIf { it != request.url.host }) {
+                    if (cleared(challenged, clearance, since)) {
+                        response.close()
+                        return@underHostLock false
+                    }
+                    if (!prepareWebView()) return response
+                    solve(chain, request, response)?.let { return it } // a route that answers the request itself
+                    false
+                }
             }
         }
+        if (known) {
+            return answerKnown(chain, request, response) ?: run {
+                response.close()
+                intercept(chain)
+            }
+        }
+        // RK <--
 
         return chain.proceed(request)
     }
 
     override fun intercept(chain: Interceptor.Chain, request: Request, response: Response): Response {
-        return solve(chain, request, response) ?: chain.proceed(request) // RK: as in intercept(chain)
+        // RK: unreached while intercept(chain) is overridden, which the base declares abstract; answers as that does
+        return answerKnown(chain, request, response) ?: solve(chain, request, response) ?: chain.proceed(request)
     }
 
     private fun clearance(url: HttpUrl): String? {
@@ -108,14 +152,137 @@ class CloudflareInterceptor(
         return !clearance.isNullOrBlank() && clearance != previousClearance
     }
 
+    // RK --> cleared since the challenge, or solved by a sibling after this request left, which reads the
+    //     sibling's fresh clearance as the one it was challenged under; [since] is [solveCount] as it left.
+    private fun cleared(url: HttpUrl, previousClearance: String?, since: Long): Boolean =
+        isCleared(url, previousClearance) || (solvedAt[url.host] ?: 0L) > since
+
+    /** [block] under [host]'s write lock, or as it is when there is no other host to hold. */
+    private inline fun <T> underHostLock(host: String?, block: () -> T): T =
+        host?.let { hostLocks.computeIfAbsent(it) { ReentrantReadWriteLock() }.write(block) } ?: block()
+    // RK <--
+
+    // RK -->
+    // The server's route, for a host it is in use for and already solves.
+    private fun serverAnswers(request: Request): Boolean =
+        flareSolverr.handles(request) && flareSolverr.shouldSkipWebView(request.url.host)
+
+    // [fetchRequest] is the challenged request as it reached the challenged host: the application interceptors'
+    // headers, less what OkHttp drops on a redirect to another host (Authorization).
+    private fun knowsRoute(request: Request, fetchRequest: Request): Boolean = serverAnswers(request) ||
+        webViewAnswers(request, fetchRequest)
+
+    // The WebView fetch's route, for a host the server is not in use for.
+    private fun webViewAnswers(request: Request, fetchRequest: Request): Boolean =
+        !flareSolverr.handles(request) && webViewFetcher.serves(fetchRequest)
+
+    /**
+     * The answer from a route that already serves this host, which needs no solve and so no write lock;
+     * null when none does, or the WebView fetch is challenged now too, and the request needs a solve.
+     */
+    private fun answerKnown(chain: Interceptor.Chain, request: Request, response: Response): Response? =
+        bypassing(request, response) { challengeUrl ->
+            val fetchRequest = response.request
+            when {
+                // FlareSolverr returns a fully-fetched response, so serve it directly. Replaying its
+                // cookies through OkHttp doesn't work for hosts on Cloudflare's stricter bot-management
+                // tier (cf_clearance is bound to a TLS / __cf_bm fingerprint OkHttp can't reproduce).
+                serverAnswers(request) -> {
+                    response.close()
+                    flareSolverr.resolve(request, chain.cookieJar)
+                }
+                // Not knowsRoute: a sibling's solve can leave the host to the server after the check
+                // above, which would send a request the server carries into the WebView.
+                webViewAnswers(request, fetchRequest) -> {
+                    clearClearance(request.url, challengeUrl)
+                    val since = solveCount.get()
+                    when (val outcome = webViewFetcher.fetch(chain, fetchRequest)) {
+                        is WebViewFetcher.Outcome.Served -> {
+                            response.close()
+                            served(chain, outcome.response, since)
+                        }
+                        // As a failed solve, so the caller can still offer the blocked page to open.
+                        is WebViewFetcher.Outcome.Failed -> {
+                            response.close()
+                            logcat(LogPriority.WARN, outcome.error) { "WebView fetch failed for ${request.url.host}" }
+                            throw CloudflareBypassException()
+                        }
+                        // The WebView is challenged now too, so a solve may issue a clearance again.
+                        WebViewFetcher.Outcome.Challenged -> {
+                            webViewFetcher.forget(fetchRequest)
+                            null
+                        }
+                    }
+                }
+                else -> null
+            }
+        }
+    // RK <--
+
     // RK: returns null for "solved, retry the request"; the bypass server and the WebView fetch answer
     //     it themselves, which the retry must not repeat.
-    private fun solve(chain: Interceptor.Chain, request: Request, response: Response): Response? {
-        // RK: the challenge may be served after a redirect, and this is an application
-        //     interceptor, so chain.request() holds the URL from before it. Everything the
-        //     WebView does has to key off the page the challenge is actually on, or the probe
-        //     is scoped to an origin the document never has and the solve watches nothing.
-        //     The method is read there too, since a 303 turns a POST into a GET.
+    private fun solve(chain: Interceptor.Chain, request: Request, response: Response): Response? =
+        bypassing(request, response) { challengeUrl ->
+            response.close()
+            clearClearance(request.url, challengeUrl)
+            val oldClearance = clearance(challengeUrl)
+
+            // RK -->
+            val host = request.url.host
+            val fsActive = flareSolverr.handles(request)
+
+            // The challenged request as it reached the challenged host, less what a cross-host redirect dropped.
+            val fetchRequest = response.request
+
+            try {
+                // One solve per host is the host lock's job; a sibling that queued behind
+                // this one re-checks the jar and never reaches here.
+                // With the headers that reached the challenged host: OkHttp dropped Authorization
+                // on a redirect to another host, and the WebView must not hand it to that site.
+                resolveWithWebView(
+                    request.newBuilder().headers(fetchRequest.headers).build(),
+                    challengeUrl,
+                    oldClearance,
+                )
+                markSolved(challengeUrl.host)
+            } catch (e: CloudflareBypassException) {
+                if (!fsActive) {
+                    // Cloudflare may let the WebView in without a challenge, which issues no
+                    // clearance to retry with, so the WebView answers the request itself.
+                    val since = solveCount.get()
+                    val outcome = webViewFetcher.fetch(chain, fetchRequest)
+                    if (outcome is WebViewFetcher.Outcome.Failed) {
+                        logcat(LogPriority.WARN, outcome.error) { "WebView fetch failed for $host" }
+                    }
+                    if (outcome !is WebViewFetcher.Outcome.Served) throw e
+                    webViewFetcher.markServed(fetchRequest)
+                    return@bypassing served(chain, outcome.response, since)
+                }
+                // Don't re-pay the 30s WebView timeout on later requests to a host the WebView
+                // can't clear: mark it so subsequent requests go straight to FlareSolverr.
+                flareSolverr.markWebViewUnsolvable(host)
+                return@bypassing flareSolverr.resolve(request, chain.cookieJar)
+            }
+
+            // WebView path: retry the request normally. Returning null lets intercept do that
+            // outside the per-host write lock, so the next challenged request is not queued behind
+            // this one's retry. A host FlareSolverr pinned gets its User-Agent from the network
+            // interceptor in pinFlareSolverrUserAgents, which every retry passes.
+            null
+            // RK <--
+        }
+
+    // RK --> the challenge page and failure handling upstream keeps in solve, shared with answerKnown.
+    private inline fun bypassing(
+        request: Request,
+        response: Response,
+        block: (challengeUrl: HttpUrl) -> Response?,
+    ): Response? {
+        // The challenge may be served after a redirect, and this is an application
+        // interceptor, so chain.request() holds the URL from before it. Everything the
+        // WebView does has to key off the page the challenge is actually on, or the probe
+        // is scoped to an origin the document never has and the solve watches nothing.
+        // The method is read there too, since a 303 turns a POST into a GET.
         val challenged = response.request
         // A WebView can only load a page with GET, and loading the url of another method usually reaches an
         // endpoint that answers GET without a challenge to solve. The clearance covers the whole site, so it's
@@ -126,93 +293,45 @@ class CloudflareInterceptor(
             challenged.url.newBuilder().encodedPath("/").query(null).fragment(null).build()
         }
         try {
-            response.close()
-            clearClearance(request.url, challengeUrl)
-            val oldClearance = clearance(challengeUrl)
-
-            // RK -->
-            val host = request.url.host
-            val flareSolverrUrl = networkPreferences.flareSolverrUrl.get().trim()
-            val fsActive = flareSolverr.isActive()
-
-            // The challenged request as it left the application interceptors, auth headers included.
-            val fetchRequest = response.request
-
-            // FlareSolverr returns a fully-fetched response, so serve it directly. Replaying its
-            // cookies through OkHttp doesn't work for hosts on Cloudflare's stricter bot-management
-            // tier (cf_clearance is bound to a TLS / __cf_bm fingerprint OkHttp can't reproduce).
-            if (fsActive && flareSolverr.shouldSkipWebView(host)) {
-                return flareSolverr.resolve(flareSolverrUrl, request)
-            } else {
-                if (!fsActive && webViewFetcher.serves(fetchRequest)) {
-                    when (val outcome = webViewFetcher.fetch(chain, fetchRequest)) {
-                        is WebViewFetcher.Outcome.Served -> return served(chain, outcome.response)
-                        // As a failed solve, so the caller can still offer the blocked page to open.
-                        is WebViewFetcher.Outcome.Failed -> {
-                            logcat(LogPriority.WARN, outcome.error) { "WebView fetch failed for $host" }
-                            throw CloudflareBypassException()
-                        }
-                        // The WebView is challenged now too, so a solve may issue a clearance again.
-                        WebViewFetcher.Outcome.Challenged -> webViewFetcher.forget(fetchRequest)
-                    }
-                }
-                try {
-                    // One solve per host is the host lock's job; a sibling that queued behind
-                    // this one re-checks the jar and never reaches here.
-                    resolveWithWebView(request, challengeUrl, oldClearance)
-                } catch (e: CloudflareBypassException) {
-                    if (!fsActive) {
-                        // Cloudflare may let the WebView in without a challenge, which issues no
-                        // clearance to retry with, so the WebView answers the request itself.
-                        val outcome = webViewFetcher.fetch(chain, fetchRequest)
-                        if (outcome is WebViewFetcher.Outcome.Failed) {
-                            logcat(LogPriority.WARN, outcome.error) { "WebView fetch failed for $host" }
-                        }
-                        if (outcome !is WebViewFetcher.Outcome.Served) throw e
-                        webViewFetcher.markServed(fetchRequest)
-                        return served(chain, outcome.response)
-                    }
-                    // Don't re-pay the 30s WebView timeout on later requests to a host the WebView
-                    // can't clear: mark it so subsequent requests go straight to FlareSolverr.
-                    flareSolverr.markWebViewUnsolvable(host)
-                    return flareSolverr.resolve(flareSolverrUrl, request)
-                }
-            }
-
-            // WebView path: retry the request normally. Returning null lets intercept do that
-            // outside the per-host write lock, so the next challenged request is not queued behind
-            // this one's retry. A host FlareSolverr pinned gets its User-Agent from the network
-            // interceptor in pinFlareSolverrUserAgents, which every retry passes.
-            return null
-            // RK <--
+            return block(challengeUrl)
         }
         // Because OkHttp's enqueue only handles IOExceptions, wrap the exception so that
         // we don't crash the entire app
         catch (e: CloudflareBypassException) {
-            // RK: carry the blocked URL so the caller can open that page for the user to solve. A GET
-            //     opens the page asked for, since the root often is not challenged at all; any other
-            //     method opens the root the solve ran on, as its URL loaded with GET shows no challenge.
+            // Carry the blocked URL so the caller can open that page for the user to solve. A GET
+            // opens the page asked for, since the root often is not challenged at all; any other
+            // method opens the page the solve ran on: its own root, or the GET a redirect made of it.
             throw CloudflareBypassIOException(
                 context.stringResource(MR.strings.information_cloudflare_bypass_failure),
-                (e.blockedUrl ?: if (challenged.method == "GET") request.url else challengeUrl).toString(),
+                (e.blockedUrl ?: if (request.method == "GET") request.url else challengeUrl).toString(),
                 e,
             )
         } catch (e: Exception) {
             throw IOException(e)
         }
     }
+    // RK <--
 
     // RK --> a WebView fetch hands a redirect to another site to OkHttp past this interceptor, so a
     //     challenge there is solved on that site and the hop retried, as on OkHttp's own redirect.
-    private fun served(chain: Interceptor.Chain, response: Response): Response {
+    // [since] is [solveCount] as the fetch began, see [solvedAt].
+    private fun served(chain: Interceptor.Chain, response: Response, since: Long): Response {
         val hop = webViewFetchChallengedHop(response) ?: return response
         response.close()
-        clearClearance(hop.url)
-        try {
-            resolveWithWebView(hop, hop.url, clearance(hop.url))
-        } catch (_: CloudflareBypassException) {
-            // Open in WebView then opens the page that is challenged, not the site that sent it there.
-            throw CloudflareBypassException(hop.url)
+        val challenged = clearance(hop.url)
+        // Under the hop's own host lock, as a direct request's solve is, or requests sent there together
+        // each ran a WebView and cleared the clearance the other earned. A cross-site lock cycle would
+        // need two sites redirecting into each other, which no browser follows.
+        hostLocks.computeIfAbsent(hop.url.host) { ReentrantReadWriteLock() }.write {
+            if (cleared(hop.url, challenged, since)) return@write
+            clearClearance(hop.url)
+            try {
+                resolveWithWebView(hop, hop.url, clearance(hop.url))
+                markSolved(hop.url.host)
+            } catch (_: CloudflareBypassException) {
+                // Open in WebView then opens the page that is challenged, not the site that sent it there.
+                throw CloudflareBypassException(hop.url)
+            }
         }
         return chain.proceed(hop)
     }
@@ -410,7 +529,7 @@ class CloudflareInterceptor(
             //     the jar, so ask the jar before giving up. Gated on the solve having reached
             //     Verified, because a clearance on its own proves nothing: Cloudflare issues one on
             //     a round it refused, and trusting it turns a failure into a 403 with no Open in WebView.
-            if (!cloudflareBypassed && solverWanted && solve.get()?.phase == TurnstileSolver.Solve.Phase.Verified) {
+            if (!cloudflareBypassed && solve.get()?.phase == TurnstileSolver.Solve.Phase.Verified) {
                 if (isCleared(challengeUrl, originalClearance)) {
                     cloudflareBypassed = true
                     logcat { "Turnstile[$challengeHost]: cleared without a report, retrying" }

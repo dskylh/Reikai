@@ -8,13 +8,31 @@ import tachiyomi.i18n.MR
  * load-bearing; an unknown one falls back to the default, which is how a stored `LEGACY` from the
  * retired standalone reader lands on [NATIVE] without a migration.
  *
- * [rendersMarkup] is whether the chapter's own stylesheet, scripts and fonts reach the page, so every
- * setting that keeps or adds to them shows only for such a mode, on the settings screen and the sheet.
+ * [rendersMarkup] is whether the chapter's own stylesheet, scripts and fonts reach the page, so a setting
+ * that keeps or adds to them shows only for such a mode, bar Settings' always-shown WebView mode group.
  */
 enum class NovelRenderingMode(val titleRes: StringResource, val rendersMarkup: Boolean) {
     /** The shared host with the native text renderer. Listed first, as the default. */
     NATIVE(MR.strings.pref_novel_rendering_mode_native, rendersMarkup = false),
 
     /** The shared reader host rendering Reikai's own web document. */
-    WEBVIEW(MR.strings.pref_novel_rendering_mode_webview, rendersMarkup = true),
+    WEBVIEW(MR.strings.action_web_view, rendersMarkup = true),
+    ;
+
+    companion object {
+        /** A novel's viewer-flag bits for its own mode, above the rotation bits; none set follows the setting. */
+        const val MASK = 0x000000C0L
+
+        fun ofFlags(flags: Long): NovelRenderingMode? = when (flags and MASK) {
+            0x40L -> NATIVE
+            0x80L -> WEBVIEW
+            else -> null
+        }
+
+        fun flagOf(mode: NovelRenderingMode?): Long = when (mode) {
+            NATIVE -> 0x40L
+            WEBVIEW -> 0x80L
+            null -> 0L
+        }
+    }
 }

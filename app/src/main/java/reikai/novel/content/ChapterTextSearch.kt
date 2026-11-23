@@ -2,6 +2,7 @@ package reikai.novel.content
 
 import androidx.compose.runtime.Immutable
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.Duration.Companion.seconds
 
 /** A short excerpt around one match. [matchStart] and [matchEnd] index into [text]; [position] is 0 to 1. */
 @Immutable
@@ -18,32 +19,36 @@ data class ChapterTextMatches(
     val snippets: List<ChapterSearchSnippet>,
 )
 
-/** A linear find over a chapter's visible text, for the search across a novel's downloaded chapters. */
+/** A find over a chapter's visible text, for the search across a novel's downloaded chapters. */
 object ChapterTextSearch {
 
     const val SNIPPET_CONTEXT = 60
     const val MAX_SNIPPETS_PER_CHAPTER = 3
     private const val MAX_SNIPPET_MATCH_LENGTH = 200
 
+    private val BUDGET = 5.seconds
+
     /**
-     * Counts every non-empty match of [regex] in [text] and keeps excerpts for the first few. Once
-     * [isActive] turns false the scan throws [CancellationException], even inside a slow match.
+     * Counts every non-empty match of [regex] in [text] and keeps excerpts for the first few, or null when
+     * the scan runs past its budget. Once [isActive] turns false it throws [CancellationException], even
+     * inside a slow match.
      */
     fun findMatches(
         text: String,
         regex: Regex,
-        maxSnippets: Int = MAX_SNIPPETS_PER_CHAPTER,
         isActive: () -> Boolean = { true },
-    ): ChapterTextMatches {
+    ): ChapterTextMatches? {
         if (text.isEmpty()) return ChapterTextMatches(0, emptyList())
-        var count = 0
-        val snippets = mutableListOf<ChapterSearchSnippet>()
-        for (match in regex.findAll(CancellableCharSequence(text, isActive))) {
-            if (match.range.isEmpty()) continue
-            count++
-            if (snippets.size < maxSnippets) snippets += snippetFor(text, match.range.first, match.range.last + 1)
+        return UserRegexRunner.run(BUDGET, isActive) { wrap ->
+            var count = 0
+            val snippets = mutableListOf<ChapterSearchSnippet>()
+            regex.forEachMatch(wrap(text)) { start, end ->
+                if (start == end) return@forEachMatch
+                count++
+                if (snippets.size < MAX_SNIPPETS_PER_CHAPTER) snippets += snippetFor(text, start, end)
+            }
+            ChapterTextMatches(count, snippets)
         }
-        return ChapterTextMatches(count, snippets)
     }
 
     private fun snippetFor(text: String, start: Int, end: Int): ChapterSearchSnippet {
@@ -58,26 +63,5 @@ object ChapterTextSearch {
             matchEnd = prefix.length + shownEnd - from,
             position = start.toFloat() / text.length,
         )
-    }
-
-    /** The regex engine reads its input through [get], so checking [isActive] there lets a cancelled
-     *  search escape a catastrophic pattern. */
-    private class CancellableCharSequence(
-        private val delegate: CharSequence,
-        private val isActive: () -> Boolean,
-    ) : CharSequence {
-        private var reads = 0
-
-        override val length: Int get() = delegate.length
-
-        override fun get(index: Int): Char {
-            if ((++reads and 0xFFF) == 0 && !isActive()) throw CancellationException("Chapter search cancelled")
-            return delegate[index]
-        }
-
-        override fun subSequence(startIndex: Int, endIndex: Int): CharSequence =
-            CancellableCharSequence(delegate.subSequence(startIndex, endIndex), isActive)
-
-        override fun toString(): String = delegate.toString()
     }
 }

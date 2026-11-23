@@ -50,7 +50,7 @@ The profile is built from the user's tracker libraries, never the local library.
 
 A pull runs from three places: `refreshIfStale` on a details open (any enabled tracker older than six hours), the periodic `TrackerLibraryRefreshWorker` (`trackerLibraryAutoRefreshHours`: off, weekly or monthly), and Refresh now in settings, a one-off worker behind a 60 second cooldown (`tryStartManual`). All three first drop the rows of any tracker whose pull switch is off (`dropUnrequestedTrackers`).
 
-`ComputeTasteProfile` reduces the rows. Rows sharing a MAL id or an AniList id are one series, transitively (`DisjointSet`), keeping AniList's row over MyAnimeList's over Kitsu's. Per tag the score is the sum of rating times status weight over the absolute weights, clamped to -1..1: Completed 1.0, Reading 0.7, On hold 0.3, Dropped -1.0, Plan to read and unknown 0. An unrated entry counts as 0.5. Every tag goes through `toTagKeys` on both the profile and the candidate side, so a genre listed twice counts once.
+`ComputeTasteProfile` reduces the rows. Rows sharing a MAL id or an AniList id are one series, transitively (`DisjointSet`), keeping AniList's row over MyAnimeList's over Kitsu's. Per tag the score is the sum of rating times status weight over the absolute weights, clamped to -1..1: Completed 1.0, Reading 0.7, On hold 0.3, Dropped -1.0, Plan to read and unknown 0. An unrated entry counts as 0.5. Every tag goes through the user's tag aliases and then `toTagKeys` on both the profile and the candidate side (`TasteProfile.keysOf`), so a genre listed twice, or under an alias, counts once. Tag search still sends a genre's own name, since the source knows that one.
 
 ### The hide filter
 
@@ -60,7 +60,7 @@ The carousel and See all both also subscribe to the favorites of the pool's sour
 
 ### Adult content
 
-Recommendations apply no adult-content filter. MyAnimeList search and the MyAnimeList library pull both send `nsfw=true`; AniList's recommendations and library queries do not request `isAdult`. Adult titles therefore shape the taste profile and appear as candidates like any other. Two limits come from the services: Kitsu returns its NSFW categories only to an account whose own SFW filter is off, so on a default account Kitsu tags (and Kitsu's Fill from tracker genres) are shorter; and which sources exist at all follows the extension content-warning setting, which also bounds source-native and tag-search candidates.
+Recommendations apply no adult-content filter. The MyAnimeList library pull sends `nsfw=true`, and the Jikan search and recommendation calls pass no `sfw` filter; AniList's recommendations and library queries do not request `isAdult`. Adult titles therefore shape the taste profile and appear as candidates like any other. Two limits come from the services: Kitsu returns its NSFW categories only to an account whose own SFW filter is off, so on a default account Kitsu tags (and Kitsu's Fill from tracker genres) are shorter; and which sources exist at all follows the extension content-warning setting, which also bounds source-native and tag-search candidates.
 
 ### What each tracker's API can answer
 
@@ -125,7 +125,7 @@ The recommendations client rate-limits per host (`RecommendationProviders`): Ani
 - **Never fetch genres per title.** Every library pull must carry genres in the list call; a per-title fetch multiplies requests into rate-limit bans.
 - **The recommendations client is one lazy app-scoped `OkHttpClient`.** Its per-host limit windows live on it, so building a client per fetch resets them. Shikimori IP-bans a missing or browser User-Agent, so its provider sends `REIKAI_TRACKER_USER_AGENT`.
 - **Providers use public endpoints over the shared client**, never a tracker's authenticated client, which throws for a logged-out user.
-- **See all reads the cache by manga id.** Voyager constructor args must be serializable, and after process death the cache is empty, so the grid shows its empty state until the manga is reopened.
+- **See all reads the cache by manga id.** A route carries identity only, and after process death the cache is empty, so the grid shows its empty state until the manga is reopened.
 
 ## Decisions
 
@@ -138,7 +138,7 @@ The recommendations client rate-limits per host (`RecommendationProviders`): Ani
 - **No fuzzy title matching.** Normalized equality plus alternate titles and URL identity only, so distinct series are never merged.
 - **Origin grouping is See-all only.** The carousel stays flat-ranked in its small strip; the provenance already rides on each candidate.
 - **No adult-content filter.** It reached only the carousel and Fill from tracker, most tracker candidates carry no adult signal to screen (only AniList offers a clean flag), and the trackers' own flags either mix in BL and GL (Shikimori's `isCensored`) or are missing from the library call and sparse (Bangumi's `nsfw`). Void if the recommendation and library endpoints of most trackers expose a sexual-content flag.
-- **Novels have no recommendations.** LN sources expose no related titles and mainstream trackers track light novels unreliably, so a novel row would have almost no input. Void if novel tracking proves out.
+- **Novels have no recommendations.** LN plugins expose no related titles, and no one has measured whether the novel trackers would give a row enough input. Novel tracking has shipped, so this stands only until that is measured.
 - **The cross-tracker dedup reaches AniList, MyAnimeList and Kitsu only.** Shikimori and Bangumi rows carry no cross ids, so a series tracked there and on MAL counts twice.
 
 ## Upstream divergences

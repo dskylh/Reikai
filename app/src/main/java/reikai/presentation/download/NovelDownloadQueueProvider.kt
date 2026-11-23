@@ -1,6 +1,5 @@
 package reikai.presentation.download
 
-import cafe.adriel.voyager.core.screen.Screen
 import dev.zacsweers.metro.Inject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -14,7 +13,6 @@ import reikai.domain.novel.model.NovelChapter
 import reikai.novel.download.NovelDownload
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.source.NovelSourceManager
-import reikai.presentation.novel.details.NovelScreen
 import java.util.concurrent.ConcurrentHashMap
 
 /** The novel downloader under the download queue, over [NovelDownloadManager]. */
@@ -36,13 +34,13 @@ class NovelDownloadQueueProvider(
 
     override val snapshots: Flow<DownloadQueueSnapshot> = combine(
         downloadManager.queueState,
-        downloadManager.downloadingNovelId,
+        downloadManager.downloadingNovelIds,
         downloadManager.completions.counts,
-    ) { _, downloadingId, completed ->
+    ) { _, downloadingIds, completed ->
         val (queue, restored) = readQueueAfterRestore({ downloadManager.isQueueRestored }, downloadManager.queueState)
-        QueueRead(queue, downloadingId, completed, restored)
+        QueueRead(queue, downloadingIds, completed, restored)
     }
-        .mapLatest { (queue, downloadingId, completed, restored) ->
+        .mapLatest { (queue, downloadingIds, completed, restored) ->
             val queued = queue.mapTo(HashSet()) { it.novelId }
             labels.keys.retainAll(queued)
             chapterNames.keys.retainAll(queued)
@@ -60,7 +58,7 @@ class NovelDownloadQueueProvider(
                     )
                 },
                 // Latched across the pacing gap between chapters, so the card does not flicker to Queued.
-                activeSeries = setOfNotNull(downloadingId),
+                activeSeries = downloadingIds,
                 completed = completed,
                 labels = queued.associateWith { labelOf(it) },
                 restored = restored,
@@ -75,9 +73,6 @@ class NovelDownloadQueueProvider(
         return chaptersOf(seriesId).associate { it.id to it.name }.also { chapterNames[seriesId] = it }
     }
 
-    override suspend fun detailsScreen(seriesId: Long): Screen? =
-        NovelScreen.forStored(seriesId, novelRepo)
-
     override suspend fun cancelChapter(chapterId: Long) = downloadManager.cancelDownloads(listOf(chapterId))
 
     override suspend fun downloadNow(chapterId: Long) = downloadManager.startDownloadNow(chapterId)
@@ -89,8 +84,8 @@ class NovelDownloadQueueProvider(
     }
 
     override suspend fun reorderSeries(seriesIdsInOrder: List<Long>) {
-        val reordered = downloadManager.queueState.value.withSeriesInOrder(seriesIdsInOrder) { it.novelId }
-        downloadManager.reorderQueue(reordered)
+        downloadManager.queueState.value.withSeriesInOrderIfMoved(seriesIdsInOrder) { it.novelId }
+            ?.let { downloadManager.reorderQueue(it) }
     }
 
     override suspend fun cancelSeries(seriesId: Long) = downloadManager.cancelDownloads(
@@ -105,17 +100,16 @@ class NovelDownloadQueueProvider(
 
     override suspend fun sort(key: DownloadQueueSortKey, descending: Boolean) {
         val queue = downloadManager.queueState.value
-        val chapterById = queue.mapTo(HashSet()) { it.novelId }
-            .flatMap { chaptersOf(it) }
+        val chapterById = chapterRepo.getByNovelIds(queue.map { it.novelId }.distinct())
+            .values.flatten()
             .associateBy { it.id }
-        val sorted = queue.sortedWithinSeries(
+        queue.sortedWithinSeriesIfChanged(
             seriesOf = { it.novelId },
             keyOf = { download ->
                 chapterById[download.chapterId]?.let { key.sortValue(it.dateUpload, it.chapterNumber) }
             },
             descending = descending,
-        )
-        downloadManager.reorderQueue(sorted)
+        )?.let { downloadManager.reorderQueue(it) }
     }
 
     private suspend fun labelOf(novelId: Long): QueuedSeriesLabel = labels[novelId]
@@ -129,7 +123,7 @@ class NovelDownloadQueueProvider(
 
 private data class QueueRead(
     val queue: List<NovelDownload>,
-    val downloadingId: Long?,
+    val downloadingIds: Set<Long>,
     val completed: Map<Long, Int>,
     val restored: Boolean,
 )

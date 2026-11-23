@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.data.backup
 
 import eu.kanade.tachiyomi.data.backup.models.BackupCategory
 import eu.kanade.tachiyomi.data.backup.models.BackupManga
+import eu.kanade.tachiyomi.data.backup.models.BackupManualPosition
 import eu.kanade.tachiyomi.data.backup.models.BackupNovel
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelCategory
 import eu.kanade.tachiyomi.data.backup.restore.restorers.CategoriesRestorer
@@ -19,11 +20,19 @@ import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 import reikai.domain.category.CategoryContentType
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
 import reikai.domain.db.PassThroughTransactions
+import reikai.domain.library.FakeLibraryManualOrderRepository
+import reikai.domain.library.LibraryManualOrderRepository
 import reikai.domain.merge.RestoreMergeGroups
 import reikai.domain.novel.NovelRepository
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import tachiyomi.domain.backup.model.RestoredManga
 import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.category.model.Category
@@ -65,6 +74,15 @@ class RestoreCategoryMatchConformanceTest {
         type.restoredCategoryIds(sameName, backupCategories, listOf(5)) shouldContainExactly listOf(100)
     }
 
+    // A place names its category by order as the entry's categories do, and Default by its fixed order.
+    @ParameterizedTest
+    @EnumSource(Type::class)
+    fun `an entry's Manual places land in this device's categories`(type: Type) = runTest {
+        val places = listOf(BackupManualPosition(9, 4), BackupManualPosition(-1, 2), BackupManualPosition(3, 7))
+
+        type.restoredPlaces(type.device(), backupCategories, places) shouldContainExactly listOf(200L to 4L, 0L to 2L)
+    }
+
     @ParameterizedTest
     @EnumSource(Type::class)
     fun `a category already on the device is reused rather than created again`(type: Type) = runTest {
@@ -88,6 +106,8 @@ class RestoreCategoryMatchConformanceTest {
                     getMangaByUrlAndSourceId = mockk(),
                     restoreMergeGroups = RestoreMergeGroups(mockk(relaxed = true), PassThroughTransactions),
                     setCustomMangaInfo = mockk(relaxed = true),
+                    localVolumes = NoLocalVolumes,
+                    volumePicks = NoVolumePicks,
                 ).restore(
                     listOf(BackupManga(source = 1L, url = "u", title = "T", categories = orders)),
                     backup.map { (name, order) -> BackupCategory(name = name, order = order) },
@@ -95,9 +115,38 @@ class RestoreCategoryMatchConformanceTest {
                 return entries.single().categoryIds
             }
 
+            override suspend fun restoredPlaces(
+                device: List<Category>,
+                backup: List<Pair<String, Long>>,
+                places: List<BackupManualPosition>,
+            ): List<Pair<Long, Long>> {
+                val entries = mutableListOf<RestoredManga>()
+                MangaRestorer(
+                    restoreRepository = mockk {
+                        coEvery { restoreManga(any(), any()) } answers { entries += firstArg<List<RestoredManga>>() }
+                    },
+                    getCategories = mockk { coEvery { await() } returns device },
+                    fetchInterval = mockk(relaxed = true),
+                    getMangaByUrlAndSourceId = mockk(),
+                    restoreMergeGroups = RestoreMergeGroups(mockk(relaxed = true), PassThroughTransactions),
+                    setCustomMangaInfo = mockk(relaxed = true),
+                    localVolumes = NoLocalVolumes,
+                    volumePicks = NoVolumePicks,
+                ).restore(
+                    listOf(BackupManga(source = 1L, url = "u", title = "T", manualOrder = places)),
+                    backup.map { (name, order) -> BackupCategory(name = name, order = order) },
+                )
+                return entries.single().manualOrder
+            }
+
             override suspend fun insertedCategories(device: List<Category>, backup: List<String>): List<String> {
                 val repository = categoryRepository(device)
-                CategoriesRestorer(repository.first, GetCategories(repository.first), mockk(relaxed = true))(
+                CategoriesRestorer(
+                    repository.first,
+                    GetCategories(repository.first),
+                    mockk(relaxed = true),
+                    FakeLibraryManualOrderRepository(),
+                )(
                     backup.map { BackupCategory(name = it) },
                 )
                 return repository.second.captured.map { it.name }
@@ -123,6 +172,24 @@ class RestoreCategoryMatchConformanceTest {
                 return written.captured
             }
 
+            override suspend fun restoredPlaces(
+                device: List<Category>,
+                backup: List<Pair<String, Long>>,
+                places: List<BackupManualPosition>,
+            ): List<Pair<Long, Long>> {
+                val novels = mockk<NovelRepository>(relaxed = true) {
+                    coEvery { getByUrlAndSource(any(), any()) } returns null
+                    coEvery { insert(any()) } returns 1L
+                    coEvery { getById(any()) } returns null
+                }
+                val manualOrder = FakeLibraryManualOrderRepository()
+                novelRestorer(novels, categoryRepository(device).first, manualOrder).restore(
+                    BackupNovel(source = "src", url = "u", title = "T", manualOrder = places),
+                    backup.map { (name, order) -> BackupNovelCategory(name = name, order = order) },
+                )
+                return manualOrder.positions.value.map { it.categoryId to it.position }
+            }
+
             override suspend fun insertedCategories(device: List<Category>, backup: List<String>): List<String> {
                 val repository = categoryRepository(device)
                 novelRestorer(mockk(relaxed = true), repository.first)
@@ -145,6 +212,13 @@ class RestoreCategoryMatchConformanceTest {
             orders: List<Long>,
         ): List<Long>
 
+        /** The (category id, position) places a restored entry carrying [places] takes, against [backup]. */
+        abstract suspend fun restoredPlaces(
+            device: List<Category>,
+            backup: List<Pair<String, Long>>,
+            places: List<BackupManualPosition>,
+        ): List<Pair<Long, Long>>
+
         /** The names a restore of [backup]'s category list inserts over [device]. */
         abstract suspend fun insertedCategories(device: List<Category>, backup: List<String>): List<String>
     }
@@ -163,7 +237,13 @@ class RestoreCategoryMatchConformanceTest {
             return repository to inserted
         }
 
-        fun novelRestorer(novels: NovelRepository, categories: CategoryRepository) = NovelRestorer(
+        fun novelRestorer(
+            novels: NovelRepository,
+            categories: CategoryRepository,
+            manualOrder: LibraryManualOrderRepository = FakeLibraryManualOrderRepository(),
+        ) = NovelRestorer(
+            tombstones = NoChapterTombstoneRepository,
+            manualOrder = manualOrder,
             novelRepository = novels,
             novelChapterRepository = mockk { coEvery { getByNovelId(any()) } returns emptyList() },
             categoryRepository = categories,
@@ -172,7 +252,12 @@ class RestoreCategoryMatchConformanceTest {
             setCustomNovelInfo = mockk(relaxed = true),
             novelHistoryRepository = mockk(relaxed = true),
             chapterNumberOverrides = NoChapterNumberOverrides,
+            copyMarks = InMemoryChapterCopyMarks(),
+            localVolumes = NoLocalVolumes,
+            volumePicks = NoVolumePicks,
             readingLog = NoReadingLog,
+            readingPace = NoReadingPace,
+            localNovelLanguages = NoLocalNovelLanguages,
         )
     }
 }

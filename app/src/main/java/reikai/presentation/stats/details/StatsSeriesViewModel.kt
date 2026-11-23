@@ -5,7 +5,6 @@ import android.content.Intent
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import cafe.adriel.voyager.core.screen.Screen
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Assisted
 import dev.zacsweers.metro.AssistedFactory
@@ -14,7 +13,6 @@ import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import eu.kanade.core.preference.PreferenceMutableState
-import eu.kanade.core.preference.asState
 import eu.kanade.tachiyomi.ui.library.LibraryItem
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import kotlinx.coroutines.Dispatchers
@@ -22,9 +20,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.datetime.TimeZone
 import reikai.domain.entry.EntryCustomInfo
@@ -34,16 +33,18 @@ import reikai.domain.library.ContentType
 import reikai.domain.library.includes
 import reikai.domain.library.librarySortComparator
 import reikai.domain.library.toSortMode
-import reikai.domain.novel.NovelRepository
+import reikai.presentation.library.EntryTracks
 import reikai.presentation.library.MangaLibraryRows
-import reikai.presentation.library.libraryTrackerMeans
-import reikai.presentation.library.memberIds
+import reikai.presentation.library.gridColumns
+import reikai.presentation.library.gridDisplayMode
+import reikai.presentation.library.meansOf
 import reikai.presentation.library.mixedLibraryItemSortFields
 import reikai.presentation.library.novels.NovelLibraryRows
 import reikai.presentation.stats.ReadState
 import reikai.presentation.stats.StatsGroupKey
 import reikai.presentation.stats.StatsLibrary
-import reikai.presentation.stats.StatsLibraryLoader
+import reikai.presentation.stats.StatsLibrarySource
+import reikai.presentation.stats.StatsReload
 import reikai.presentation.stats.StatsRow
 import reikai.presentation.stats.StatsSort
 import reikai.presentation.stats.dimension
@@ -52,7 +53,6 @@ import reikai.presentation.stats.readState
 import reikai.presentation.stats.rows
 import reikai.presentation.stats.sortedForDisplay
 import reikai.presentation.stats.standingFor
-import reikai.presentation.stats.statsDetailsScreen
 import reikai.presentation.stats.titleOf
 import reikai.presentation.stats.titlesIn
 import tachiyomi.domain.library.model.LibraryDisplayMode
@@ -71,11 +71,10 @@ data class StatsSeriesState(val summary: StatsRow?, val readState: ReadState?, v
 class StatsSeriesViewModel(
     @Assisted private val key: StatsGroupKey,
     @Assisted private val contentType: ContentType,
-    private val loader: StatsLibraryLoader,
+    private val loader: StatsLibrarySource,
     private val mangaLibraryRows: MangaLibraryRows,
     private val novelLibraryRows: NovelLibraryRows,
     getEntryCustomInfo: GetEntryCustomInfo,
-    private val novelRepository: NovelRepository,
     private val libraryPreferences: LibraryPreferences,
 ) : ViewModel() {
 
@@ -86,13 +85,14 @@ class StatsSeriesViewModel(
         fun create(key: StatsGroupKey, contentType: ContentType): StatsSeriesViewModel
     }
 
+    private val library = StatsReload(viewModelScope, loader::load)
     private val readState = MutableStateFlow<ReadState?>(null)
 
     private val rowsOfRow = combine(
-        flow { emit(loader.load()) },
+        library.value.filterNotNull(),
         // A type the row does not cover is never built, so it waits on nothing.
-        if (contentType.includes(ContentType.MANGA)) mangaLibraryRows.rows() else flowOf(emptyList()),
-        if (contentType.includes(ContentType.NOVELS)) novelLibraryRows.rows() else flowOf(emptyList()),
+        if (contentType.includes(ContentType.MANGA)) mangaLibraryRows.rows else flowOf(emptyList()),
+        if (contentType.includes(ContentType.NOVELS)) novelLibraryRows.rows.map { it.items } else flowOf(emptyList()),
         getEntryCustomInfo.subscribeAll(),
     ) { library, manga, novels, customInfo ->
         val timeZone = TimeZone.currentSystemDefault()
@@ -115,7 +115,10 @@ class StatsSeriesViewModel(
         readState,
     ) { loaded, sort, seed, readState ->
         // Lazy, so only the tracker-score sort pays for the means, as in the library.
-        val means = lazy { loaded.library.trackerMeans(loaded.rows) }
+        val means = lazy {
+            EntryTracks(loaded.library.mangaTracks, loaded.library.novelTracks, loaded.library.loggedInTrackers)
+                .meansOf(loaded.rows)
+        }
         val fields = mixedLibraryItemSortFields { item -> means.value[item.entryId] }
         val comparator = librarySortComparator(sort.type.toSortMode(), sort.isAscending, seed.toLong(), fields)
         StatsSeriesState(
@@ -133,17 +136,17 @@ class StatsSeriesViewModel(
         readState.value = state
     }
 
+    /** Called each time the screen comes back on screen, so a series read from it counts as read. */
+    fun refresh() = library.reload()
+
     val showContinueReading: StateFlow<Boolean> = libraryPreferences.showContinueReadingButton.changes()
         .stateIn(viewModelScope, SharingStarted.Eagerly, libraryPreferences.showContinueReadingButton.get())
 
     fun displayMode(): PreferenceMutableState<LibraryDisplayMode> =
-        libraryPreferences.displayMode.asState(viewModelScope)
+        libraryPreferences.gridDisplayMode(viewModelScope)
 
     fun columnsForOrientation(isLandscape: Boolean): PreferenceMutableState<Int> =
-        (if (isLandscape) libraryPreferences.landscapeColumns else libraryPreferences.portraitColumns)
-            .asState(viewModelScope)
-
-    suspend fun detailsScreen(entryId: EntryId): Screen? = statsDetailsScreen(entryId, novelRepository)
+        libraryPreferences.gridColumns(viewModelScope, isLandscape)
 
     /** The reader at the row's next chapter, as the library's continue-reading opens it; null when none. */
     suspend fun resumeIntent(context: Context, item: LibraryItem): Intent? = when (item.entryId) {
@@ -160,13 +163,4 @@ class StatsSeriesViewModel(
         val readStates: Map<EntryId, ReadState>,
         val summary: StatsRow?,
     )
-
-    // Each type's means keyed by its own row ids, as each library provider computes them.
-    private fun StatsLibrary.trackerMeans(rows: List<LibraryItem>): Map<EntryId, Double> {
-        val trackers = loggedInTrackers.associateBy { it.id }
-        val (mangaRows, novelRows) = rows.partition { it.entryId is EntryId.Manga }
-        val manga = libraryTrackerMeans(mangaRows.associate { it.id to it.memberIds() }, mangaTracks, trackers)
-        val novels = libraryTrackerMeans(novelRows.associate { it.id to it.memberIds() }, novelTracks, trackers)
-        return manga.mapKeys { EntryId.Manga(it.key) } + novels.mapKeys { EntryId.Novel(it.key) }
-    }
 }

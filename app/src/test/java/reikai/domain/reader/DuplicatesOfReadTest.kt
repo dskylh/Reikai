@@ -2,6 +2,7 @@ package reikai.domain.reader
 
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
+import reikai.domain.chapter.CopyMark
 
 /**
  * What finishing a chapter marks read with it. Within one entry the number decides, as upstream does,
@@ -9,14 +10,24 @@ import org.junit.jupiter.api.Test
  */
 class DuplicatesOfReadTest {
 
-    private data class Ch(val id: Long, val number: Double, val owner: Long = 1L)
+    private data class Ch(
+        val id: Long,
+        val number: Double,
+        val owner: Long = 1L,
+        val name: String = "Chapter $number",
+        val mark: CopyMark? = null,
+        val origin: String? = null,
+    )
 
     private fun List<Ch>.duplicatesOf(read: Ch, stitchCopies: Set<Long> = emptySet()) = duplicatesOfRead(
         read,
         stitchCopies,
         numberOf = { it.number },
+        nameOf = { it.name },
         idOf = { it.id },
+        originOf = { it.origin },
         ownerOf = { it.owner },
+        markOf = { it.mark },
     ).map { it.id }
 
     private val alphaFive = Ch(id = 1, number = 5.0)
@@ -24,8 +35,36 @@ class DuplicatesOfReadTest {
     private val six = Ch(id = 3, number = 6.0)
 
     @Test
+    fun `a chapter marked as a copy is marked read with it whatever its number`() {
+        val five = alphaFive.copy(mark = CopyMark.Group(1L))
+        val misnumbered = Ch(id = 4, number = 50.0, mark = CopyMark.Group(1L))
+        listOf(five, six, misnumbered).duplicatesOf(five) shouldBe listOf(4L)
+    }
+
+    @Test
+    fun `a copy marked Never skip is not marked read with the copy finished`() {
+        listOf(alphaFive, betaFive.copy(mark = CopyMark.NeverSkip), six).duplicatesOf(alphaFive) shouldBe emptyList()
+    }
+
+    @Test
     fun `another scanlator's copy in the same entry is marked with it`() {
         listOf(alphaFive, betaFive, six).duplicatesOf(alphaFive) shouldBe listOf(2L)
+    }
+
+    /** Their titles share nothing, so only the two scanlators make them copies. */
+    @Test
+    fun `another scanlator's differently titled copy is marked with it`() {
+        val alpha = Ch(id = 11, number = 5.0, name = "Ch. 5 - The Fight", origin = "alpha")
+        val beta = Ch(id = 12, number = 5.0, name = "Chapter 5: Battle", origin = "beta")
+
+        listOf(alpha, beta).duplicatesOf(alpha) shouldBe listOf(12L)
+    }
+
+    @Test
+    fun `an interlude numbered like the chapter read is not marked with it`() {
+        val interludeFive = Ch(id = 10, number = 5.0, name = "Interlude 5")
+
+        listOf(alphaFive, interludeFive).duplicatesOf(alphaFive) shouldBe emptyList()
     }
 
     @Test

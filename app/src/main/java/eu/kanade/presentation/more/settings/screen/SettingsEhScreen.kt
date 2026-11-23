@@ -49,6 +49,7 @@ import exh.source.EH_PACKAGE
 import exh.source.ExhPreferences
 import exh.ui.login.EhLoginActivity
 import exh.util.nullIfBlank
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import logcat.LogPriority
 import mihon.app.di.appGraph
@@ -74,18 +75,17 @@ import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 /**
- * E-Hentai settings screen. Covers the website account / display options, the server profile upload
- * (uconfig), and the favorited-gallery update checker. The favorites two-way sync group
- * depends on a later EXH phase and is intentionally omitted for now.
+ * E-Hentai settings screen: source incognito, the website account and display options with the server
+ * profile upload (uconfig), the favorited-gallery update checker, and the one-way favorites backup to
+ * the account. There is no two-way favorites sync.
  */
-object SettingsEhScreen : SearchableSettings {
-    private fun readResolve(): Any = SettingsEhScreen
-
+@Serializable
+data object SettingsEhScreen : SearchableSettings {
     @ReadOnlyComposable
     @Composable
     override fun getTitleRes() = MR.strings.pref_category_eh
 
-    // top-level category, hidden until adult sources are enabled (the gate lives in Advanced).
+    // top-level category, hidden until adult sources are enabled (the gate lives in Settings -> Browse).
     // Not a composable, so there is no LocalContext to read: Injekt survives here purely as a
     // Context locator, which is the shape upstream kept for the same case.
     override suspend fun isEnabled(): Boolean = Injekt.get<Context>().appGraph.exhPreferences.isHentaiEnabled().get()

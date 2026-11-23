@@ -3,12 +3,14 @@ package exh.md.network
 import eu.kanade.domain.track.service.TrackPreferences
 import eu.kanade.tachiyomi.data.track.mdlist.MdList
 import eu.kanade.tachiyomi.data.track.myanimelist.dto.MALOAuth
+import eu.kanade.tachiyomi.network.interceptor.MangaDexHeadersInterceptor
 import exh.md.utils.MdApi
 import exh.md.utils.MdUtil
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.serialization.encodeToString
+import okhttp3.FormBody
 import okhttp3.Interceptor
 import okhttp3.Protocol
 import okhttp3.Request
@@ -69,6 +71,47 @@ class MangaDexAuthInterceptorTest {
     }
 
     @Test
+    @DisplayName("a refresh sends the app's User-Agent, since it runs past the shared client's agent interceptors")
+    fun refreshSendsAppUserAgent() {
+        val sent = AtomicReference<String?>()
+        savedLoginAfter {
+            sent.set(it.header("User-Agent"))
+            response(it, 503)
+        }
+
+        sent.get() shouldBe MangaDexHeadersInterceptor.defaultUserAgent()
+    }
+
+    @Test
+    @DisplayName("a refresh sends only the refresh grant's own fields, with the stored refresh token")
+    fun refreshSendsOnlyRefreshGrantFields() {
+        val sent = AtomicReference<List<Pair<String, String>>>()
+        savedLoginAfter {
+            val form = it.body as FormBody
+            sent.set((0 until form.size).map { i -> form.name(i) to form.value(i) })
+            response(it, 503)
+        }
+
+        sent.get() shouldBe listOf(
+            "client_id" to "tachiyomisy",
+            "grant_type" to "refresh_token",
+            "refresh_token" to "refresh",
+        )
+    }
+
+    @Test
+    @DisplayName("a refresh sends no Authorization header, which would carry the expired access token")
+    fun refreshSendsNoAuthorization() {
+        val sent = AtomicReference<String?>("unset")
+        savedLoginAfter {
+            sent.set(it.header("Authorization"))
+            response(it, 503)
+        }
+
+        sent.get() shouldBe null
+    }
+
+    @Test
     @DisplayName("a refresh lost to the network keeps the saved login")
     fun transportFailureKeepsLogin() {
         savedLoginAfter { throw IOException("offline") } shouldBe expired
@@ -87,6 +130,7 @@ class MangaDexAuthInterceptorTest {
         savedLoginAfter { response(it, code) } shouldBe ""
     }
 
+    // Real threads: the refresh is serialized by a blocking monitor in a synchronous interceptor.
     @Test
     @DisplayName("a request that waited on a refresh sends the token that refresh fetched")
     fun waitingRequestTakesFetchedToken() {

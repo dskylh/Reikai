@@ -1,7 +1,11 @@
 package reikai.data.novel
 
 import eu.kanade.tachiyomi.data.cache.CoverCache
+import reikai.data.novel.NovelChapterSyncRules
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.LocalChapterTombstones
+import reikai.domain.local.lockedAtCurrentAddress
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.model.Novel
@@ -16,7 +20,10 @@ import reikai.domain.source.refreshedCover
 import reikai.domain.source.refreshedTitle
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.host.SourceNovel
+import reikai.novel.local.LocalNovelSource
+import reikai.novel.source.LockedSeriesSource
 import reikai.novel.source.NovelSource
+import reikai.util.runCatchingCancellable
 import tachiyomi.domain.chapter.model.NoChaptersException
 import tachiyomi.domain.library.service.LibraryPreferences
 import kotlin.time.Clock
@@ -84,32 +91,65 @@ suspend fun storeRefreshedNovel(
     val replaced = details == StoredDetails.SUSPECT && wearsAnothersDetails(existing, parsed)
     val updateTitles = replaced || libraryPreferences.updateMangaTitles.get()
     val merged = mergeRefreshedNovel(existing, parsed, updateTitles, kept = if (replaced) Novel.create() else existing)
-    // Novels have no local source, so a cover is never only stamped.
     val refreshedUrl = keptCover(null, parsed.thumbnailUrl)
-    val cover = refreshedCover(existing.thumbnailUrl, refreshedUrl, manualFetch, isLocal = false) {
-        existing.hasCustomCover(coverCache)
-    }
+    val cover =
+        refreshedCover(existing.thumbnailUrl, refreshedUrl, manualFetch, LocalNovelSource.isLocal(existing.source)) {
+            existing.hasCustomCover(coverCache)
+        }
     if (cover.deletesCachedFile) coverCache.getCoverFile(existing.thumbnailUrl)?.delete()
     val coverLastModified = Clock.System.now().takeIf { cover.stamps }
     if (merged == existing && coverLastModified == null) return existing
     val newTitle = merged.title.takeIf { it != existing.title }
-    val stored = novelRepository.update(
-        NovelUpdate(existing.id) {
-            title = newTitle
-            author = merged.author
-            artist = merged.artist
-            description = merged.description
-            genre = merged.genre
-            status = merged.status
-            thumbnailUrl = merged.thumbnailUrl
-            this.coverLastModified = coverLastModified
-            totalPages = merged.totalPages
-            initialized = true
-        },
-    )
-    if (stored && newTitle != null) novelDownloadManager?.renameNovel(existing, newTitle)
+    val write: suspend () -> Boolean = {
+        novelRepository.update(
+            NovelUpdate(existing.id) {
+                title = newTitle
+                author = merged.author
+                artist = merged.artist
+                description = merged.description
+                genre = merged.genre
+                status = merged.status
+                thumbnailUrl = merged.thumbnailUrl
+                this.coverLastModified = coverLastModified
+                totalPages = merged.totalPages
+                initialized = true
+            },
+        )
+    }
+    // A new title is stored together with the folder move, so no chapter saved between them strands its downloads.
+    val downloads = novelDownloadManager
+    if (newTitle != null && downloads != null) downloads.renameNovel(existing, newTitle, write) else write()
     return coverLastModified?.let { merged.copy(coverLastModified = it) } ?: merged
 }
+
+/**
+ * [block] under this source's hold on [novel]'s series when it has one to give, at the address the series has once
+ * the hold is taken (an organize or relink it waited behind may have moved it), else at once. Only the address is
+ * read again: a caller may pass a novel it changed on purpose, such as [withoutPageCount].
+ */
+private suspend fun <T> NovelSource.seriesLocked(
+    novel: Novel,
+    novelRepository: NovelRepository,
+    block: suspend (Novel) -> T,
+): T = if (this is LockedSeriesSource) {
+    lockedAtCurrentAddress(
+        novel,
+        Novel::url,
+        { held ->
+            novelRepository.getById(held.id)?.url?.takeIf { it != held.url }?.let { held.copy(url = it) } ?: held
+        },
+        { url, run -> locked(url, run) },
+        block,
+    )
+} else {
+    block(novel)
+}
+
+/**
+ * [this] for a write that syncs no chapters. The stored page count is the mark the next update walks from, so raising
+ * it without walking would leave the pages between never fetched. Zero keeps the stored count.
+ */
+fun Novel.withoutPageCount(): Novel = copy(totalPages = 0L)
 
 /** What [refreshNovelFromSource] left stored: the merged novel, and the chapters its syncs report as new. */
 data class NovelRefreshResult(val novel: Novel, val newChapters: List<NovelChapter>)
@@ -117,7 +157,8 @@ data class NovelRefreshResult(val novel: Novel, val newChapters: List<NovelChapt
 /**
  * Re-parse a favorited [novel] from its [source] and bring its stored data up to date: merge the
  * parsed metadata (persisting only on a change), sync the first page's chapters, walk any pages
- * opened since the previous [Novel.totalPages], then predict the next update once over the result.
+ * opened since the previous [Novel.totalPages] plus the [viewedPage] a details screen shows, then predict
+ * the next update once over the result.
  * Shared by the update job and the details refresh; browse-open inserts a shadow row instead. Fails as
  * manga's refresh does: [NoChaptersException] when the source lists no chapter, else what the source threw.
  */
@@ -127,19 +168,32 @@ suspend fun refreshNovelFromSource(
     novelChapterRepository: NovelChapterRepository,
     novelRepository: NovelRepository,
     libraryPreferences: LibraryPreferences,
-    numberOverrides: ChapterNumberOverrideRepository,
+    syncRules: NovelChapterSyncRules,
     coverCache: CoverCache,
     // Required: without it a re-titled chapter or novel leaves its download behind under the old name
     novelDownloadManager: NovelDownloadManager,
     manualFetch: Boolean = false,
     fetchWindow: ClosedRange<Instant>? = null,
     details: StoredDetails = StoredDetails.KEPT,
-): NovelRefreshResult {
-    val sourceNovel = source.parseNovel(novel.url)
-    val parsed = sourceNovel.toNovel(sourceId = source.id, favorite = novel.favorite)
-    val merged = storeRefreshedNovel(
-        novel,
-        parsed,
+    viewedPage: Long? = null,
+): NovelRefreshResult = source.seriesLocked(novel, novelRepository) { current ->
+    // The parse and every row write under one hold of a local series' lock, so a move of its files cannot
+    // land between them; any other source runs this at once.
+    val sourceNovel = source.parseNovel(current.url)
+    val parsed = sourceNovel.toNovel(sourceId = source.id, favorite = current.favorite)
+    // A parse reporting 0 pages sent no count, and the stored one is only how far walks got: neither drops a page.
+    val sentPages = parsed.totalPages.takeIf { it > 0L }
+    // Rows on a page past the source's last, which a shrink to that page deletes.
+    val rowsPastLast = sentPages != null &&
+        novelChapterRepository.getDistinctPages(current.id).any { (it.toLongOrNull() ?: 0L) > sentPages }
+    // A plugin whose count parse falls back too low still lists the page after it, so that count drops nothing.
+    val disproved = sentPages != null && rowsPastLast && source.listsChapters(current.url, sentPages + 1)
+    val dropsPages = rowsPastLast && !disproved
+    val sourcePages = sentPages?.takeUnless { disproved } ?: current.totalPages
+    // A grown page count is stored by the walk as far as it got, never before it.
+    var merged = storeRefreshedNovel(
+        current,
+        parsed.copy(totalPages = minOf(sourcePages, current.totalPages)),
         novelRepository,
         libraryPreferences,
         novelDownloadManager,
@@ -149,7 +203,7 @@ suspend fun refreshNovelFromSource(
     )
 
     // After the details are stored, as manga's sync throws after its details write.
-    if (sourceNovel.chapters.isNullOrEmpty() && merged.totalPages <= 1L) throw NoChaptersException()
+    if (sourceNovel.chapters.isNullOrEmpty() && sourcePages <= 1L) throw NoChaptersException()
 
     var synced = syncFirstPage(
         sourceNovel,
@@ -157,22 +211,29 @@ suspend fun refreshNovelFromSource(
         novelChapterRepository,
         novelRepository,
         libraryPreferences,
-        numberOverrides,
+        syncRules,
         novelDownloadManager,
+        pages = sourcePages,
     )
-    if (merged.totalPages > 1L) {
-        val walked = walkNovelPages(
+    if (sourcePages > 1L) {
+        val walk = walkNovelPages(
             merged,
             source,
-            maxOf(2L, novel.totalPages),
-            merged.totalPages,
+            walkedThrough = merged.totalPages,
+            toPage = sourcePages,
             novelChapterRepository,
             novelRepository,
             libraryPreferences,
-            numberOverrides,
+            syncRules,
             novelDownloadManager = novelDownloadManager,
+            alsoPage = viewedPage,
+            dropsPagesPastLast = dropsPages,
         )
-        synced = synced?.plus(walked) ?: walked
+        synced = synced?.plus(walk.synced) ?: walk.synced
+        if (walk.walkedThrough != merged.totalPages) {
+            novelRepository.update(NovelUpdate(merged.id) { totalPages = walk.walkedThrough })
+            merged = merged.copy(totalPages = walk.walkedThrough)
+        }
     }
     if (synced != null) {
         predictNovelFetchInterval(
@@ -185,7 +246,7 @@ suspend fun refreshNovelFromSource(
             fetchWindow,
         )
     }
-    return NovelRefreshResult(merged, synced?.newChapters.orEmpty())
+    NovelRefreshResult(merged, synced?.newChapters.orEmpty())
 }
 
 /**
@@ -199,7 +260,7 @@ suspend fun insertOpenedNovel(
     novelRepository: NovelRepository,
     novelChapterRepository: NovelChapterRepository,
     libraryPreferences: LibraryPreferences,
-    numberOverrides: ChapterNumberOverrideRepository,
+    syncRules: NovelChapterSyncRules,
     novelDownloadManager: NovelDownloadManager? = null,
 ): Novel? {
     val target = novelRepository.insertOrGet(sourceNovel.toNovel(sourceId = sourceId, favorite = false))
@@ -210,7 +271,7 @@ suspend fun insertOpenedNovel(
         novelRepository,
         novelChapterRepository,
         libraryPreferences,
-        numberOverrides,
+        syncRules,
         novelDownloadManager,
     )
     return target
@@ -226,7 +287,7 @@ suspend fun syncOpenedChapters(
     novelRepository: NovelRepository,
     novelChapterRepository: NovelChapterRepository,
     libraryPreferences: LibraryPreferences,
-    numberOverrides: ChapterNumberOverrideRepository,
+    syncRules: NovelChapterSyncRules,
     novelDownloadManager: NovelDownloadManager? = null,
 ) {
     val synced = syncFirstPage(
@@ -235,8 +296,9 @@ suspend fun syncOpenedChapters(
         novelChapterRepository,
         novelRepository,
         libraryPreferences,
-        numberOverrides,
+        syncRules,
         novelDownloadManager,
+        pages = sourceNovel.totalPages.toLong().takeIf { it > 0L } ?: target.totalPages,
     ) ?: return
     predictNovelFetchInterval(
         target,
@@ -248,26 +310,34 @@ suspend fun syncOpenedChapters(
     )
 }
 
-/** Syncs the chapters [sourceNovel] parsed with [novel], or returns null when it parsed none. */
+/** Whether [page] of the novel at [novelPath] lists a chapter; a page that fails to load lists none. */
+private suspend fun NovelSource.listsChapters(novelPath: String, page: Long): Boolean =
+    runCatchingCancellable { parsePage(novelPath, page.toString()) }.getOrNull()?.chapters.isNullOrEmpty().not()
+
+/**
+ * Syncs the chapters [sourceNovel] parsed with [novel], or returns null when it parsed none. [pages] is the count the
+ * caller trusts, never a raw 0 from the parse: an unpaged sync removes every row its list lacks, later pages' included.
+ */
 private suspend fun syncFirstPage(
     sourceNovel: SourceNovel,
     novel: Novel,
     novelChapterRepository: NovelChapterRepository,
     novelRepository: NovelRepository,
     libraryPreferences: LibraryPreferences,
-    numberOverrides: ChapterNumberOverrideRepository,
+    syncRules: NovelChapterSyncRules,
     novelDownloadManager: NovelDownloadManager?,
+    pages: Long,
 ): NovelChapterSyncResult? {
     val chapters = sourceNovel.chapters?.takeIf { it.isNotEmpty() } ?: return null
     // A paged source's first page is page "1"; tag it so the page-"1" query finds these rows.
-    val pageTag = if (sourceNovel.totalPages > 1) "1" else null
+    val pageTag = if (pages > 1L) "1" else null
     return syncChaptersWithNovelSource(
         chapters,
         novel,
         novelChapterRepository,
         novelRepository,
         libraryPreferences,
-        numberOverrides,
+        syncRules,
         page = pageTag,
         novelDownloadManager = novelDownloadManager,
     )

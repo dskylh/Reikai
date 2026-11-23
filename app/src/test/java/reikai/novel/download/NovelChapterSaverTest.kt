@@ -1,14 +1,11 @@
 package reikai.novel.download
 
-import android.text.TextUtils
 import com.hippo.unifile.UniFile
 import eu.kanade.tachiyomi.data.download.DownloadProvider
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
-import io.mockk.mockkStatic
-import io.mockk.unmockkStatic
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.AfterEach
@@ -16,11 +13,15 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import reikai.domain.novel.NovelChapterRepository
+import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.novel.source.NovelSource
 import reikai.presentation.recents.EmittingPreferenceStore
+import reikai.util.stubUniFileStatics
 import reikai.util.testAppScope
+import reikai.util.unstubUniFileStatics
+import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.storage.service.StorageManager
 import java.io.File
@@ -35,29 +36,25 @@ class NovelChapterSaverTest {
     @TempDir
     lateinit var root: File
 
-    // UniFile's file-backed implementation asks android.text.TextUtils, which the JVM test jar stubs out.
     @BeforeEach
-    fun stubTextUtils() {
-        mockkStatic(TextUtils::class)
-        every { TextUtils.isEmpty(any()) } answers { firstArg<CharSequence?>().isNullOrEmpty() }
-    }
+    fun stubStatics() = stubUniFileStatics()
 
     @AfterEach
-    fun restoreTextUtils() {
-        unmockkStatic(TextUtils::class)
-    }
+    fun restoreStatics() = unstubUniFileStatics()
 
     private val libraryPreferences = LibraryPreferences(EmittingPreferenceStore())
 
     private val provider by lazy {
         NovelDownloadProvider(
             scope = testAppScope(),
+            context = mockk(),
             storageManager = mockk<StorageManager> {
                 every { getNovelDownloadsDirectory() } returns UniFile.fromFile(root)
                 every { changes } returns MutableSharedFlow()
             },
             downloadProvider = DownloadProvider(mockk(), mockk(), libraryPreferences),
             libraryPreferences = libraryPreferences,
+            novelPreferences = NovelPreferences(InMemoryPreferenceStore()),
         )
     }
 
@@ -103,6 +100,14 @@ class NovelChapterSaverTest {
         saver.save(novel, alone, source, "<p>new</p>")
 
         provider.readChapter(novel, alone) shouldBe "<p>new</p>"
+    }
+
+    /** The reader shows a .txt chapter as written, so a tag in its prose is text and names nothing to fetch. */
+    @Test
+    fun `a plain-text chapter is saved as it came, tag-like text included`() = runTest {
+        val text = "a & b <img src=\"x.png\">"
+
+        saver.prepare(mockk { every { id } returns "src" }, text, "/c/1.txt") shouldBe text
     }
 
     private fun chapter(id: Long, url: String) = NovelChapter(

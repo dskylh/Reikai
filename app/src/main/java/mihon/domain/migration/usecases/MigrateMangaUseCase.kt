@@ -17,28 +17,28 @@ import mihon.domain.migration.models.MigrationFlag
 import mihon.domain.source.interactor.UpdateMangaFromRemote
 import reikai.domain.backup.mergedHistory // RK
 import reikai.domain.db.Transactions
+import reikai.domain.entry.CarryCustomInfo // RK
 import reikai.domain.entry.EntryId // RK
 import reikai.domain.library.ContentType // RK
-import reikai.domain.manga.MangaGroupCategories
+import reikai.domain.library.HideSeries // RK
 import reikai.domain.manga.MangaMergeManager
+import reikai.domain.migration.MigrationSwapEffects // RK
 import reikai.domain.readinglog.ReadingLogRepository // RK
 import reikai.domain.readinglog.sessionMoves // RK
-import reikai.domain.track.source.SourceTrackerDispatcher // RK
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.category.interactor.GetCategories
-import tachiyomi.domain.category.interactor.SetMangaCategories
 import tachiyomi.domain.chapter.interactor.GetChaptersByMangaId
 import tachiyomi.domain.chapter.interactor.UpdateChapter
 import tachiyomi.domain.chapter.model.ChapterUpdate
 import tachiyomi.domain.chapter.repository.ChapterRepository
 import tachiyomi.domain.history.interactor.GetHistory // RK
-import tachiyomi.domain.history.interactor.UpsertHistory // RK
 import tachiyomi.domain.history.model.HistoryUpdate // RK
+import tachiyomi.domain.history.repository.HistoryRepository // RK
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.manga.model.MangaUpdate
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.track.interactor.GetTracks
-import tachiyomi.domain.track.interactor.UpsertTrack
+import tachiyomi.domain.track.repository.TrackRepository // RK
 import kotlin.time.Clock
 
 @Inject
@@ -52,9 +52,10 @@ class MigrateMangaUseCase(
     private val getChaptersByMangaId: GetChaptersByMangaId,
     private val updateChapter: UpdateChapter,
     private val getCategories: GetCategories,
-    private val setMangaCategories: SetMangaCategories,
+    // RK: setMangaCategories moved to MigrationSwapEffects, which files the target's whole group.
     private val getTracks: GetTracks,
-    private val upsertTrack: UpsertTrack,
+    // RK: the repository, not UpsertTrack, which logs and swallows; see the track carry below.
+    private val trackRepository: TrackRepository,
     private val coverCache: CoverCache,
     private val updateMangaFromRemote: UpdateMangaFromRemote,
     // RK: keeps migration merge-aware.
@@ -64,16 +65,16 @@ class MigrateMangaUseCase(
     private val chapterRepository: ChapterRepository,
     // RK: so the favorite swap and the merge-group rewrite can share one transaction; see below.
     private val transactions: Transactions,
-    // RK: tells an extension that syncs to its own site about the migration.
-    private val sourceTracker: SourceTrackerDispatcher,
+    // RK: the steps after the swap commits, shared with the novel engine.
+    private val swapEffects: MigrationSwapEffects,
     // RK: reading history carries onto the matched chapters, as Komikku's migration does.
     private val getHistory: GetHistory,
-    private val upsertHistory: UpsertHistory,
+    private val historyRepository: HistoryRepository,
     private val readingLog: ReadingLogRepository, // RK: and so does its reading log
+    private val hideSeries: HideSeries, // RK: a replace keeps the series hidden from the library
+    private val carryCustomInfo: CarryCustomInfo, // RK: the Edit info row, behind its own option
 ) {
     private val enhancedServices by lazy { trackerManager.trackers.filterIsInstance<EnhancedTracker>() }
-
-    private val groupCategories = MangaGroupCategories(getCategories, setMangaCategories) // RK
 
     // RK: flags may be passed as a value so concurrent migrations can't read each other's set out of
     // the shared preference; skipTargetRefresh lets a caller that just fetched the target's chapters
@@ -165,7 +166,7 @@ class MigrateMangaUseCase(
                 // what the Failed row and its retry exist to prevent. Runs before the downloads are
                 // deleted, so a retry after this throws heals everything.
                 chapterRepository.updateAll(chapterUpdates)
-                historyUpdates.forEach { upsertHistory.await(it) } // RK
+                historyRepository.upsertAllHistory(historyUpdates) // RK: one write that throws
                 readingLog.move(ContentType.MANGA, sessionMoves(sessionSources)) // RK
             }
 
@@ -193,7 +194,8 @@ class MigrateMangaUseCase(
                 }
             }
                 .takeIf { it.isNotEmpty() }
-                ?.let { upsertTrack.awaitAll(it) }
+                // RK: throws on failure, so a dropped tracker link fails the row before the swap
+                ?.let { trackRepository.upsertAll(it) }
 
             // Delete downloaded
             // RK: through the stub, which names the same folder, so a source whose extension is uninstalled,
@@ -204,9 +206,6 @@ class MigrateMangaUseCase(
             }
 
             // Update custom cover (recheck if custom cover exists)
-            // RK: pass the injected cache rather than letting hasCustomCover resolve its own from
-            // Injekt. Same singleton in production, but it was the one dependency this use case did
-            // not take by constructor, so the cover carry could not be tested at all.
             if (MigrationFlag.CUSTOM_COVER in flags && current.hasCustomCover(coverCache)) {
                 coverCache.getCustomCoverFile(current.id).inputStream().use {
                     coverCache.setCustomCoverToCache(target, it)
@@ -215,6 +214,10 @@ class MigrateMangaUseCase(
                 // custom-cover write. Without it a target that already had a custom cover keeps
                 // showing the old one, since the cache key does not change.
                 updateManga.awaitUpdateCoverLastModified(target.id)
+            }
+            // RK: before the swap, so a failed write fails the row with the library untouched
+            if (MigrationFlag.CUSTOM_INFO in flags) {
+                carryCustomInfo.await(EntryId.Manga(current.id), EntryId.Manga(target.id))
             }
 
             val currentMangaUpdate = MangaUpdate(current.id) {
@@ -233,26 +236,28 @@ class MigrateMangaUseCase(
             // between them, so a batch the user cancelled could commit the swap and never reach the
             // rewrite: the source ended up out of the library but still in the group, feeding
             // chapters into it while invisible there and unreachable to unmerge.
-            transactions.run {
-                // The target takes the source's place in the group on a replace, or joins it on a
-                // copy. Works for manual and same-title auto groups.
-                if (replace) {
-                    mangaMergeManager.replaceInGroup(current.id, target.id)
-                } else if (mergeGroup.size > 1) {
-                    mangaMergeManager.merge(mergeGroup.toList() + target.id)
-                }
-                // Checked, where upstream discards the result. The swap is the step that decides which
-                // entry is in the library; letting it fail quietly reports the row as Migrated with
-                // the source still favorited. Throwing here rolls the group rewrite back with it.
-                check(updateManga.awaitAll(listOfNotNull(currentMangaUpdate, targetMangaUpdate))) {
-                    "Migration favorite swap failed (${current.id} -> ${target.id})"
+            transactions.runThrowingOnRollback {
+                hideSeries.keepAcrossSwap(EntryId.Manga(current.id), EntryId.Manga(target.id), replace) {
+                    // The target takes the source's place in the group on a replace, or joins it on a
+                    // copy. Works for manual and same-title auto groups.
+                    if (replace) {
+                        mangaMergeManager.replaceInGroup(current.id, target.id)
+                    } else if (mergeGroup.size > 1) {
+                        mangaMergeManager.merge(mergeGroup.toList() + target.id)
+                    }
+                    // Checked, where upstream discards the result. The swap is the step that decides which
+                    // entry is in the library; letting it fail quietly reports the row as Migrated with
+                    // the source still favorited. Throwing here rolls the group rewrite back with it.
+                    check(updateManga.awaitAll(listOfNotNull(currentMangaUpdate, targetMangaUpdate))) {
+                        "Migration favorite swap failed (${current.id} -> ${target.id})"
+                    }
                 }
             }
-            groupCategories.fileMigrationTarget(target.id, categoryIds, mangaMergeManager)
-            sourceTracker.migrated(
+            swapEffects.afterSwap(
                 EntryId.Manga(current.id),
                 EntryId.Manga(target.id),
                 replace,
+                categoryIds,
                 carriedChapters = MigrationFlag.CHAPTER in flags,
             )
             // RK <--

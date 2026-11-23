@@ -3,40 +3,53 @@ package reikai.presentation.reader
 import android.content.Context
 import android.content.Intent
 import androidx.lifecycle.lifecycleScope
+import dev.icerock.moko.resources.StringResource
 import eu.kanade.presentation.manga.components.ChapterDownloadAction
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
+import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.ui.webview.WebViewActivity
 import eu.kanade.tachiyomi.util.system.isNightMode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import logcat.LogPriority
+import org.jsoup.Jsoup
 import reikai.data.coil.extractCoverColor
 import reikai.data.coil.seedColor
 import reikai.data.novel.tts.NovelTtsSession
 import reikai.data.novel.tts.SleepTimer
 import reikai.domain.entry.EntryId
+import reikai.domain.library.ContentType
 import reikai.domain.novel.NovelPageLayout
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRenderingMode
+import reikai.domain.novel.text.NovelWords
+import reikai.domain.reader.ChapterLength
 import reikai.domain.reader.ChapterProgress
+import reikai.domain.reader.ReaderProgressLook
 import reikai.novel.font.NovelFontManager
 import reikai.novel.network.NovelImageRequests
 import reikai.presentation.components.UndatedChapterDate
 import reikai.presentation.details.novelDetailsIntent
+import reikai.presentation.reader.settings.sheetDualPageRowsShown
 import reikai.presentation.reader.text.NovelWindowDiff
 import reikai.util.snapshotOnChange
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
-import kotlin.math.abs
 
 /**
  * The light-novel half of the reader's provider seam, over the live [NovelReaderViewModel] the host
@@ -70,11 +83,18 @@ class NovelReaderProvider(
     override val bottomButtons: Flow<List<ReaderBottomButton>> =
         ReaderBottomButton.orderedChanges(ReaderBottomButton.BarPreferences.novel(novelPreferences))
 
+    override val bottomButtonsFilled: Flow<Boolean> = novelPreferences.readerBottomButtonsFilled().changes()
+
     override val bottomButtonScope = ReaderBottomButton.Scope.Novel
 
     override fun seedColor(context: Context): Flow<Int?> = viewModel.cover
         .filterNotNull()
-        .map { cover -> EntryId.Novel(cover.novelId).seedColor { context.extractCoverColor(cover) } }
+        .distinctUntilChanged()
+        .map { cover ->
+            EntryId.Novel(cover.novelId).seedColor(cover.url, cover.lastModified, cover.isNovelFavorite) {
+                context.extractCoverColor(cover)
+            }
+        }
 
     override val displayFilters = ReaderDisplayFilters(
         customBrightness = novelPreferences.readerCustomBrightness(),
@@ -84,6 +104,7 @@ class NovelReaderProvider(
         colorFilterMode = novelPreferences.readerColorFilterMode(),
         grayscale = novelPreferences.readerGrayscale(),
         invertedColors = novelPreferences.readerInvertedColors(),
+        contrastPercent = novelPreferences.readerContrast(),
     )
 
     override val flash = ReaderFlash.novel(novelPreferences)
@@ -103,15 +124,21 @@ class NovelReaderProvider(
             WebViewActivity.newNovelChapterIntent(context, url, title, novelId, chapterId, sourceId)
         } ?: WebViewActivity.newIntent(context, url, title = title)
 
-    override suspend fun chapterWebUrl(chapterId: Long): String? = viewModel.webUrlOf(chapterId)
+    // The source builds the URL, and a tachiyomi-format extension may override that, as on manga.
+    override suspend fun chapterWebUrl(chapterId: Long): String? = withIOContext { viewModel.webUrlOf(chapterId) }
 
-    override fun detailsIntent(context: Context): Intent? = viewModel.detailsRoute.value?.let { route ->
-        novelDetailsIntent(context, route.source, route.url).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    override fun detailsIntent(context: Context): Intent? = viewModel.detailsNovelId.value?.let { novelId ->
+        novelDetailsIntent(context, novelId).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
     }
 
-    override fun pageBackground(context: Context): Flow<Int> = viewModel.settings.map {
-        readerBackgroundColorInt(it.resolvedForSystemTheme(context.isNightMode()).backgroundColor)
-    }
+    // The colour filter goes over the whole renderer, so the colour painted around it and behind the readout
+    // takes it too, or a filtered page would sit in an unfiltered band. Manga's filter reaches only its images.
+    override fun pageBackground(context: Context): Flow<Int> = combine(
+        viewModel.settings.map {
+            readerBackgroundColorInt(it.resolvedForSystemTheme(context.isNightMode()).backgroundColor)
+        },
+        displayFilters.pageColorAdjust(),
+    ) { color, adjust -> adjust.applyTo(color) }
 
     /** The page on screen and the chapter's page count, as the paged viewport last reported them. */
     private val shownPage = MutableStateFlow<ChapterProgress.Pages?>(null)
@@ -122,7 +149,7 @@ class NovelReaderProvider(
         viewModel.settings,
         viewModel.chapterNeighbours,
         novelPreferences.readerShowNavigator().changes(),
-        combine(novelPreferences.readerPageLayout().changes(), shownPage) { layout, page ->
+        combine(viewModel.effectivePageLayout, shownPage) { layout, page ->
             layout to page.takeIf { layout.isPaged }
         },
     ) { percent, settings, neighbours, show, (layout, page) ->
@@ -134,6 +161,30 @@ class NovelReaderProvider(
 
     override val showProgress: Flow<Boolean> = viewModel.settings.map { it.showProgressPercentage }
 
+    override val showTimeLeft: Flow<Boolean> = novelPreferences.readerShowTimeLeft().changes()
+
+    override val progressLook: Flow<ReaderProgressLook> = combine(
+        novelPreferences.readerProgressSize().changes(),
+        novelPreferences.readerProgressBacked().changes(),
+        ::ReaderProgressLook,
+    )
+
+    // Counted once a chapter, off the main thread: a chapter's text is parsed whole to count it.
+    override val chapterLength: Flow<ChapterLength?> = viewModel.chapter
+        .filterNotNull()
+        .distinctUntilChangedBy { it.chapterId }
+        .map { chapter ->
+            val words = NovelWords.count(Jsoup.parse(chapter.html).body().text()).toLong()
+            ChapterLength(
+                ContentType.NOVELS,
+                viewModel.memberIds.toSet(),
+                chapter.chapterId,
+                words,
+                recorded = viewModel.isRecorded(chapter.novelId),
+            ).takeIf { words > 0 }
+        }
+        .flowOn(Dispatchers.Default)
+
     override val loadState: Flow<ReaderLoadState> = viewModel.loadState
 
     override fun retryLoad() = viewModel.retryLoad()
@@ -144,11 +195,16 @@ class NovelReaderProvider(
 
     override fun toggleBookmark() = viewModel.toggleBookmark()
 
-    override val webUrl: Flow<String?> = viewModel.chapter.map { chapter -> chapter?.let { viewModel.webUrlFor(it) } }
+    override val webUrl: Flow<String?> = viewModel.chapter
+        .map { chapter -> chapter?.let { viewModel.webUrlFor(it) } }
+        // Off the main thread for the reason chapterWebUrl gives.
+        .flowOn(Dispatchers.IO)
 
     override fun saveHistory() = viewModel.saveHistory()
 
     override fun restartReadTimer() = viewModel.restartReadTimer()
+
+    override fun setMenuOpen(open: Boolean) = viewModel.setMenuOpen(open)
 
     override fun onActivityFinish() = viewModel.onActivityFinish()
 
@@ -161,17 +217,19 @@ class NovelReaderProvider(
 
         override val currentChapterId: Flow<Long> = viewModel.chapter.map { it?.chapterId ?: -1L }
 
+        override val heldChapterIds: Flow<Set<Long>> = viewModel.heldChapterIds
+
         override val undatedChapterDate = UndatedChapterDate.Blank
 
         override fun open(chapterId: Long) = viewModel.open(chapterId)
 
-        override fun setRead(chapterId: Long, read: Boolean) = viewModel.setChapterRead(chapterId, read)
+        override fun setRead(chapterIds: List<Long>, read: Boolean) = viewModel.setChapterRead(chapterIds, read)
 
-        override fun setBookmark(chapterId: Long, bookmarked: Boolean) =
-            viewModel.setChapterBookmark(chapterId, bookmarked)
+        override fun setBookmark(chapterIds: List<Long>, bookmarked: Boolean) =
+            viewModel.setChapterBookmark(chapterIds, bookmarked)
 
-        override fun download(chapterId: Long, action: ChapterDownloadAction) =
-            viewModel.downloadChapter(chapterId, action)
+        override fun download(chapterIds: List<Long>, action: ChapterDownloadAction) =
+            viewModel.downloadChapter(chapterIds, action)
     }
 
     override val textSettings: ReaderTextSettings = object : ReaderTextSettings {
@@ -187,6 +245,16 @@ class NovelReaderProvider(
 
         override fun setThemeColors(background: String, textColor: String) =
             viewModel.setThemeColors(background, textColor)
+
+        override val renderingMode: Flow<NovelRenderingMode?> = viewModel.renderingMode
+
+        override fun setRenderingMode(mode: NovelRenderingMode?) = viewModel.setRenderingMode(mode)
+
+        override val pageLayout: Flow<NovelPageLayout?> = viewModel.pageLayout
+
+        override val effectivePageLayout: StateFlow<NovelPageLayout> = viewModel.effectivePageLayout
+
+        override fun setPageLayout(layout: NovelPageLayout?) = viewModel.setPageLayout(layout)
     }
 
     override val autoScrollOnOpen = novelPreferences.readerAutoScrollOnOpen()
@@ -206,7 +274,7 @@ class NovelReaderProvider(
             controller.state,
             controlsVisible.changes(),
             sleepTimer.timer,
-        ) { speech, visible, timer -> ReaderReadAloudState(speech.playback, visible, timer) }
+        ) { speech, visible, timer -> ReaderReadAloudState(speech.playback, visible, timer, speech.progress) }
 
         override fun play() = controller.play()
 
@@ -243,13 +311,21 @@ class NovelReaderProvider(
     override fun setKeepScreenOn(enabled: Boolean) = viewModel.setKeepScreenOn(enabled)
 
     /**
-     * A change to a setting [createViewport] reads once, after the one it was built with. The sheet reaches
-     * all four, so the host rebuilds the viewport around the live session, as a rotation does.
+     * A change to a setting [createViewport] reads once, after the one it was built with: the
+     * [NovelViewportSettings] and the novel's own renderer and reading mode. The sheet reaches them, so the
+     * host rebuilds the viewport around the live session, as a rotation does.
      */
-    private val viewportRebuilds: Flow<Unit> = NovelViewportSettings.watched(novelPreferences)
-        .snapshotOnChange { NovelViewportSettings.read(novelPreferences) }
+    private val viewportRebuilds: Flow<Unit> = (
+        NovelViewportSettings.watched(novelPreferences) +
+            viewModel.renderingMode +
+            viewModel.pageLayout
+        )
+        .snapshotOnChange(::viewportSettings)
         .drop(1)
         .map { }
+
+    private fun viewportSettings() =
+        NovelViewportSettings.read(novelPreferences, viewModel.renderingMode.value, viewModel.pageLayout.value)
 
     /**
      * The [NovelViewportSettings] are read once here, because the viewport takes them as plain values so
@@ -257,14 +333,14 @@ class NovelReaderProvider(
      * are live without one: the switch is read each press and the rest arrives with every settings push.
      */
     override fun createViewport(host: ReaderActivity): ReaderViewport {
-        val built = NovelViewportSettings.read(novelPreferences)
+        val built = viewportSettings()
         // One rule for both renderers, as the long-strip manga viewer hides the menu: read once per
         // viewport, so a changed threshold takes effect on the next open, as manga's does.
-        val hideThreshold = novelPreferences.readerHideThreshold().get().threshold
+        val menuHide = MenuHideOnScroll(novelPreferences.readerHideThreshold().get().threshold)
         val callbacks = NovelViewportCallbacks(
             // The keys are the reader's only while the menu is down, as they are for manga. Read from the
             // host each press, since the menu opens and closes mid-session.
-            volumeKeysActive = { viewModel.settings.value.useVolumeButtons && !host.isMenuVisible },
+            volumeKeysActive = { volumeKeysActive(viewModel.settings.value.useVolumeButtons, host.isMenuVisible) },
             // Both persist: the live percent debounced, since an auto-scrolled or scrubbed read never
             // settles, and the settled one at once. Either one finishing a chapter marks it read.
             onProgressChanged = viewModel::reportProgress,
@@ -281,30 +357,44 @@ class NovelReaderProvider(
             cutoutTopDp = host::displayCutoutTopDp,
             onChapterFits = viewModel::reportFitsOnScreen,
             onChapterEndSeen = viewModel::reportChapterEndSeen,
-            onReaderScrolled = { dy -> if (abs(dy) > hideThreshold) host.hideMenu() },
+            onScrolled = { dy, touching -> if (menuHide.hides(dy.toFloat(), touching)) host.hideMenu() },
+            // A turn is the reader moving, as a drag or a key is, which lets an earlier chapter be read.
+            onReaderTurned = viewModel::readerMoved,
             onPageTurned = host::pageTurned,
             onPageShown = { page, count -> shownPage.value = ChapterProgress.Pages(page, count) },
+            onPictureOpened = { model, chapterTitle ->
+                val chapter = chapterTitle ?: viewModel.chapter.value?.title
+                val name = chapterPictureName(viewModel.entryTitle.value, chapter, model)
+                val picture = ReaderDialog.Picture(model, name, viewModel.pictureFolder(), viewModel::setPictureAsCover)
+                host.engine.openDialog(picture)
+            },
         )
         // A new viewport reports its own page, and one scrolling reports none.
         shownPage.value = null
         val autoScrollSpeed = novelPreferences.readerAutoScrollSpeed()
         val autoScrollInterval = novelPreferences.readerAutoScrollInterval()
+        // Read once, since a rotation, where When wide changes its answer, builds the viewport again. The
+        // sheet hides Text selectable by the same call, so it is hidden exactly where a spread ignores it.
+        val spread = host.resources.configuration.let {
+            sheetDualPageRowsShown(built.pageLayout.isPaged, built.dualPageView, it.screenWidthDp, it.screenHeightDp)
+        }
         if (built.renderingMode == NovelRenderingMode.NATIVE) {
             return NovelTextViewport(
                 context = host,
                 fontManager = fontManager,
-                textSelectable = built.textSelectable,
+                textSelectable = built.selectsText(spread),
                 pageLayout = built.pageLayout,
                 callbacks = callbacks,
                 autoScrollSpeed = autoScrollSpeed,
                 autoScrollInterval = autoScrollInterval,
+                spread = spread,
             )
         }
         return NovelWebViewport(
             context = host,
             fontManager = fontManager,
             imageRequests = imageRequests,
-            textSelectable = built.textSelectable,
+            textSelectable = built.selectsText(spread),
             pageLayout = built.pageLayout,
             callbacks = callbacks,
             useOriginalFonts = built.useOriginalFonts,
@@ -312,16 +402,36 @@ class NovelReaderProvider(
             devTools = novelPreferences.readerWebViewDevTools().get(),
             autoScrollSpeed = autoScrollSpeed,
             autoScrollInterval = autoScrollInterval,
+            spread = spread,
         )
     }
 
     // Built here rather than from the host's manga collector, which is what updateViewer hangs off and
     // which never fires without a Manga in state.
     override fun attach(host: ReaderActivity) {
+        // The novel's own renderer and reading mode are read off the main thread at open. Built before they land,
+        // the viewport took the defaults and was rebuilt, Activity and chapter both, once the novel's differed.
+        if (viewModel.viewerFlagsLoaded.isCompleted) {
+            attachViewport(host)
+        } else {
+            host.lifecycleScope.launch {
+                viewModel.viewerFlagsLoaded.await()
+                attachViewport(host)
+            }
+        }
+    }
+
+    private fun attachViewport(host: ReaderActivity) {
+        val builtLayout = viewportSettings().pageLayout
         // The session and its position outlive the Activity, so a rebuild lands where the reader is.
-        viewportRebuilds.onEach { host.recreate() }.launchIn(host.lifecycleScope)
+        viewportRebuilds.onEach {
+            viewModel.viewportRebuiltFrom = builtLayout
+            host.recreate()
+        }.launchIn(host.lifecycleScope)
         val viewport = createViewport(host)
         host.showViewport(viewport)
+        val rebuiltFrom = viewModel.viewportRebuiltFrom.also { viewModel.viewportRebuiltFrom = null }
+        readingModeNotice(rebuiltFrom)?.let(host::showReadingModeToast)
         // Asked for rather than cast: which text renderer is running is the provider's choice.
         // A novel viewport that does not answer would render an empty reader in silence, so say so.
         when (viewport) {
@@ -342,8 +452,16 @@ class NovelReaderProvider(
         // the first, and on the first only when the reader asked to see the zones on start.
         val showOnStart = novelPreferences.readerShowTapZonesOnStart().get()
         tapZoneChanges
-            .onEach { host.binding.navigationOverlay.setNavigation(it.navigation, showOnStart) }
+            .onEach { host.navigationOverlayState.setNavigation(it.navigation, showOnStart) }
             .launchIn(host.lifecycleScope)
+    }
+
+    /** The reading mode the viewport is built in, named on each build as manga's `updateViewer` names its
+     *  own, except a rebuild for a sheet setting that left the mode as it was [rebuiltFrom]; null while Show
+     *  reading mode is off. */
+    internal fun readingModeNotice(rebuiltFrom: NovelPageLayout? = null): StringResource? {
+        val layout = viewportSettings().pageLayout
+        return layout.titleRes.takeIf { novelPreferences.readerShowReadingMode().get() && layout != rebuiltFrom }
     }
 
     // Speech outlives the Activity, so the renderer it marks is let go of before it is destroyed.
@@ -415,14 +533,25 @@ class NovelReaderProvider(
 internal data class NovelViewportSettings(
     val renderingMode: NovelRenderingMode,
     val pageLayout: NovelPageLayout,
+    val dualPageView: ReaderPreferences.DualPageView,
     val textSelectable: Boolean,
     val useOriginalFonts: Boolean,
     val sourceCssPriority: Boolean,
 ) {
+    /** Never in a [spread], which draws its column where the column is not: selection's handles and toolbar are
+     *  placed where it is, a page away from the text they belong to. */
+    fun selectsText(spread: Boolean): Boolean = textSelectable && !spread
+
     companion object {
-        fun read(preferences: NovelPreferences) = NovelViewportSettings(
-            renderingMode = preferences.readerRenderingMode().get(),
-            pageLayout = preferences.readerPageLayout().get(),
+        /** [own] and [ownLayout] are the novel's own rendering and reading modes, which win over the settings. */
+        fun read(
+            preferences: NovelPreferences,
+            own: NovelRenderingMode? = null,
+            ownLayout: NovelPageLayout? = null,
+        ) = NovelViewportSettings(
+            renderingMode = own ?: preferences.readerRenderingMode().get(),
+            pageLayout = ownLayout ?: preferences.readerPageLayout().get(),
+            dualPageView = preferences.readerDualPageView().get(),
             textSelectable = preferences.readerTextSelectable().get(),
             useOriginalFonts = preferences.readerUseOriginalFonts().get(),
             sourceCssPriority = preferences.readerSourceCssPriority().get(),
@@ -432,6 +561,7 @@ internal data class NovelViewportSettings(
         fun watched(preferences: NovelPreferences): List<Flow<*>> = listOf(
             preferences.readerRenderingMode().changes(),
             preferences.readerPageLayout().changes(),
+            preferences.readerDualPageView().changes(),
             preferences.readerTextSelectable().changes(),
             preferences.readerUseOriginalFonts().changes(),
             preferences.readerSourceCssPriority().changes(),

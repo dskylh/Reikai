@@ -22,17 +22,13 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
@@ -45,6 +41,8 @@ import reikai.domain.novel.model.NovelChapter
 import reikai.novel.download.NovelDownload
 import reikai.presentation.reader.FakeNovelSource
 import reikai.presentation.reader.NovelReaderViewModelHarness
+import reikai.util.resetVirtualDispatchers
+import reikai.util.virtualDispatchers
 import tachiyomi.core.common.preference.TriState
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
@@ -66,22 +64,22 @@ class MergedDownloadCopyConformanceTest {
 
     @BeforeEach
     fun setUp() {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
+        virtualDispatchers(UnconfinedTestDispatcher())
         // Both read through Injekt in production; held at their shipped defaults.
         mockkStatic(DOWNLOADED_FILTER_FILE)
-        every { any<Manga>().downloadedFilter } returns TriState.DISABLED
+        every { any<Manga>().downloadedFilter(any()) } returns TriState.DISABLED
         mockkObject(DebugToggles.ENABLE_EXH_ROOT_REDIRECT)
         every { DebugToggles.ENABLE_EXH_ROOT_REDIRECT.enabled } returns DebugToggles.ENABLE_EXH_ROOT_REDIRECT.default
         // A header naming one source reads the language preferences off Injekt, which no test registers. A
         // state published before the chips resolve names one, and a throw there stops the adapter's state.
         mockkStatic(SOURCE_EXTENSIONS_FILE)
-        every { any<Source>().getNameForMangaInfo() } returns "source"
+        every { any<Source>().getNameForMangaInfo(any()) } returns "source"
     }
 
     @AfterEach
     fun tearDown() {
         unmockkAll()
-        Dispatchers.resetMain()
+        resetVirtualDispatchers()
     }
 
     @ParameterizedTest
@@ -151,11 +149,9 @@ class MergedDownloadCopyConformanceTest {
 
         private suspend fun queuedAfter(start: () -> Unit): Set<Copy> {
             start()
-            withContext(Dispatchers.Default) {
-                withTimeoutOrNull(10_000) { while (queued.isEmpty()) delay(20) }
-                // Anything else a wrong rule would queue lands in the same pass.
-                delay(200)
-            }
+            withTimeoutOrNull(10_000) { while (queued.isEmpty()) delay(20) }
+            // Anything else a wrong rule would queue lands in the same pass.
+            delay(200)
             return queued.mapTo(HashSet()) { roleOf.getValue(it) }
         }
     }
@@ -219,10 +215,10 @@ class MergedDownloadCopyConformanceTest {
             stitch = stitch,
         ).also { store.put("manga", it) }
         try {
-            val behavior = MangaEntryAdapter(model, mockk(relaxed = true))
+            val behavior = MangaEntryAdapter(model, mockk(relaxed = true), noDuplicateMarking(), noVolumePicking())
             return probe(Group(behavior, behavior.settled(rows = 4), ids, queued))
         } finally {
-            // The model reads on the real IO dispatcher, so it stops before the database closes.
+            // The model stops reading before the database closes.
             val job = model.viewModelScope.coroutineContext.job
             store.clear()
             job.join()
@@ -252,19 +248,23 @@ class MergedDownloadCopyConformanceTest {
                 every { harness.downloadManager.queueState } returns
                     MutableStateFlow(listOf(NovelDownload(a, ids.getValue(copy), "/queued")))
             }
-            val behavior = NovelEntryAdapter(harness.openDetails(m), mockk(relaxed = true))
+            val behavior =
+                NovelEntryAdapter(
+                    harness.openDetails(m),
+                    mockk(relaxed = true),
+                    noDuplicateMarking(),
+                    noVolumePicking(),
+                )
             probe(Group(behavior, behavior.settled(rows = 4), ids, queued))
         }
 
     /** The merged page once the installed member serves it and every row of the stitch is listed. */
     private suspend fun EntryDetailsBehavior.settled(rows: Int): EntryDetailsScreenState.Loaded =
-        withContext(Dispatchers.Default) {
-            withTimeout(30_000) {
-                state.first {
-                    it is EntryDetailsScreenState.Loaded && it.isMerged && it.webPage != null &&
-                        it.chapters.items.count { item -> item is EntryChapterListItem.Chapter } == rows
-                } as EntryDetailsScreenState.Loaded
-            }
+        withTimeout(30_000) {
+            state.first {
+                it is EntryDetailsScreenState.Loaded && it.isMerged && it.webPage != null &&
+                    it.chapters.items.count { item -> item is EntryChapterListItem.Chapter } == rows
+            } as EntryDetailsScreenState.Loaded
         }
 
     private fun httpSource(sourceId: Long) = mockk<HttpSource>(relaxed = true) {

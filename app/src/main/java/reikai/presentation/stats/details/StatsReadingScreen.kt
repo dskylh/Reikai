@@ -1,9 +1,13 @@
 package reikai.presentation.stats.details
 
+import android.text.format.DateFormat
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,7 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DatePickerDefaults
 import androidx.compose.material3.DatePickerDialog
@@ -33,39 +36,45 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.NavKey
 import dev.icerock.moko.resources.StringResource
 import dev.zacsweers.metrox.viewmodel.metroViewModel
 import eu.kanade.presentation.components.AppBar
-import eu.kanade.presentation.util.Screen
-import kotlinx.coroutines.launch
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.atStartOfDayIn
 import kotlinx.datetime.toJavaLocalDate
 import kotlinx.datetime.toLocalDateTime
+import kotlinx.serialization.Serializable
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.automirroredrounded.ArrowBack
 import mihon.icons.materialsymbols.automirroredrounded.ArrowForward
+import reikai.presentation.details.detailsRoute
 import reikai.presentation.stats.BarUnit
 import reikai.presentation.stats.ReadingBar
 import reikai.presentation.stats.ReadingPeriod
 import reikai.presentation.stats.ReadingWindow
 import reikai.presentation.stats.StatsCoverTitleLine
+import reikai.presentation.stats.StatsRefreshOnResume
 import reikai.presentation.stats.statsDuration
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.Scaffold
@@ -83,75 +92,75 @@ import kotlin.time.Instant
  * Reading time over a week, a month, a year or a picked range; tapping a bar narrows the series list to
  * its dates.
  */
-class StatsReadingScreen : Screen() {
+@Serializable
+data object StatsReadingRoute : NavKey
 
-    @Composable
-    override fun Content() {
-        val navigator = LocalNavigator.currentOrThrow
-        val viewModel = metroViewModel<StatsReadingViewModel>()
-        val scope = rememberCoroutineScope()
-        val state by viewModel.state.collectAsState()
-        var pickingRange by rememberSaveable { mutableStateOf(false) }
+@Composable
+fun StatsReadingScreen() {
+    val navigator = LocalNavigator.current
+    val viewModel = metroViewModel<StatsReadingViewModel>()
+    StatsRefreshOnResume(viewModel::refresh)
+    val state by viewModel.state.collectAsState()
+    var pickingRange by rememberSaveable { mutableStateOf(false) }
 
-        Scaffold(
-            topBar = { scrollBehavior ->
-                AppBar(
-                    title = stringResource(MR.strings.stats_group_reading_time),
-                    navigateUp = navigator::pop,
-                    scrollBehavior = scrollBehavior,
-                )
-            },
-        ) { paddingValues ->
-            val current = state
-            if (current == null) {
-                LoadingScreen()
-                return@Scaffold
+    Scaffold(
+        topBar = { scrollBehavior ->
+            AppBar(
+                title = stringResource(MR.strings.stats_group_reading_time),
+                navigateUp = navigator::pop,
+                scrollBehavior = scrollBehavior,
+            )
+        },
+    ) { paddingValues ->
+        val current = state
+        if (current == null) {
+            LoadingScreen()
+            return@Scaffold
+        }
+        if (pickingRange) {
+            RangePickerDialog(
+                window = current.window,
+                today = current.today,
+                onConfirm = { first, last ->
+                    pickingRange = false
+                    viewModel.selectRange(first, last)
+                },
+                onDismiss = { pickingRange = false },
+            )
+        }
+        LazyColumn(contentPadding = paddingValues, horizontalAlignment = Alignment.CenterHorizontally) {
+            item {
+                Capped {
+                    PeriodChips(current.window.period) { period ->
+                        if (period == ReadingPeriod.CUSTOM) pickingRange = true else viewModel.selectPeriod(period)
+                    }
+                }
             }
-            if (pickingRange) {
-                RangePickerDialog(
-                    window = current.window,
-                    today = current.today,
-                    onConfirm = { first, last ->
-                        pickingRange = false
-                        viewModel.selectRange(first, last)
-                    },
-                    onDismiss = { pickingRange = false },
-                )
-            }
-            LazyColumn(contentPadding = paddingValues, horizontalAlignment = Alignment.CenterHorizontally) {
+            item { Capped { WindowHeader(current, viewModel::move) } }
+            item { Capped { Bars(current, viewModel::selectBar, viewModel::pickBar) } }
+            item { Capped { SelectedBarLine(current) } }
+            if (current.titles.isEmpty()) {
                 item {
                     Capped {
-                        PeriodChips(current.window.period) { period ->
-                            if (period == ReadingPeriod.CUSTOM) pickingRange = true else viewModel.selectPeriod(period)
-                        }
+                        Text(
+                            text = stringResource(MR.strings.stats_nothing_read),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = MaterialTheme.padding.medium),
+                        )
                     }
                 }
-                item { Capped { WindowHeader(current, viewModel::move) } }
-                item { Capped { Bars(current, viewModel::selectBar) } }
-                item { Capped { SelectedBarLine(current) } }
-                if (current.titles.isEmpty()) {
-                    item {
-                        Capped {
-                            Text(
-                                text = stringResource(MR.strings.stats_nothing_read),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = MaterialTheme.padding.medium),
-                            )
-                        }
-                    }
-                }
-                items(current.titles) { title ->
-                    StatsCoverTitleLine(
-                        title = title.name,
-                        readMs = title.readMs,
-                        cover = title.cover,
-                        modifier = Modifier.widthIn(
-                            max = READING_MAX_WIDTH,
-                        ).padding(horizontal = MaterialTheme.padding.medium),
-                    ) {
-                        scope.launch { viewModel.detailsScreen(title.entryId)?.let(navigator::push) }
-                    }
+            }
+            items(current.titles) { title ->
+                StatsCoverTitleLine(
+                    title = title.name,
+                    readMs = title.readMs,
+                    cover = title.cover,
+                    modifier = Modifier.widthIn(
+                        max = READING_MAX_WIDTH,
+                    ).padding(horizontal = MaterialTheme.padding.medium),
+                ) {
+                    navigator.push(title.entryId.detailsRoute())
                 }
             }
         }
@@ -174,8 +183,8 @@ private val PERIOD_LABELS: List<Pair<ReadingPeriod, StringResource>> = listOf(
 )
 
 @Composable
-private fun PeriodChips(selected: ReadingPeriod, onSelect: (ReadingPeriod) -> Unit) {
-    Row(
+internal fun PeriodChips(selected: ReadingPeriod, onSelect: (ReadingPeriod) -> Unit) {
+    FlowRow(
         modifier = Modifier.fillMaxWidth().padding(horizontal = MaterialTheme.padding.medium),
         horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
     ) {
@@ -203,7 +212,10 @@ private fun WindowHeader(state: StatsReadingState, onMove: (Boolean) -> Unit) {
             )
         }
         Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(text = windowLabel(state.window), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = windowLabel(state.window, LocalLocale.current.platformLocale),
+                style = MaterialTheme.typography.bodyMedium,
+            )
             Text(
                 text = statsDuration(state.bars.sumOf { it.ms }),
                 style = MaterialTheme.typography.titleMedium,
@@ -219,13 +231,15 @@ private fun WindowHeader(state: StatsReadingState, onMove: (Boolean) -> Unit) {
 }
 
 /**
- * One bar per [ReadingBar], scaled to the window's longest; a bar is the button that picks its dates. With
- * nothing picked every bar is drawn as chosen, since the list then covers them all.
+ * One bar per [ReadingBar], scaled to the window's longest; a tap picks the bar under it, or widens back from the
+ * one picked, and a drag along the chart picks each bar it crosses ([onScrub]), since a month's bars are a few dp
+ * wide each. With nothing picked every bar is drawn as chosen, since the list then covers them all.
  */
 @Composable
-private fun Bars(state: StatsReadingState, onSelect: (ReadingBar) -> Unit) {
+private fun Bars(state: StatsReadingState, onSelect: (ReadingBar) -> Unit, onScrub: (ReadingBar) -> Unit) {
     val longest = state.bars.maxOf { it.ms }.coerceAtLeast(1L)
     val unit = state.window.unit
+    val locale = LocalLocale.current.platformLocale
     val dense = state.bars.size > 14
     val gap = if (dense) 2.dp else MaterialTheme.padding.small
     val corner = if (dense) 2.dp else 6.dp
@@ -236,21 +250,43 @@ private fun Bars(state: StatsReadingState, onSelect: (ReadingBar) -> Unit) {
             top = MaterialTheme.padding.small,
         ),
     ) {
+        val bars = state.bars
+        val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+        fun barAt(x: Float, width: Int): ReadingBar {
+            val index = ((if (rtl) width - x else x) / width * bars.size).toInt()
+            return bars[index.coerceIn(0, bars.lastIndex)]
+        }
         Row(
-            modifier = Modifier.fillMaxWidth().height(160.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(160.dp)
+                .pointerInput(bars, rtl) { detectTapGestures { onSelect(barAt(it.x, size.width)) } }
+                .pointerInput(bars, rtl) {
+                    detectHorizontalDragGestures(onDragStart = { onScrub(barAt(it.x, size.width)) }) { change, _ ->
+                        onScrub(barAt(change.position.x, size.width))
+                    }
+                },
             horizontalArrangement = Arrangement.spacedBy(gap),
         ) {
             state.bars.forEach { bar ->
                 val picked = state.selected == null || bar == state.selected
-                val spoken = "${barLabel(bar, unit)}, ${statsDuration(bar.ms)}"
+                val spoken = "${barLabel(bar, unit, locale)}, ${statsDuration(bar.ms)}"
                 // A day still to come draws nothing, so a month opens with its unread end visibly empty.
                 val share = if (bar.first > state.today) 0f else (bar.ms.toFloat() / longest).coerceAtLeast(0.02f)
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .selectable(selected = bar == state.selected, role = Role.Tab, onClick = { onSelect(bar) })
-                        .semantics { contentDescription = spoken },
+                        // The chart takes the touches; each bar keeps its own action for a screen reader.
+                        .semantics {
+                            contentDescription = spoken
+                            role = Role.Tab
+                            selected = bar == state.selected
+                            onClick {
+                                onSelect(bar)
+                                true
+                            }
+                        },
                     contentAlignment = Alignment.BottomCenter,
                 ) {
                     Box(
@@ -316,7 +352,7 @@ private fun SelectedBarLine(state: StatsReadingState) {
     ) {
         if (bar != null) {
             Text(
-                text = barLabel(bar, state.window.unit),
+                text = barLabel(bar, state.window.unit, LocalLocale.current.platformLocale),
                 style = MaterialTheme.typography.titleSmall,
                 modifier = Modifier.weight(1f),
             )
@@ -392,8 +428,8 @@ private fun LocalDate.utcMillis(): Long = atStartOfDayIn(TimeZone.UTC).toEpochMi
 
 private fun Long.utcDate(): LocalDate = Instant.fromEpochMilliseconds(this).toLocalDateTime(TimeZone.UTC).date
 
-private fun windowLabel(window: ReadingWindow): String = when (window.period) {
-    ReadingPeriod.MONTH -> monthYear(window.first)
+private fun windowLabel(window: ReadingWindow, locale: Locale): String = when (window.period) {
+    ReadingPeriod.MONTH -> monthYear(window.first, locale)
     ReadingPeriod.YEAR -> window.first.year.toString()
     ReadingPeriod.WEEK, ReadingPeriod.CUSTOM -> {
         val format = DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
@@ -402,9 +438,9 @@ private fun windowLabel(window: ReadingWindow): String = when (window.period) {
 }
 
 /** A bar's dates in full, for the line over the list and for a screen reader. */
-private fun barLabel(bar: ReadingBar, unit: BarUnit): String = when (unit) {
+private fun barLabel(bar: ReadingBar, unit: BarUnit, locale: Locale): String = when (unit) {
     BarUnit.DAY -> bar.first.toJavaLocalDate().format(DateTimeFormatter.ofLocalizedDate(FormatStyle.FULL))
-    BarUnit.MONTH -> monthYear(bar.first)
+    BarUnit.MONTH -> monthYear(bar.first, locale)
     BarUnit.YEAR -> bar.first.year.toString()
 }
 
@@ -425,5 +461,8 @@ private fun maxTicks(unit: BarUnit): Int = when (unit) {
     BarUnit.YEAR -> 6
 }
 
-private fun monthYear(day: LocalDate): String =
-    day.toJavaLocalDate().format(DateTimeFormatter.ofPattern("LLLL yyyy", Locale.getDefault()))
+// The locale's own order and spelling, since a fixed pattern puts the month first where the year leads.
+private fun monthYear(day: LocalDate, locale: Locale): String =
+    day.toJavaLocalDate().format(
+        DateTimeFormatter.ofPattern(DateFormat.getBestDateTimePattern(locale, "LLLLyyyy"), locale),
+    )

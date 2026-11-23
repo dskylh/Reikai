@@ -19,22 +19,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.input.KeyboardType
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.icerock.moko.resources.StringResource
 import eu.kanade.presentation.more.settings.Preference
-import eu.kanade.presentation.more.settings.screen.novel.NovelCodeSnippetsScreen
-import eu.kanade.presentation.more.settings.screen.novel.NovelFontsScreen
-import eu.kanade.presentation.more.settings.screen.novel.NovelRegexRulesScreen
+import eu.kanade.presentation.more.settings.screen.novel.NovelCodeSnippetsRoute
+import eu.kanade.presentation.more.settings.screen.novel.NovelFontsRoute
+import eu.kanade.presentation.more.settings.screen.novel.NovelRegexRulesRoute
 import eu.kanade.presentation.more.settings.screen.novel.SettingsReadAloudAudioScreen
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
+import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences.DualPageView
 import eu.kanade.tachiyomi.util.system.hasDisplayCutout
-import eu.kanade.tachiyomi.util.system.toast
-import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import mihon.app.di.appGraph
-import reikai.data.novel.tts.TtsServerException
-import reikai.data.novel.tts.TtsServerFailure
+import mihon.core.navigation.LocalNavigator
 import reikai.domain.novel.NovelPageLayout
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRenderingMode
@@ -63,6 +59,10 @@ import reikai.presentation.reader.readerFlashGroup
 import reikai.presentation.reader.readerFontLabel
 import reikai.presentation.reader.readerOrientationChoices
 import reikai.presentation.reader.rememberTtsOptions
+import reikai.presentation.reader.settings.dualPageRowsShown
+import reikai.presentation.reader.settings.dualPageViewRow
+import reikai.presentation.reader.settings.readerProgressPreferenceItems
+import reikai.presentation.reader.settings.spreadGapRow
 import reikai.presentation.reader.tenthsLabel
 import reikai.presentation.reader.volumeKeyScrollPreference
 import reikai.util.scaled
@@ -79,7 +79,8 @@ import tachiyomi.core.common.preference.Preference as PreferenceStoreEntry
  * Text size and the page colours stay in the reader's settings sheet, which previews them as you change
  * them.
  */
-object SettingsNovelReaderScreen : SearchableSettings {
+@Serializable
+data object SettingsNovelReaderScreen : SearchableSettings {
 
     @ReadOnlyComposable
     @Composable
@@ -93,15 +94,16 @@ object SettingsNovelReaderScreen : SearchableSettings {
 
         return listOfNotNull(
             getReadingGroup(novelPreferences = novelPref),
+            getDisplayGroup(novelPreferences = novelPref),
             getTapGroup(novelPreferences = novelPref, paged = true),
             getTapGroup(novelPreferences = novelPref, paged = false),
             getTextDisplayGroup(novelPreferences = novelPref),
             getChapterTextGroup(novelPreferences = novelPref),
+            getWebViewGroup(novelPreferences = novelPref),
             getNavigationGroup(novelPreferences = novelPref),
             // A flash clears a page turn's ghosting; a scroll has no turn to flash on.
             readerFlashGroup(ReaderFlash.novel(novelPref)).takeIf { pageLayout.isPaged },
             getReadAloudGroup(novelPreferences = novelPref),
-            getAccessibilityGroup(novelPreferences = novelPref),
         )
     }
 
@@ -118,7 +120,7 @@ object SettingsNovelReaderScreen : SearchableSettings {
         val keepInView by novelPreferences.readerTtsKeepInView().collectAsState()
         val highlightStyle by novelPreferences.readerTtsHighlightStyle().collectAsState()
         val audioSource by novelPreferences.readerTtsAudioSource().collectAsState()
-        val navigator = LocalNavigator.currentOrThrow
+        val navigator = LocalNavigator.current
         // Search composes every screen for each query, and binding an engine there only to name three rows
         // would start one per keystroke, so it indexes them without one.
         val indexing = LocalSettingsIndexing.current
@@ -142,15 +144,15 @@ object SettingsNovelReaderScreen : SearchableSettings {
                         novelPreferences.setReaderTtsEngine(it)
                         false
                     },
-                ).takeIf { indexing || options.engines.size > 1 },
+                ).takeIf { indexing || options.offersEngineChoice },
                 Preference.PreferenceItem.MultiSelectListPreference(
                     preference = novelPreferences.readerTtsLanguages(),
                     entries = languages,
                     title = stringResource(MR.strings.pref_tts_languages),
                     subtitleProvider = { values, _ ->
-                        options.languagesLabel(values).ifEmpty { stringResource(MR.strings.all) }
+                        options.languagesLabel(values, stringResource(MR.strings.all))
                     },
-                ).takeIf { indexing || languages.size > 1 },
+                ).takeIf { indexing || options.offersLanguageChoice },
                 Preference.PreferenceItem.ListPreference(
                     preference = voicePref,
                     entries = shownVoices,
@@ -208,12 +210,11 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     presets = TtsHighlightColors.highlight,
                     titleRes = MR.strings.pref_tts_highlight_color,
                 ).takeIf { highlight },
-                // Underline and outline leave the text's own colour alone.
                 colorRow(
                     preference = novelPreferences.readerTtsHighlightTextColor(),
                     presets = TtsHighlightColors.text,
-                    titleRes = MR.strings.pref_tts_highlight_text_color,
-                ).takeIf { highlight && highlightStyle == TtsHighlightStyle.BACKGROUND },
+                    titleRes = MR.strings.pref_novel_text_color,
+                ).takeIf { highlight && highlightStyle.recolorsText },
             ),
         )
     }
@@ -259,23 +260,23 @@ object SettingsNovelReaderScreen : SearchableSettings {
      */
     @Composable
     private fun getTextDisplayGroup(novelPreferences: NovelPreferences): Preference.PreferenceGroup {
-        val navigator = LocalNavigator.currentOrThrow
+        val navigator = LocalNavigator.current
         val context = LocalContext.current
         val fontFamily by novelPreferences.readerFontFamily().collectAsState()
         // Named from whichever list it came from, since the preference holds a key or a file name and
         // neither reads as the font it selects.
-        val defaultFontLabel = stringResource(MR.strings.pref_novel_font_default)
+        val defaultFontLabel = stringResource(MR.strings.label_default)
         val fontLabel = remember(fontFamily, defaultFontLabel) { readerFontLabel(fontFamily, defaultFontLabel) }
 
         return Preference.PreferenceGroup(
-            title = stringResource(MR.strings.pref_category_text_display),
+            title = stringResource(MR.strings.pref_category_text),
             preferenceItems = listOf(
                 // Its own screen rather than a list dialog: it also imports, downloads and removes
                 // fonts, and a second place to pick one would be a second answer to the same question.
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_novel_font),
                     subtitle = fontLabel,
-                    onClick = { navigator.push(NovelFontsScreen()) },
+                    onClick = { navigator.push(NovelFontsRoute) },
                 ),
                 Preference.PreferenceItem.SliderPreference(
                     preference = novelPreferences.readerLineSpacing().scaled(ReaderRanges.TENTHS),
@@ -306,6 +307,11 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     subtitle = stringResource(MR.strings.pref_paragraph_spacing_summary),
                     valueText = { tenthsLabel(it, "%.1fem") },
                 ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = novelPreferences.readerBionicReading(),
+                    title = stringResource(MR.strings.pref_bionic_reading),
+                    subtitle = stringResource(MR.strings.pref_bionic_reading_summary),
+                ),
             ),
         )
     }
@@ -324,12 +330,12 @@ object SettingsNovelReaderScreen : SearchableSettings {
 
     /**
      * How a chapter's markup is processed before it is rendered, in the order the pipeline applies
-     * them. The two embedded-markup rows only bind while a WebView renders the chapter; a text
+     * them. The embedded-styling rows only bind while a WebView renders the chapter; a text
      * renderer draws CSS and scripts as visible characters, so it strips them regardless.
      */
     @Composable
     private fun getChapterTextGroup(novelPreferences: NovelPreferences): Preference.PreferenceGroup {
-        val navigator = LocalNavigator.currentOrThrow
+        val navigator = LocalNavigator.current
         val renderingMode by novelPreferences.readerRenderingMode().collectAsState()
         val autoSplitEnabled by novelPreferences.readerAutoSplitText().collectAsState()
         val sourceCssPriority by novelPreferences.readerSourceCssPriority().collectAsState()
@@ -341,6 +347,10 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     preference = novelPreferences.readerHideChapterTitle(),
                     title = stringResource(MR.strings.pref_hide_chapter_title),
                     subtitle = stringResource(MR.strings.pref_hide_chapter_title_summary),
+                ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = novelPreferences.readerRemoveExtraSpacing(),
+                    title = stringResource(MR.strings.pref_remove_extra_spacing),
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = novelPreferences.readerForceLowercase(),
@@ -368,11 +378,6 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     subtitle = stringResource(MR.strings.pref_keep_embedded_css_summary),
                 ).takeIf { renderingMode.rendersMarkup },
                 Preference.PreferenceItem.SwitchPreference(
-                    preference = novelPreferences.readerKeepEmbeddedJs(),
-                    title = stringResource(MR.strings.pref_keep_embedded_js),
-                    subtitle = stringResource(MR.strings.pref_keep_embedded_js_summary),
-                ).takeIf { renderingMode.rendersMarkup },
-                Preference.PreferenceItem.SwitchPreference(
                     preference = novelPreferences.readerSourceCssPriority(),
                     title = stringResource(MR.strings.pref_source_css_priority),
                     subtitle = stringResource(MR.strings.pref_source_css_priority_summary),
@@ -394,28 +399,48 @@ object SettingsNovelReaderScreen : SearchableSettings {
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_novel_regex_rules),
                     subtitle = stringResource(MR.strings.pref_novel_regex_rules_summary),
-                    onClick = { navigator.push(NovelRegexRulesScreen()) },
+                    onClick = { navigator.push(NovelRegexRulesRoute) },
+                ),
+            ),
+        )
+    }
+
+    /**
+     * Settings only the WebView renderer reads, shown whatever the default renderer, as the manga reader
+     * always shows its Paged and Long strip groups: a novel kept on WebView reads them, and the sheet has
+     * no row for them.
+     */
+    @Composable
+    internal fun getWebViewGroup(novelPreferences: NovelPreferences): Preference.PreferenceGroup {
+        val navigator = LocalNavigator.current
+        return Preference.PreferenceGroup(
+            title = stringResource(MR.strings.pref_category_webview_mode),
+            preferenceItems = listOf(
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = novelPreferences.readerKeepEmbeddedJs(),
+                    title = stringResource(MR.strings.pref_keep_embedded_js),
+                    subtitle = stringResource(MR.strings.pref_keep_embedded_js_summary),
                 ),
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_novel_css_snippets),
                     subtitle = stringResource(MR.strings.pref_novel_css_snippets_summary),
-                    onClick = { navigator.push(NovelCodeSnippetsScreen(NovelSnippetKind.CSS)) },
-                ).takeIf { renderingMode.rendersMarkup },
+                    onClick = { navigator.push(NovelCodeSnippetsRoute(NovelSnippetKind.CSS)) },
+                ),
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_novel_js_snippets),
                     subtitle = stringResource(MR.strings.pref_novel_js_snippets_summary),
-                    onClick = { navigator.push(NovelCodeSnippetsScreen(NovelSnippetKind.JS)) },
-                ).takeIf { renderingMode.rendersMarkup },
+                    onClick = { navigator.push(NovelCodeSnippetsRoute(NovelSnippetKind.JS)) },
+                ),
             ),
         )
     }
 
     @Composable
-    private fun getReadingGroup(novelPreferences: NovelPreferences): Preference.PreferenceGroup {
+    internal fun getReadingGroup(novelPreferences: NovelPreferences): Preference.PreferenceGroup {
         val renderingMode by novelPreferences.readerRenderingMode().collectAsState()
         val pageLayout by novelPreferences.readerPageLayout().collectAsState()
+        val dualPageView by novelPreferences.readerDualPageView().collectAsState()
         val seamless by novelPreferences.readerSeamlessChapters().collectAsState()
-        val fullscreen by novelPreferences.readerFullscreen().collectAsState()
         val pagedTaps by novelPreferences.readerTapLayout(paged = true).collectAsState()
         val scrollTaps by novelPreferences.readerTapLayout(paged = false).collectAsState()
 
@@ -434,12 +459,17 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     entries = NovelPageLayout.entries.associateWith { stringResource(it.titleRes) },
                     title = stringResource(MR.strings.pref_category_reading_mode),
                 ),
+                // The reader sheet offers it only for paged reading too, the one layout it applies to.
+                dualPageViewRow(novelPreferences.readerDualPageView()).takeIf { pageLayout.isPaged },
+                spreadGapRow(novelPreferences.readerSpreadGap(), dualPageRowsShown(pageLayout.isPaged, dualPageView)),
                 // Only the native renderer gives up link taps for it, so only it carries the warning.
                 Preference.PreferenceItem.SwitchPreference(
                     preference = novelPreferences.readerTextSelectable(),
                     title = stringResource(MR.strings.pref_novel_text_selectable),
                     subtitle = stringResource(MR.strings.pref_novel_text_selectable_summary)
                         .takeIf { renderingMode == NovelRenderingMode.NATIVE },
+                    // A spread selects no text, and with no screen to ask only Always is known to show one.
+                    visible = !(pageLayout.isPaged && dualPageView == DualPageView.ALWAYS),
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = novelPreferences.readerSeamlessChapters(),
@@ -458,25 +488,10 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     title = stringResource(MR.strings.pref_novel_auto_load_next_at),
                     valueText = { "$it%" },
                 ).takeIf { seamless },
-                Preference.PreferenceItem.ListPreference(
-                    preference = novelPreferences.readerChapterTitleFormat(),
-                    entries = ChapterTitleFormat.entries.associateWith { stringResource(it.titleRes) },
-                    title = stringResource(MR.strings.pref_chapter_title_format),
-                ),
-                Preference.PreferenceItem.ListPreference(
-                    preference = novelPreferences.readerDefaultOrientation(),
-                    entries = readerOrientationChoices.associate { it.flagValue to stringResource(it.stringRes) },
-                    title = stringResource(MR.strings.pref_rotation_type),
-                    subtitle = "%s",
-                ),
                 Preference.PreferenceItem.SwitchPreference(
-                    preference = novelPreferences.readerFullscreen(),
-                    title = stringResource(MR.strings.pref_fullscreen),
-                ),
-                Preference.PreferenceItem.SwitchPreference(
-                    preference = novelPreferences.readerDrawUnderCutout(),
-                    title = stringResource(MR.strings.pref_cutout_short),
-                    visible = LocalView.current.hasDisplayCutout() && fullscreen,
+                    preference = novelPreferences.readerShowReadingMode(),
+                    title = stringResource(MR.strings.pref_show_reading_mode),
+                    subtitle = stringResource(MR.strings.pref_show_reading_mode_summary),
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = novelPreferences.readerShowTapZonesOnStart(),
@@ -530,7 +545,7 @@ object SettingsNovelReaderScreen : SearchableSettings {
     private fun getTapGroup(novelPreferences: NovelPreferences, paged: Boolean): Preference.PreferenceGroup {
         val tapLayout by novelPreferences.readerTapLayout(paged).collectAsState()
         return Preference.PreferenceGroup(
-            title = stringResource(if (paged) MR.strings.pager_viewer else MR.strings.novel_page_layout_scroll),
+            title = stringResource(if (paged) MR.strings.pager_viewer else MR.strings.pref_category_scrolling),
             preferenceItems = listOfNotNull(
                 Preference.PreferenceItem.ListPreference(
                     preference = novelPreferences.readerTapLayout(paged),
@@ -609,29 +624,47 @@ object SettingsNovelReaderScreen : SearchableSettings {
         )
     }
 
+    /** What surrounds the page, in the order and under the name the manga screen gives them. */
     @Composable
-    private fun getAccessibilityGroup(novelPreferences: NovelPreferences): Preference.PreferenceGroup =
-        Preference.PreferenceGroup(
-            title = stringResource(MR.strings.pref_category_accessibility),
+    private fun getDisplayGroup(novelPreferences: NovelPreferences): Preference.PreferenceGroup {
+        val fullscreen by novelPreferences.readerFullscreen().collectAsState()
+        return Preference.PreferenceGroup(
+            title = stringResource(MR.strings.pref_category_display),
             preferenceItems = listOf(
+                Preference.PreferenceItem.ListPreference(
+                    preference = novelPreferences.readerDefaultOrientation(),
+                    entries = readerOrientationChoices.associate { it.flagValue to stringResource(it.stringRes) },
+                    title = stringResource(MR.strings.pref_rotation_type),
+                    subtitle = "%s",
+                ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = novelPreferences.readerFullscreen(),
+                    title = stringResource(MR.strings.pref_fullscreen),
+                ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = novelPreferences.readerDrawUnderCutout(),
+                    title = stringResource(MR.strings.pref_cutout_short),
+                    visible = LocalView.current.hasDisplayCutout() && fullscreen,
+                ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = novelPreferences.readerKeepScreenOn(),
                     title = stringResource(MR.strings.pref_keep_screen_on),
                 ),
-                Preference.PreferenceItem.SwitchPreference(
-                    preference = novelPreferences.readerShowProgressPercentage(),
-                    title = stringResource(MR.strings.pref_show_reading_progress),
-                ),
-                Preference.PreferenceItem.SwitchPreference(
-                    preference = novelPreferences.readerBionicReading(),
-                    title = stringResource(MR.strings.pref_bionic_reading),
-                ),
-                Preference.PreferenceItem.SwitchPreference(
-                    preference = novelPreferences.readerRemoveExtraSpacing(),
-                    title = stringResource(MR.strings.pref_remove_extra_spacing),
+                *readerProgressPreferenceItems(
+                    progressLabel = MR.strings.pref_show_reading_progress,
+                    showProgress = novelPreferences.readerShowProgressPercentage(),
+                    showTimeLeft = novelPreferences.readerShowTimeLeft(),
+                    progressSize = novelPreferences.readerProgressSize(),
+                    progressBacked = novelPreferences.readerProgressBacked(),
+                ).toTypedArray(),
+                Preference.PreferenceItem.ListPreference(
+                    preference = novelPreferences.readerChapterTitleFormat(),
+                    entries = ChapterTitleFormat.entries.associateWith { stringResource(it.titleRes) },
+                    title = stringResource(MR.strings.pref_chapter_title_format),
                 ),
             ),
         )
+    }
 }
 
 /** Custom's key in a colour list. Fully transparent, so no colour the picker writes can equal it. */

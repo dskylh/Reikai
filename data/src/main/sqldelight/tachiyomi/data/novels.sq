@@ -58,6 +58,11 @@ SELECT *
 FROM novels
 WHERE _id = :novelId;
 
+findByIds:
+SELECT *
+FROM novels
+WHERE _id IN :ids;
+
 findFavorites:
 SELECT *
 FROM novels
@@ -224,6 +229,13 @@ UPDATE novels SET
     next_update = coalesce(:nextUpdate, next_update),
     calculate_interval = coalesce(:calculateInterval, calculate_interval)
 WHERE _id = :id;
+
+resetViewerFlags:
+UPDATE novels SET viewer_flags = 0 WHERE viewer_flags != 0;
+
+-- One viewer-flag field in one statement, so two quick writes to different fields cannot lose one.
+setViewerFlagBits:
+UPDATE novels SET viewer_flags = (viewer_flags & ~:mask) | (:flag & :mask) WHERE _id = :id;
 
 -- The partial update's genre column, written apart because it keeps its adapter only without coalesce.
 setGenre:

@@ -20,6 +20,7 @@ class TtsSleepTimerTest {
 
     @Test
     fun `a countdown does not fire before its end`() {
+        sleepTimer.onPublished(TtsPlayback.Playing)
         sleepTimer.setMinutes(15)
         now += 15 * 60_000L - 1
 
@@ -35,14 +36,15 @@ class TtsSleepTimerTest {
         sleepTimer.expire() shouldBe true
     }
 
+    /** A call's pause resumes when the call ends, unless the timer's pause, a user one, replaces it. */
     @Test
-    fun `a countdown that ends while paused does not pause`() {
+    fun `a countdown that ends while paused still asks for the pause`() {
         sleepTimer.onPublished(TtsPlayback.Playing)
         sleepTimer.setMinutes(15)
         sleepTimer.onPublished(TtsPlayback.Paused)
         now += 20 * 60_000L
 
-        sleepTimer.expire() shouldBe false
+        sleepTimer.expire() shouldBe true
     }
 
     /** The countdown's tick can run late after the device slept, so resuming must not find it still set. */

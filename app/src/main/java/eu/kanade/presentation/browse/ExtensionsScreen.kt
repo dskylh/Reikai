@@ -7,13 +7,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -22,8 +26,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import dev.icerock.moko.resources.StringResource
 import eu.kanade.presentation.browse.components.BaseBrowseItem
 import eu.kanade.presentation.browse.components.ExtensionIcon
@@ -32,7 +36,6 @@ import eu.kanade.presentation.browse.components.label
 import eu.kanade.tachiyomi.extension.model.Extension
 import eu.kanade.tachiyomi.extension.model.InstallStep
 import eu.kanade.tachiyomi.ui.browse.extension.ExtensionUiModel
-import eu.kanade.tachiyomi.util.system.LocaleHelper
 import eu.kanade.tachiyomi.util.system.copyToClipboard
 import mihon.domain.extension.model.ExtensionStore
 import mihon.icons.materialsymbols.MaterialSymbols
@@ -49,7 +52,7 @@ import reikai.presentation.browse.components.NovelIconInset
 import reikai.presentation.browse.components.SourceNameRow
 import reikai.presentation.browse.components.failedInstall
 import reikai.presentation.browse.components.retryInstall
-import reikai.presentation.browse.extension.versionLabel
+import reikai.presentation.browse.extension.extensionFacts
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.padding
@@ -243,17 +246,16 @@ private fun ExtensionItemMetadata(
         verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.extraSmall / 2),
         itemVerticalAlignment = Alignment.CenterVertically,
     ) {
-        val facts = listOfNotNull(
-            // RK: shown wherever the list asks, so an extension that did not load names it too
-            extension.lang
-                ?.takeIf { showsLanguage && it.isNotEmpty() }
-                ?.let { LocaleHelper.getSourceDisplayName(it, LocalContext.current) },
-            // RK: with the version a pending update brings
-            extension.versionName.takeIf { it.isNotEmpty() }?.let { versionLabel(it, updateVersion) },
-        )
-        if (facts.isNotEmpty()) {
-            ExtensionRowDetail(facts.joinToString(" • ")) // RK: shared with the novel plugin rows
-        }
+        // RK -->
+        // Shown wherever the list asks, so an extension that did not load names it too, with the version
+        // a pending update brings; written once with the novel plugin rows.
+        extensionFacts(
+            language = extension.lang?.takeIf { showsLanguage },
+            version = extension.versionName,
+            updateVersion = updateVersion,
+            context = LocalContext.current,
+        )?.let { ExtensionRowDetail(it) }
+        // RK <--
 
         val notable = listOfNotNull(
             when (installStep) {
@@ -473,36 +475,80 @@ fun ExtensionTrustDialog(
     )
 }
 
-// RK: moved here from the deleted ExtensionsTab.kt, beside the other extension dialog, so both stay
-//     upstream-tracked in one place. See the off-path manifest.
+// RK --> the body is UninstallPromptDialog below, which LN plugins also call, so both look alike
+
+/**
+ * Confirms uninstalling a privately installed extension, laid out like the system package installer's prompt.
+ */
 @Composable
-fun ExtensionUninstallConfirmation(
-    extensionName: String,
-    onClickConfirm: () -> Unit,
+fun PrivateExtensionUninstallDialog(
+    extension: Extension,
+    onConfirm: () -> Unit,
+    onDismissRequest: () -> Unit,
+) {
+    UninstallPromptDialog(
+        name = extension.name,
+        icon = {
+            ExtensionIcon(
+                extension = extension,
+                modifier = Modifier.size(40.dp),
+            )
+        },
+        onConfirm = onConfirm,
+        onDismissRequest = onDismissRequest,
+    )
+}
+
+@Composable
+fun UninstallPromptDialog(
+    name: String,
+    icon: @Composable () -> Unit,
+    onConfirm: () -> Unit,
     onDismissRequest: () -> Unit,
 ) {
     AlertDialog(
+        modifier = Modifier
+            .padding(horizontal = 32.dp)
+            .fillMaxWidth(),
+        properties = DialogProperties(usePlatformDefaultWidth = false),
         title = {
-            Text(text = stringResource(MR.strings.ext_confirm_remove))
+            Text(text = stringResource(MR.strings.ext_confirm_uninstall))
         },
         text = {
-            Text(text = stringResource(MR.strings.remove_private_extension_message, extensionName))
+            Row(
+                modifier = Modifier.padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                icon()
+                Text(
+                    text = name,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            }
         },
         confirmButton = {
-            TextButton(
+            Button(
                 onClick = {
-                    onClickConfirm()
+                    onConfirm()
                     onDismissRequest()
                 },
             ) {
-                Text(text = stringResource(MR.strings.ext_remove))
+                Text(text = stringResource(MR.strings.ext_uninstall))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismissRequest) {
+            OutlinedButton(
+                onClick = onDismissRequest,
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.primary,
+                ),
+            ) {
                 Text(text = stringResource(MR.strings.action_cancel))
             }
         },
         onDismissRequest = onDismissRequest,
     )
 }
+// RK <--

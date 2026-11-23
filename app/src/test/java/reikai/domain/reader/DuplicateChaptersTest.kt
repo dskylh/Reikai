@@ -2,6 +2,7 @@ package reikai.domain.reader
 
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
+import reikai.domain.chapter.CopyMark
 
 /**
  * The one skip-duplicate rule both readers now run. The novel reader used to step over duplicates while
@@ -16,15 +17,19 @@ class DuplicateChaptersTest {
         val origin: String?,
         val owner: Long = 1L,
         val eligible: Boolean = true,
+        val name: String = "Chapter $number",
+        val mark: CopyMark? = null,
     )
 
     private fun List<Ch>.dedup(current: Ch) = removeDuplicateChapters(
         current,
         rank = { if (it.eligible) 0 else 1 },
         numberOf = { it.number },
+        nameOf = { it.name },
         idOf = { it.id },
         originOf = { it.origin },
         ownerOf = { it.owner },
+        markOf = { it.mark },
     )
 
     private val a1 = Ch(id = 1, number = 1.0, origin = "alpha")
@@ -35,6 +40,26 @@ class DuplicateChaptersTest {
     @Test
     fun `each chapter number survives exactly once`() {
         listOf(a1, b1, a2, b2).dedup(a1).map { it.number } shouldBe listOf(1.0, 2.0)
+    }
+
+    /** Their titles share nothing, so only the two scanlators make them copies. */
+    @Test
+    fun `two scanlators' differently titled uploads of a number are one chapter`() {
+        val alpha = Ch(id = 6, number = 5.0, origin = "alpha", name = "Ch. 5 - The Fight")
+        val beta = Ch(id = 7, number = 5.0, origin = "beta", name = "Chapter 5: Battle")
+
+        listOf(alpha, beta).dedup(alpha).map { it.id } shouldBe listOf(6L)
+    }
+
+    @Test
+    fun `a copy marked Never skip is kept beside the copy the reader keeps`() {
+        listOf(a1, b1.copy(mark = CopyMark.NeverSkip), a2).dedup(a1).map { it.id } shouldBe listOf(1L, 2L, 3L)
+    }
+
+    @Test
+    fun `chapters marked as copies fold into one whatever their numbers`() {
+        val misnumbered = Ch(id = 5, number = 21.0, origin = "beta", mark = CopyMark.Group(1L))
+        listOf(a2.copy(mark = CopyMark.Group(1L)), misnumbered).dedup(a1).map { it.id } shouldBe listOf(3L)
     }
 
     @Test
@@ -59,6 +84,20 @@ class DuplicateChaptersTest {
     fun `a group with no entry from that origin falls back to its first`() {
         val orphan = Ch(id = 5, number = 3.0, origin = "gamma")
         listOf(b1, orphan).dedup(b1).map { it.id } shouldBe listOf(2L, 5L)
+    }
+
+    @Test
+    fun `the copy kept stays where it is listed`() {
+        // Kept at the first copy's place, an opened later copy took that slot (unseensnick/Reikai#85).
+        listOf(a1, a2, b1).dedup(b1).map { it.id } shouldBe listOf(3L, 2L)
+    }
+
+    @Test
+    fun `an interlude numbered like a chapter is its own chapter`() {
+        val chapterOne = Ch(id = 30, number = 1.0, origin = null)
+        val interludeOne = Ch(id = 31, number = 1.0, origin = null, name = "Interlude 1")
+
+        listOf(chapterOne, interludeOne).dedup(chapterOne).map { it.id } shouldBe listOf(30L, 31L)
     }
 
     @Test

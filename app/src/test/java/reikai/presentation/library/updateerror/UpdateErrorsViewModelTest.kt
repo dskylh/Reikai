@@ -12,16 +12,13 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkObject
 import io.mockk.unmockkStatic
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -29,10 +26,15 @@ import reikai.data.novel.update.NovelUpdateWorker
 import reikai.domain.entry.EntryCustomInfo
 import reikai.domain.entry.EntryId
 import reikai.domain.library.ContentType
+import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.library.updateerror.LibraryUpdateError
 import reikai.domain.novel.model.CustomNovelInfo
 import reikai.domain.novel.updateerror.NovelUpdateError
 import reikai.novel.source.NovelSourceManager
+import reikai.presentation.recents.EmittingPreferenceStore
+import reikai.util.resetVirtualDispatchers
+import reikai.util.restubDefaultDispatcher
+import reikai.util.virtualDispatchers
 import tachiyomi.domain.manga.model.CustomMangaInfo
 import kotlin.time.Duration.Companion.seconds
 
@@ -41,10 +43,11 @@ class UpdateErrorsViewModelTest {
     private val workManager = mockk<WorkManager>()
     private val context = mockk<Context>()
     private var novelStarted = false
+    private val library = ReikaiLibraryPreferences(EmittingPreferenceStore())
 
     @BeforeEach
     fun setUp() {
-        Dispatchers.setMain(UnconfinedTestDispatcher())
+        virtualDispatchers(UnconfinedTestDispatcher())
         mockkStatic(WORK_MANAGER_EXTENSIONS)
         every { context.workManager } returns workManager
         mockkObject(LibraryUpdateWorker.Companion, NovelUpdateWorker.Companion)
@@ -58,7 +61,7 @@ class UpdateErrorsViewModelTest {
     fun tearDown() {
         unmockkObject(LibraryUpdateWorker.Companion, NovelUpdateWorker.Companion)
         unmockkStatic(WORK_MANAGER_EXTENSIONS)
-        Dispatchers.resetMain()
+        resetVirtualDispatchers()
     }
 
     @Test
@@ -94,6 +97,28 @@ class UpdateErrorsViewModelTest {
         viewModel.retry(context)
 
         novelStarted shouldBe false
+    }
+
+    @Test
+    fun `opening on a hidden type lands on the shown one`() = runTest {
+        val viewModel = viewModel(ContentType.NOVELS, shown = ContentType.MANGA)
+
+        val state = viewModel.state.first { it is UpdateErrorsScreenState.Success }
+
+        (state as UpdateErrorsScreenState.Success).contentType shouldBe ContentType.MANGA
+    }
+
+    /** The chip row hides itself then, so a chip left on Novels must not keep the list on novels. */
+    @Test
+    fun `hiding the chip's type while the screen is open follows the Show setting`() = runTest {
+        val viewModel = viewModel(ContentType.NOVELS)
+        viewModel.state.first { it is UpdateErrorsScreenState.Success }
+
+        library.shownContent.set(ContentType.MANGA)
+
+        withTimeoutOrNull(5.seconds) {
+            viewModel.state.first { (it as? UpdateErrorsScreenState.Success)?.contentType == ContentType.MANGA }
+        }.let { (it as? UpdateErrorsScreenState.Success)?.contentType } shouldBe ContentType.MANGA
     }
 
     @Test
@@ -161,9 +186,7 @@ class UpdateErrorsViewModelTest {
         }
         val viewModel = viewModel(ContentType.ALL, novels = listOf(novelError(1L, "404")), novelSources = novelSources)
 
-        withContext(Dispatchers.Default) {
-            withTimeout(5.seconds) { viewModel.titles() }
-        } shouldBe listOf("n1")
+        withTimeout(5.seconds) { viewModel.titles() } shouldBe listOf("n1")
     }
 
     private suspend fun UpdateErrorsViewModel.titles() =
@@ -184,16 +207,22 @@ class UpdateErrorsViewModelTest {
         novels: List<NovelUpdateError> = emptyList(),
         custom: Map<EntryId, EntryCustomInfo> = emptyMap(),
         novelSources: NovelSourceManager = mockk(relaxed = true),
-    ) = UpdateErrorsViewModel(
-        initialContentType = chip,
-        getLibraryUpdateErrors = mockk { every { subscribeAll() } returns flowOf(manga) },
-        deleteLibraryUpdateErrors = mockk(relaxed = true),
-        getNovelUpdateErrors = mockk { every { subscribeAll() } returns flowOf(novels) },
-        deleteNovelUpdateErrors = mockk(relaxed = true),
-        sourceManager = mockk(relaxed = true),
-        novelSourceManager = novelSources,
-        getEntryCustomInfo = mockk { every { subscribeAll() } returns flowOf(custom) },
-    )
+        shown: ContentType = ContentType.ALL,
+    ) = run {
+        // The tests stub with coEvery, which leaves Default answering a bare mock.
+        restubDefaultDispatcher()
+        UpdateErrorsViewModel(
+            initialContentType = chip,
+            getLibraryUpdateErrors = mockk { every { subscribeAll() } returns flowOf(manga) },
+            deleteLibraryUpdateErrors = mockk(relaxed = true),
+            getNovelUpdateErrors = mockk { every { subscribeAll() } returns flowOf(novels) },
+            deleteNovelUpdateErrors = mockk(relaxed = true),
+            sourceManager = mockk(relaxed = true),
+            novelSourceManager = novelSources,
+            getEntryCustomInfo = mockk { every { subscribeAll() } returns flowOf(custom) },
+            reikaiLibraryPreferences = library.also { it.shownContent.set(shown) },
+        )
+    }
 
     private fun mangaError(id: Long, message: String) = LibraryUpdateError(
         errorId = id,

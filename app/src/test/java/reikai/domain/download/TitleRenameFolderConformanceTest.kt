@@ -2,7 +2,6 @@ package reikai.domain.download
 
 import android.app.NotificationManager
 import android.content.Context
-import android.text.TextUtils
 import com.hippo.unifile.UniFile
 import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.data.download.DownloadManager
@@ -10,9 +9,9 @@ import eu.kanade.tachiyomi.data.download.DownloadProvider
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.every
+import io.mockk.just
 import io.mockk.mockk
-import io.mockk.mockkStatic
-import io.mockk.unmockkStatic
+import io.mockk.runs
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -27,7 +26,10 @@ import reikai.domain.source.ReikaiSourcePreferences
 import reikai.novel.download.FakeSharedPreferences
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.download.NovelDownloadProvider
+import reikai.util.realTimeSourceContacts
+import reikai.util.stubUniFileStatics
 import reikai.util.testAppScope
+import reikai.util.unstubUniFileStatics
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -44,17 +46,11 @@ class TitleRenameFolderConformanceTest {
     @TempDir
     lateinit var root: File
 
-    // UniFile's file-backed implementation asks android.text.TextUtils, which the JVM test jar stubs out.
     @BeforeEach
-    fun stubTextUtils() {
-        mockkStatic(TextUtils::class)
-        every { TextUtils.isEmpty(any()) } answers { firstArg<CharSequence?>().isNullOrEmpty() }
-    }
+    fun stubStatics() = stubUniFileStatics()
 
     @AfterEach
-    fun restoreTextUtils() {
-        unmockkStatic(TextUtils::class)
-    }
+    fun restoreStatics() = unstubUniFileStatics()
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("halves")
@@ -86,6 +82,19 @@ class TitleRenameFolderConformanceTest {
         disk.names() shouldBe listOf("OLD")
     }
 
+    /** Storage dodges a name taken since the lookup with "name (1)" and reports success; neither half keeps that. */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("halves")
+    fun `a title change onto a name taken meanwhile leaves the folder under its old name`(half: TitleRenameHalf) =
+        runTest {
+            val disk = CaseBlindSourceFolder("Old")
+            disk.takenMeanwhile += "New"
+
+            half.rename(disk.root, otherTitles = emptyList())
+
+            disk.names() shouldBe listOf("Old")
+        }
+
     companion object {
         @JvmStatic
         fun halves() = listOf(MangaTitleRenameHalf(), NovelTitleRenameHalf())
@@ -115,7 +124,10 @@ class MangaTitleRenameHalf : TitleRenameHalf {
             downloadPreferences = mockk(),
             getManga = mockk(),
             getChapter = mockk(),
-            downloader = mockk { every { queueState } returns MutableStateFlow(emptyList()) },
+            downloader = mockk {
+                every { queueState } returns MutableStateFlow(emptyList())
+                coEvery { awaitQueueRestored() } just runs
+            },
             pendingDeleter = mockk(),
             sourceTitles = mockk { coEvery { otherMangaTitles(1L, 1L) } returns otherTitles },
         )
@@ -138,12 +150,14 @@ class NovelTitleRenameHalf : TitleRenameHalf {
             },
             provider = NovelDownloadProvider(
                 scope = testAppScope(),
+                context = mockk(),
                 storageManager = mockk<StorageManager> {
                     every { getNovelDownloadsDirectory() } returns downloads
                     every { changes } returns MutableSharedFlow()
                 },
                 downloadProvider = DownloadProvider(mockk(), mockk(), libraryPreferences),
                 libraryPreferences = libraryPreferences,
+                novelPreferences = NovelPreferences(InMemoryPreferenceStore()),
             ),
             cache = mockk(relaxed = true),
             chapterRepo = mockk(),
@@ -158,8 +172,9 @@ class NovelTitleRenameHalf : TitleRenameHalf {
             adultChecker = mockk(),
             sourceTitles = mockk { coEvery { otherNovelTitles("src", 1L) } returns otherTitles },
             getEntryCustomInfo = mockk { coEvery { await(any()) } returns null },
+            sourceContacts = realTimeSourceContacts(),
         )
 
-        manager.renameNovel(novel, newTitle)
+        manager.renameNovel(novel, newTitle) { true }
     }
 }

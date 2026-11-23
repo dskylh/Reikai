@@ -7,22 +7,25 @@ import eu.kanade.tachiyomi.ui.updates.UpdatesViewModel
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.unmockkStatic
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.extension.RegisterExtension
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
 import reikai.domain.category.RecentsSurface
+import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.interactor.GetCustomNovelInfo
 import reikai.domain.novel.interactor.GetNovelHistory
@@ -32,6 +35,7 @@ import reikai.novel.download.NovelDownloadCache
 import reikai.presentation.MainDispatcherExtension
 import reikai.presentation.history.NovelHistoryViewModel
 import reikai.presentation.updates.NovelUpdatesViewModel
+import reikai.util.virtualDispatchers
 import tachiyomi.domain.history.interactor.GetHistory
 import tachiyomi.domain.history.interactor.RemoveHistory
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -61,6 +65,16 @@ class RecentsFeedSurfaceTest {
     @RegisterExtension
     val main = MainDispatcherExtension()
 
+    // The query runs on IO, which this puts on the test scheduler beside Main.
+    @BeforeEach
+    fun setUp() {
+        virtualDispatchers(UnconfinedTestDispatcher())
+    }
+
+    // Main stays set, so the extension can stop the models on it before it resets Main.
+    @AfterEach
+    fun tearDown() = unmockkStatic(Dispatchers::class)
+
     @ParameterizedTest(name = "{0} on {1}")
     @MethodSource("feeds")
     fun `a feed model reads the category selection of the surface that built it`(
@@ -70,10 +84,10 @@ class RecentsFeedSurfaceTest {
     ) = runTest {
         val asked = mutableListOf<List<Long>>()
         val state = feed.build(surface, preferences, main) { asked += it }
-        backgroundScope.launch { state.collect { } }
-
-        // The query runs on the IO dispatcher, which virtual time does not reach.
-        withContext(Dispatchers.Default) { withTimeout(5_000) { while (asked.isEmpty()) delay(10) } }
+        // On the test scope, not its background one, so advanceUntilIdle runs the query before returning.
+        val collector = launch { state.collect { } }
+        advanceUntilIdle()
+        collector.cancel()
 
         asked.first() shouldBe listOf(excluded)
     }
@@ -99,7 +113,7 @@ class RecentsFeedSurfaceTest {
                 every { getQueuedDownloadsByChapterId() } returns emptyMap()
             }
             val getUpdates = mockk<GetUpdates> {
-                every { subscribe(any(), any(), any(), any(), any(), any(), any()) } answers {
+                every { subscribe(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
                     asked(arg(6))
                     flowOf(emptyList())
                 }
@@ -118,16 +132,18 @@ class RecentsFeedSurfaceTest {
                     libraryPreferences = LibraryPreferences(store),
                     updatesPreferences = UpdatesPreferences(store),
                     reikaiSourcePreferences = preferences,
+                    reikaiLibraryPreferences = ReikaiLibraryPreferences(EmittingPreferenceStore()),
                 ),
             ).state
         }
 
         private val novelUpdates = FeedProbe("novel updates") { surface, preferences, main, asked ->
             val repository = mockk<NovelRepository> {
-                every { getFilteredNovelUpdatesAsFlow(any(), any(), any(), any(), any(), any(), any()) } answers {
-                    asked(arg(6))
-                    flowOf(emptyList())
-                }
+                every { getFilteredNovelUpdatesAsFlow(any(), any(), any(), any(), any(), any(), any(), any()) } answers
+                    {
+                        asked(arg(6))
+                        flowOf(emptyList())
+                    }
             }
             main.track(
                 NovelUpdatesViewModel(
@@ -141,6 +157,7 @@ class RecentsFeedSurfaceTest {
                         every { subscribeAll() } returns
                             flowOf(emptyList())
                     },
+                    reikaiLibraryPreferences = ReikaiLibraryPreferences(EmittingPreferenceStore()),
                 ),
             ).state
         }

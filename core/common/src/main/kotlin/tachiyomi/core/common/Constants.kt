@@ -20,14 +20,15 @@ object Constants {
 
     const val MANGA_EXTRA = "manga"
 
-    // RK: deep-link a per-novel update notification into its details (NovelScreen needs source + url)
+    // RK: open a novel's details by row id; the source and url are what an older build wrote, still read
+    const val NOVEL_EXTRA = "novel_id"
     const val NOVEL_SOURCE_EXTRA = "novel_source"
     const val NOVEL_URL_EXTRA = "novel_url"
 
     // RK: which content type an Update errors deep link opens on (a ContentType name)
     const val CONTENT_TYPE_EXTRA = "content_type"
 
-    const val MAIN_ACTIVITY = "eu.kanade.tachiyomi.ui.main.MainActivity"
+    const val MAIN_ACTIVITY = "reikai.util.MainActivityTarget" // RK: MainActivity's own name is a launcher entry
 
     // Shortcut actions
     const val SHORTCUT_LIBRARY = "eu.kanade.tachiyomi.SHOW_LIBRARY"

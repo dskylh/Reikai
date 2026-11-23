@@ -23,7 +23,10 @@ object MangaTapLayouts {
     )
 
     /** Mihon's Disabled, which is the novel reader's Disabled. */
-    private const val DISABLED = 5
+    const val DISABLED = 5
+
+    /** Mihon's Right and left, the same two columns the novel reader's Right and left draws. */
+    private const val RIGHT_AND_LEFT = 4
 
     /** Every layout's name, by stored index. */
     val names: List<StringResource> = ReaderPreferences.TapZones + added.map { it.titleRes }
@@ -31,21 +34,35 @@ object MangaTapLayouts {
     /** The added layout stored at [index], null for one of Mihon's. */
     fun added(index: Int): NovelTapLayout? = added.getOrNull(index - ReaderPreferences.TapZones.size)
 
-    /** An added layout's regions, null for Mihon's, which each viewer builds as upstream does. */
-    fun navigation(index: Int, bottomZoneHeightPercent: Int): ViewerNavigation? =
-        added(index)?.navigation(bottomZoneHeightPercent)
+    /** An added layout's regions, null for Mihon's, which `NavigationSettings.navigator` builds. */
+    fun navigation(
+        index: Int,
+        bottomZoneHeightPercent: Int,
+        invertMode: TappingInvertMode,
+        isReversed: Boolean,
+    ): ViewerNavigation? = added(index)?.navigation(bottomZoneHeightPercent, invertMode, isReversed)
 
     /**
      * The novel reader's layout the one at [index] answers the inversion rules with, null for Default and
-     * Mihon's four zoned layouts, which every inversion changes.
+     * Mihon's three other zoned layouts, which every inversion changes.
      */
-    fun layout(index: Int): NovelTapLayout? = if (index == DISABLED) NovelTapLayout.DISABLED else added(index)
+    fun layout(index: Int): NovelTapLayout? = when (index) {
+        DISABLED -> NovelTapLayout.DISABLED
+        RIGHT_AND_LEFT -> NovelTapLayout.RIGHT_AND_LEFT
+        else -> added(index)
+    }
 
     /** The inversions that change the layout at [index]. */
-    fun invertModes(index: Int): List<TappingInvertMode> = layout(index)?.invertModes ?: TappingInvertMode.entries
+    fun invertModes(index: Int): List<TappingInvertMode> = invertModes(layout(index))
+
+    /** The inversions that change [layout], every one for a layout the novel reader lacks (null). */
+    fun invertModes(layout: NovelTapLayout?): List<TappingInvertMode> = layout?.invertModes ?: TappingInvertMode.entries
 
     /** Whether the layout at [index] offers an inversion choice, by the novel reader's rule. */
-    fun offersInvert(index: Int): Boolean = layout(index)?.offersInvert ?: true
+    fun offersInvert(index: Int): Boolean = offersInvert(layout(index))
+
+    /** Whether [layout] offers an inversion choice, which one the novel reader lacks (null) always does. */
+    fun offersInvert(layout: NovelTapLayout?): Boolean = layout?.offersInvert ?: true
 }
 
 /**

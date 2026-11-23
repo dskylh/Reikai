@@ -17,7 +17,6 @@ import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.runBlocking
 import mihon.app.di.appGraph
 import org.json.JSONArray
 import org.json.JSONObject
@@ -32,6 +31,7 @@ import reikai.novel.content.NovelChapterAddress
 import reikai.presentation.reader.LORA_LOADED
 import reikai.presentation.reader.NovelChapterNavigationClient
 import reikai.presentation.reader.WebViewHostActivity
+import reikai.presentation.reader.onMain
 import reikai.presentation.reader.readerTestSettings
 import reikai.presentation.reader.text.ChapterScrollProgress
 import reikai.presentation.reader.text.NovelBionicSpans
@@ -151,9 +151,19 @@ class NovelWebDocumentTest {
             if (documentToken == DOCUMENT_TOKEN) endsSeen += chapterId
         }
 
-        /** Unrecorded, but missing it threw in the page's frame before the end and fit checks ran. */
         @JavascriptInterface
-        fun onTopLine(documentToken: String, chapterId: String, line: Int) = Unit
+        fun onTopLine(documentToken: String, chapterId: String, line: Int) {
+            if (documentToken == DOCUMENT_TOKEN) topLines[chapterId] = line
+        }
+
+        @JavascriptInterface
+        fun onPagedMoved(documentToken: String) = Unit
+
+        @JavascriptInterface
+        fun onPagedPicturesLanded(documentToken: String, chapterId: String) = Unit
+
+        @JavascriptInterface
+        fun onPictureOpened(documentToken: String, src: String, chapterId: String) = Unit
     }
 
     /** How many settled positions, and how many boundary retries, the page sent the host. */
@@ -181,17 +191,20 @@ class NovelWebDocumentTest {
         webFonts,
         scope,
         {},
-    ) { error("no chapter pictures here") }
+    ) { _, _ -> error("no chapter pictures here") }
 
     /** The last fit answer the page sent per chapter. */
-    private val fitsReports = mutableMapOf<String, Boolean>()
+    private val fitsReports = ConcurrentHashMap<String, Boolean>()
 
     /** What the page asked the host to do, for the gesture cases. */
-    private val steps = mutableListOf<Boolean>()
+    private val steps = CopyOnWriteArrayList<Boolean>()
     private var stepped = CountDownLatch(1)
 
+    /** The last top line the page sent per chapter, -1 for none. */
+    private val topLines = ConcurrentHashMap<String, Int>()
+
     /** Every chapter the page has named as the one being read, in order. */
-    private val visibleChapters = mutableListOf<String>()
+    private val visibleChapters = CopyOnWriteArrayList<String>()
 
     private val settings = readerTestSettings
 
@@ -205,6 +218,7 @@ class NovelWebDocumentTest {
         snippetCss: String = "",
     ): String = NovelWebDocument.build(
         context = instrumentation.targetContext,
+        uiPreferences = instrumentation.targetContext.appGraph.uiPreferences,
         chapterId = CHAPTER_ID,
         documentToken = DOCUMENT_TOKEN,
         chapterHtml = chapterHtml,
@@ -282,7 +296,7 @@ class NovelWebDocumentTest {
     @Test
     fun aBundledFontActuallyLoads() {
         val context = instrumentation.targetContext
-        val source = runBlocking { webFonts.url(context.appGraph.novelFontManager, "lora") }
+        val source = onMain { webFonts.url(context.appGraph.novelFontManager, "lora") }
         loadDocument(document(fontFamily = "lora", fontSource = source))
         assertEquals("the bundled face did not load", "true", awaitEval(LORA_LOADED, "true"))
     }
@@ -291,7 +305,7 @@ class NovelWebDocumentTest {
     @Test
     fun aFaceAnotherReaderHandedOutIsNotServed() {
         val context = instrumentation.targetContext
-        val url = runBlocking { NovelWebFonts().url(context.appGraph.novelFontManager, "lora") }!!
+        val url = onMain { NovelWebFonts().url(context.appGraph.novelFontManager, "lora") }!!
         assertNull("another reader's face was served", webFonts.response(context, url))
     }
 
@@ -299,7 +313,7 @@ class NovelWebDocumentTest {
     @Test
     fun theDocumentNamesItsFaceRatherThanCarryingIt() {
         val context = instrumentation.targetContext
-        val source = runBlocking { webFonts.url(context.appGraph.novelFontManager, "lora") }!!
+        val source = onMain { webFonts.url(context.appGraph.novelFontManager, "lora") }!!
         val html = document(fontFamily = "lora", fontSource = source)
         assertTrue("the face was inlined, ${html.length} characters", source in html && "base64" !in html)
     }
@@ -309,7 +323,7 @@ class NovelWebDocumentTest {
     fun aFontPickedWithThePageOpenLoadsItsFace() {
         val context = instrumentation.targetContext
         loadDocument()
-        val source = runBlocking { webFonts.url(context.appGraph.novelFontManager, "lora") }
+        val source = onMain { webFonts.url(context.appGraph.novelFontManager, "lora") }
         // What the viewport's settings push sends: the family as a variable, then its face.
         val variables = NovelWebDocument.variables(settings.copy(fontFamily = "lora"), 0)
         eval("document.documentElement.setAttribute('style', ${JSONObject.quote(variables)})")
@@ -330,6 +344,17 @@ class NovelWebDocumentTest {
         )
     }
 
+    /** The page cannot pan sideways, so a chapter's own pre line wider than it would be cut off unseen. */
+    @Test
+    fun aChaptersPreWrapsWithinThePage() {
+        loadDocument(document(chapterHtml = "<pre>${"status ".repeat(200)}</pre><p>lorem ipsum</p>"))
+        settleFrames()
+        val overflows = eval(
+            "String(document.querySelector('.rk-chapter pre').scrollWidth > document.documentElement.clientWidth)",
+        ).trim('"')
+        assertEquals("the pre runs off the side of the page", "false", overflows)
+    }
+
     /**
      * A chapter shorter than the screen has no scroll room, so it holds at 0 as the native renderer
      * does and says it fits, which is what lets the model read it when the reader steps on. It used
@@ -343,6 +368,72 @@ class NovelWebDocumentTest {
         settleFrames()
         assertEquals("a short chapter reported progress", 0.0, lastProgress, 0.0)
         assertEquals("the page never said the chapter fits", true, fitsReports[CHAPTER_ID.toString()])
+    }
+
+    /**
+     * A chapter's own markup can carry the reader's chapter marker. Past such an element, progress and the
+     * fits test have to keep naming the chapter it sits in, whether it opened the page or was added to it.
+     */
+    @Test
+    fun aChaptersOwnChapterMarkerIsNotTakenForAChapter() {
+        val nested = "<div class=\"rk-chapter\" data-rk-chapter-id=\"7\">${"<p>inside</p>".repeat(50)}</div>"
+        loadDocument(document(chapterHtml = "<p>lorem</p>".repeat(20) + nested + "<p>lorem</p>".repeat(200)))
+        eval(
+            "window.rkReader.appendChapter('99', '${"<p>x</p>".repeat(
+                20,
+            )}<div class=\"rk-chapter\">y</div>', null, $SEAM)",
+        )
+        eval("window.scrollTo({ top: 3000, behavior: 'instant' })")
+        settleFrames()
+        awaitProgress(CHAPTER_ID.toString())
+
+        val markers = eval("String(document.querySelectorAll('.rk-chapter').length)")
+        assertEquals(listOf("2", null), listOf(markers, progressByChapter["7"]))
+    }
+
+    /** A picture's object replacement in the text counts for neither read aloud nor the top line, as natively. */
+    @Test
+    fun readAloudFindsAParagraphHoldingAnObjectReplacement() {
+        loadDocument(document(chapterHtml = "<p>See \uFFFC figure here</p>" + "<p>lorem ipsum</p>".repeat(20)))
+        settleFrames()
+
+        assertEquals("0", eval("String(window.rkReader.readAloud.firstVisible().paragraph)"))
+    }
+
+    /**
+     * Nor can it pose as a seam (whose card the fit reads, so a bare one threw before the boundaries were
+     * rebuilt) or as the end or failure marker the host replaces, which would take the chapter's text with it.
+     */
+    @Test
+    fun aChaptersOwnSeamAndEndMarkersAreNotTakenForTheReaders() {
+        val own = "<p class=\"rk-seam\">seam</p><div id=\"rk-end\">end</div><div id=\"rk-failure-end\">fail</div>"
+        loadDocument(document(chapterHtml = own + "<p>lorem</p>".repeat(20)))
+        eval("window.rkReader.appendChapter('99', '$own', null, $SEAM)")
+        settleFrames()
+
+        val posing = eval(
+            "String(document.querySelectorAll('.rk-chapter .rk-seam, .rk-chapter [id^=\"rk-\"]').length)",
+        )
+        assertEquals("0", posing)
+    }
+
+    /**
+     * Nor as a failed picture's box, which read aloud, the top line and taps pass over, as a bionic span, whose
+     * words bionic would leave plain, or as a picture that has loaded, whose loading box would go before it does.
+     */
+    @Test
+    fun aChaptersOwnReaderClassesAreNotTakenForTheReaders() {
+        val own = "<p class=\"rk-failure\">words</p><p><span class=\"rk-bionic\">plain</span></p>" +
+            "<img class=\"rk-loaded\" alt=\"never loads\">"
+        loadDocument(document(chapterHtml = own + "<p>lorem</p>".repeat(20)))
+        eval("window.rkReader.appendChapter('99', ${JSONObject.quote(own)}, null, $SEAM)")
+        settleFrames()
+
+        val posing = eval(
+            "String(document.querySelectorAll('.rk-chapter p.rk-failure, .rk-chapter span.rk-bionic, ' +" +
+                "'.rk-chapter img.rk-loaded').length)",
+        )
+        assertEquals("0", posing)
     }
 
     /**
@@ -625,6 +716,24 @@ class NovelWebDocumentTest {
         )
     }
 
+    /** Inside a picture the browser asks for a source's candidate, so Retry marks those as well as the img. */
+    @Test
+    fun aRetryInsideAPictureMarksItsSources() {
+        val route = NovelWebImages.PAGE_ROUTE
+        loadDocument(
+            document(chapterHtml = "<picture><source srcset=\"${route}u=a 1x\"><img src=\"${route}u=b\"></picture>"),
+        )
+        awaitEval("String(!!document.querySelector('.rk-image-failure .rk-failure-retry'))", "true")
+        tap("document.querySelector('.rk-failure-retry')")
+        assertEquals(
+            "true",
+            awaitEval(
+                "String(document.querySelector('picture source').getAttribute('srcset').indexOf('&retry=') > 0)",
+                "true",
+            ),
+        )
+    }
+
     /** Retry turns into progress while the retry runs, where it used to only dim. */
     @Test
     fun tappingRetryShowsProgressInItsPlace() {
@@ -734,6 +843,35 @@ class NovelWebDocumentTest {
         )
     }
 
+    /** The native renderer reports every position, so a move under half a percent is reported here too. */
+    @Test
+    fun aSmallMoveIsReported() {
+        loadDocument()
+        eval("window.scrollTo({ top: 3000, behavior: 'instant' })")
+        settleFrames()
+        val before = lastProgress
+        eval("window.scrollBy({ top: -10, behavior: 'instant' })")
+        settleFrames()
+        assertTrue("a 10px move left the report at $before", lastProgress < before)
+    }
+
+    /**
+     * A rail seek lands in the chapter the host named. When the page last named another one, whose report
+     * may still be on its way to the host, it says so, so the host does not end on the chapter it left.
+     */
+    @Test
+    fun aSeekIntoAnotherChapterNamesIt() {
+        loadDocument()
+        eval("window.rkReader.appendChapter('99', '${"<p>next</p>".repeat(200)}', null, $SEAM)")
+        settleFrames()
+        eval("window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' })")
+        settleFrames()
+        visibleChapters.clear()
+        eval("window.rkReader.seekWithin('$CHAPTER_ID', 0.5)")
+        settleFrames()
+        assertEquals(listOf(CHAPTER_ID.toString()), visibleChapters.toList())
+    }
+
     /**
      * A chapter's percent has one meaning. It is saved while the next chapter sits below it, and
      * restored when the chapter is opened alone, so the two must be the same position. The native
@@ -795,6 +933,64 @@ class NovelWebDocumentTest {
         // mechanism: the chapter would measure the same before and after.
         assertTrue("the image drew ${picture}px tall, so nothing about the chapter's height moved", picture > 500)
         assertEquals("the restore landed $landed through the chapter", 0.5, landed, 0.02)
+    }
+
+    /**
+     * A picture at the top still names a line, where the text resumes below it, as the native renderer
+     * names the line of the chunk holding it. Reporting none landed a rotation by percent instead.
+     */
+    @Test
+    fun aPictureAtTheTopNamesTheLineBelowIt() {
+        // Open from the start: without a gate the test host serves nothing, the picture fails, and the top
+        // of the screen is its failure box rather than a picture.
+        imageGate = CountDownLatch(0)
+        val chapter = "<p>lead</p><img src=\"https://rk.test/$TALL_IMAGE\">" + "<p>lorem ipsum</p>".repeat(60)
+        loadDocument(document(chapterHtml = chapter))
+        awaitEval("String(document.querySelector('.rk-chapter img').complete)", "true")
+        eval("window.scrollTo({ top: document.querySelector('.rk-chapter img').offsetTop + 100, behavior: 'instant' })")
+        settleFrames()
+        val picture = eval("String(document.querySelector('.rk-chapter img').getBoundingClientRect().height)")
+        assertTrue("the picture drew ${picture}px tall, so none is at the top", picture.toDouble() > 500)
+        assertEquals(4, topLines[CHAPTER_ID.toString()])
+    }
+
+    /** A picture that failed leaves its box's words at the top, which the count skips: the line below is still named. */
+    @Test
+    fun aFailedPictureAtTheTopNamesTheLineBelowIt() {
+        // No gate: the test host serves nothing, so the picture fails into its box.
+        val chapter = "<p>lead</p><img src=\"https://rk.test/$TALL_IMAGE\">" + "<p>lorem ipsum</p>".repeat(60)
+        loadDocument(document(chapterHtml = chapter))
+        awaitEval("String(document.querySelector('.rk-chapter .rk-failure') !== null)", "true")
+        eval(
+            "window.scrollTo({ top: document.querySelector('.rk-chapter .rk-failure').offsetTop + 2, behavior: 'instant' })",
+        )
+        settleFrames()
+        assertEquals(4, topLines[CHAPTER_ID.toString()])
+    }
+
+    /** Text after a picture in its own paragraph is the line named, not the paragraph after it. */
+    @Test
+    fun aPictureAtTheTopNamesTheTextAfterItInItsParagraph() {
+        imageGate = CountDownLatch(0)
+        val chapter = "<p>lead</p><p><img src=\"https://rk.test/$TALL_IMAGE\">after</p>" +
+            "<p>lorem ipsum</p>".repeat(60)
+        loadDocument(document(chapterHtml = chapter))
+        awaitEval("String(document.querySelector('.rk-chapter img').complete)", "true")
+        eval("window.scrollTo({ top: document.querySelector('.rk-chapter img').offsetTop + 100, behavior: 'instant' })")
+        settleFrames()
+        assertEquals(4, topLines[CHAPTER_ID.toString()])
+    }
+
+    /** A closing picture names the line after all the chapter's text, as the native renderer's last chunk does. */
+    @Test
+    fun aClosingPictureAtTheTopNamesTheChapterEnd() {
+        imageGate = CountDownLatch(0)
+        val chapter = "<p>lorem ipsum</p>".repeat(60) + "<img src=\"https://rk.test/$TALL_IMAGE\">"
+        loadDocument(document(chapterHtml = chapter))
+        awaitEval("String(document.querySelector('.rk-chapter img').complete)", "true")
+        eval("window.scrollTo({ top: document.querySelector('.rk-chapter img').offsetTop + 100, behavior: 'instant' })")
+        settleFrames()
+        assertEquals(60 * "loremipsum".length, topLines[CHAPTER_ID.toString()])
     }
 
     /** The chapter the page opened on runs its scripts as it loads; one arriving by scrolling has to too. */
@@ -867,10 +1063,10 @@ class NovelWebDocumentTest {
     fun footnoteMarkersStaySmallerThanTheText() {
         loadDocument()
         eval(
-            "window.rkReader.appendChapter('99', '<p id=\"rk-body\">text<sup id=\"rk-note\">1</sup></p>', null, $SEAM)",
+            "window.rkReader.appendChapter('99', '<p id=\"note-body\">text<sup id=\"note-mark\">1</sup></p>', null, $SEAM)",
         )
-        val body = eval("parseFloat(getComputedStyle(document.getElementById('rk-body')).fontSize)").toDouble()
-        val note = eval("parseFloat(getComputedStyle(document.getElementById('rk-note')).fontSize)").toDouble()
+        val body = eval("parseFloat(getComputedStyle(document.getElementById('note-body')).fontSize)").toDouble()
+        val note = eval("parseFloat(getComputedStyle(document.getElementById('note-mark')).fontSize)").toDouble()
         assertTrue("a footnote marker renders at $note px beside $body px text", note < body)
     }
 
@@ -952,6 +1148,56 @@ class NovelWebDocumentTest {
         assertEquals(
             native,
             evalList("[...document.querySelectorAll('[data-rk-chapter-id=\"99\"] b')].map(b => b.textContent)"),
+        )
+    }
+
+    /**
+     * A long run of digits is no word, and the page passes over it at once, as the native renderer's
+     * NovelBionicSpansTest holds it to: a word pattern that finds the letter inside the run backtracks
+     * quadratically, about 15 s over this run.
+     */
+    @Test
+    fun bionicPassesOverALongRunOfDigitsAtOnce() {
+        loadDocument()
+        eval("window.rkReader.setSettings({ bionic: true })")
+        val took = eval(
+            "(function () { var t = performance.now(); window.rkReader.appendChapter('99', " +
+                "'<p>' + '1'.repeat(200000) + '</p>', null, $SEAM); return performance.now() - t; })()",
+        ).toDouble()
+        assertTrue("appending the chapter took ${took}ms", took < 2_000)
+    }
+
+    /**
+     * The native renderer reads its one Spannable, so a word split by markup is one word there. A paragraph
+     * break still ends one, as Html.fromHtml's newline does.
+     */
+    @Test
+    fun bionicReadsAWordSplitByMarkupAsOneWord() {
+        assertBionicMatchesNative(
+            html = "<p><i>un</i>believable</p><p>stop</p><p>start</p>",
+            nativeText = "unbelievable\n\nstop\n\nstart",
+        )
+    }
+
+    /** The native renderer lifts a picture out of its paragraph, so a word a picture splits is two words there. */
+    @Test
+    fun bionicEndsAWordAtAPicture() {
+        assertBionicMatchesNative(html = "<p>un<img src=\"x.png\">believable</p>", nativeText = "un\n\nbelievable")
+    }
+
+    /** The bold letters the page draws for [html] are the ones NovelBionicSpans gives [nativeText]. */
+    private fun assertBionicMatchesNative(html: String, nativeText: String) {
+        val native = SpannableString(nativeText).also(NovelBionicSpans::apply).let { spanned ->
+            spanned.getSpans(0, spanned.length, StyleSpan::class.java)
+                .sortedBy(spanned::getSpanStart)
+                .joinToString("") { nativeText.substring(spanned.getSpanStart(it), spanned.getSpanEnd(it)) }
+        }
+        loadDocument()
+        eval("window.rkReader.setSettings({ bionic: true })")
+        eval("window.rkReader.appendChapter('99', ${JSONObject.quote(html)}, null, $SEAM)")
+        assertEquals(
+            native,
+            eval("[...document.querySelectorAll('[data-rk-chapter-id=\"99\"] b')].map(b => b.textContent).join('')"),
         )
     }
 

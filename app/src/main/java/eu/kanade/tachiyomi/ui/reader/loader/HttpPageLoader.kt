@@ -1,7 +1,6 @@
 package eu.kanade.tachiyomi.ui.reader.loader
 
 import eu.kanade.domain.chapter.model.toSChapter
-import eu.kanade.tachiyomi.data.cache.ChapterCache
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
@@ -16,9 +15,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
+import mihon.data.cache.ChapterCache
 import reikai.presentation.reader.ReaderRanges
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.withIOContext
+import java.io.FileNotFoundException
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -44,19 +45,18 @@ internal class HttpPageLoader(
 
     override var isLocal: Boolean = false
 
+    private var servedFromCache = false // RK
+
     /**
      * Returns the page list for a chapter. It tries to return the page list from the local cache,
      * otherwise fallbacks to network.
      */
     override suspend fun getPages(): List<ReaderPage> {
-        val pages = try {
-            chapterCache.getPageListFromCache(chapter.chapter)
-        } catch (e: Throwable) {
-            if (e is CancellationException) {
-                throw e
-            }
-            source.getPageList(chapter.chapter.toSChapter())
-        }
+        // RK --> a list served from the cache is not written back, or each close restarts its hour
+        val cached = chapterCache.getPageList(chapter.chapter)
+        servedFromCache = cached != null
+        val pages = cached ?: source.getPageList(chapter.chapter.toSChapter())
+        // RK <--
         return pages.mapIndexed { index, page ->
             // Don't trust sources and use our own indexing
             ReaderPage(index, page.url, page.imageUrl).also {
@@ -103,7 +103,8 @@ internal class HttpPageLoader(
      * Retries a page. This method is only called from user interaction on the viewer.
      */
     override fun retryPage(page: ReaderPage) {
-        if (page.status is Page.State.Error) {
+        // RK: a Ready page failed decoding, and left Ready its refetch would look like nothing changed
+        if (page.status is Page.State.Error || page.status == Page.State.Ready) {
             page.status = Page.State.Queue
         }
 
@@ -118,13 +119,14 @@ internal class HttpPageLoader(
         downloadJobs.clear()
 
         // Cache current page list progress for online chapters to allow a faster reopen
-        chapter.pages?.let { pages ->
+        chapter.pages?.takeUnless { servedFromCache }?.let { pages ->
+            // RK: see getPages
             // RK: coroutine helper in place of upstream's raw dispatcher
             appScope.launchIO {
                 try {
                     // Convert to pages without reader information
                     val pagesToSave = pages.map { Page(it.index, it.url, it.imageUrl) }
-                    chapterCache.putPageListToCache(chapter.chapter, pagesToSave)
+                    chapterCache.putPageList(chapter.chapter, pagesToSave)
                 } catch (e: Throwable) {
                     if (e is CancellationException) {
                         throw e
@@ -240,13 +242,12 @@ internal class HttpPageLoader(
             }
             val imageUrl = page.imageUrl!!
 
-            if (force || !chapterCache.isImageInCache(imageUrl)) {
+            val file = chapterCache.getImageFile(imageUrl).takeUnless { force } ?: run {
                 val live = page.downloadStream
                 page.status = Page.State.DownloadImage
                 try {
-                    val imageResponse = source.getImage(page)
-                    chapterCache.putImageToCache(imageUrl, imageResponse, live)
-                    live?.finish()
+                    chapterCache.putImage(imageUrl, source.getImage(page), live)
+                        .also { live?.finish() }
                 } catch (e: Throwable) {
                     live?.finish(e)
                     throw e
@@ -254,7 +255,16 @@ internal class HttpPageLoader(
             }
 
             page.downloadStream = null
-            page.stream = { chapterCache.getImageFile(imageUrl).inputStream() }
+            page.stream = {
+                try {
+                    file.inputStream()
+                } catch (e: FileNotFoundException) {
+                    // Gone from the cache since, so it's fetched again and shown once it's back
+                    page.status = Page.State.Queue
+                    launchLoadOnce(page)
+                    throw e
+                }
+            }
             page.status = Page.State.Ready
         } catch (e: Throwable) {
             page.downloadStream = null

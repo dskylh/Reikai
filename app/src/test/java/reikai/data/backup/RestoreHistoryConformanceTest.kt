@@ -23,10 +23,17 @@ import reikai.data.novel.NovelChapterRepositoryImpl
 import reikai.data.novel.NovelHistoryRepositoryImpl
 import reikai.data.novel.NovelRepositoryImpl
 import reikai.data.readinglog.ReadingLogRepositoryImpl
+import reikai.data.readinglog.ReadingPaceRepositoryImpl
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
 import reikai.domain.db.PassThroughTransactions
 import reikai.domain.library.ContentType
+import reikai.domain.library.FakeLibraryManualOrderRepository
 import reikai.domain.merge.RestoreMergeGroups
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.readinglog.UrlReadingSession
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
@@ -190,6 +197,8 @@ class RestoreHistoryConformanceTest {
 
             override suspend fun restore(database: Database, copies: List<Copy>, sessions: List<BackupReadingSession>) {
                 NovelRestorer(
+                    tombstones = NoChapterTombstoneRepository,
+                    manualOrder = FakeLibraryManualOrderRepository(),
                     novelRepository = NovelRepositoryImpl(database),
                     novelChapterRepository = NovelChapterRepositoryImpl(database),
                     categoryRepository = mockk(relaxed = true),
@@ -198,7 +207,12 @@ class RestoreHistoryConformanceTest {
                     setCustomNovelInfo = mockk(relaxed = true),
                     novelHistoryRepository = NovelHistoryRepositoryImpl(database),
                     chapterNumberOverrides = NoChapterNumberOverrides,
+                    copyMarks = InMemoryChapterCopyMarks(),
+                    localVolumes = NoLocalVolumes,
+                    volumePicks = NoVolumePicks,
                     readingLog = ReadingLogRepositoryImpl(database),
+                    readingPace = ReadingPaceRepositoryImpl(database),
+                    localNovelLanguages = NoLocalNovelLanguages,
                 ).restore(
                     BackupNovel(
                         source = "src",

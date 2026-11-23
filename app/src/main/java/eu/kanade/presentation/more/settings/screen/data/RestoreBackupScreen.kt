@@ -21,8 +21,6 @@ import androidx.compose.ui.text.withStyle
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Assisted
 import dev.zacsweers.metro.AssistedFactory
@@ -33,7 +31,6 @@ import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.WarningBanner
-import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.data.backup.BackupFileValidator
 import eu.kanade.tachiyomi.data.backup.restore.BackupRestoreWorker
 import eu.kanade.tachiyomi.data.backup.restore.RestoreOptions
@@ -44,10 +41,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import mihon.core.navigation.LocalNavigator
 import reikai.data.backup.ApprovedRepos
 import reikai.data.backup.BackupRepo
 import reikai.data.backup.RestoreInstallPlan
+import reikai.data.backup.lnreader.LnReaderBackupConverter
 import reikai.presentation.backup.restoreInstallItems
+import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.LabeledCheckbox
@@ -57,155 +57,167 @@ import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.components.material.padding
 import tachiyomi.presentation.core.i18n.stringResource
 
-class RestoreBackupScreen(
-    private val uri: String,
-) : Screen() {
+@Composable
+fun RestoreBackupScreen(uri: String) {
+    val navigator = LocalNavigator.current
+    val viewModel =
+        assistedMetroViewModel<RestoreBackupViewModel, RestoreBackupViewModel.Factory> { create(uri = uri) }
+    val state by viewModel.state.collectAsState()
 
-    @Composable
-    override fun Content() {
-        val navigator = LocalNavigator.currentOrThrow
-        val viewModel =
-            assistedMetroViewModel<RestoreBackupViewModel, RestoreBackupViewModel.Factory> { create(uri = uri) }
-        val state by viewModel.state.collectAsState()
-
-        Scaffold(
-            topBar = {
-                AppBar(
-                    title = stringResource(MR.strings.pref_restore_backup),
-                    navigateUp = navigator::pop,
-                    scrollBehavior = it,
-                )
+    Scaffold(
+        topBar = {
+            AppBar(
+                title = stringResource(MR.strings.pref_restore_backup),
+                navigateUp = navigator::pop,
+                scrollBehavior = it,
+            )
+        },
+    ) { contentPadding ->
+        LazyColumnWithAction(
+            contentPadding = contentPadding,
+            actionLabel = stringResource(MR.strings.action_restore),
+            actionEnabled = state.canRestore && state.options.canRestore(),
+            onClickAction = {
+                viewModel.startRestore()
+                navigator.pop()
             },
-        ) { contentPadding ->
-            LazyColumnWithAction(
-                contentPadding = contentPadding,
-                actionLabel = stringResource(MR.strings.action_restore),
-                actionEnabled = state.canRestore && state.options.canRestore(),
-                onClickAction = {
-                    viewModel.startRestore()
-                    navigator.pop()
-                },
-            ) {
-                if (DeviceUtil.isMiui && DeviceUtil.isMiuiOptimizationDisabled()) {
-                    item {
-                        WarningBanner(MR.strings.restore_miui_warning)
-                    }
+        ) {
+            if (DeviceUtil.isMiui && DeviceUtil.isMiuiOptimizationDisabled()) {
+                item {
+                    WarningBanner(MR.strings.restore_miui_warning)
                 }
+            }
 
-                if (state.canRestore) {
-                    item {
-                        SectionCard {
-                            RestoreOptions.options.forEach { option ->
-                                LabeledCheckbox(
-                                    label = stringResource(option.label),
-                                    checked = option.getter(state.options),
-                                    onCheckedChange = {
-                                        viewModel.toggle(option.setter, it)
-                                    },
-                                )
-                            }
+            if (state.canRestore) {
+                item {
+                    SectionCard {
+                        RestoreOptions.options.forEach { option ->
+                            LabeledCheckbox(
+                                label = stringResource(option.label),
+                                checked = option.getter(state.options),
+                                onCheckedChange = {
+                                    viewModel.toggle(option.setter, it)
+                                },
+                            )
                         }
                     }
                 }
+            }
 
-                // RK --> what the restore installs, and the backup's repos this device lacks, each to trust
-                if (state.canRestore) {
-                    restoreInstallItems(state.installs, state.options.extensions, state.trusted, viewModel::trust)
-                }
-                // RK <--
+            // RK --> what the restore installs, and the backup's repos this device lacks, each to trust
+            if (state.canRestore) {
+                restoreInstallItems(
+                    state.installs,
+                    state.options.extensions,
+                    state.options.extensionStores,
+                    state.trusted,
+                    viewModel::trust,
+                )
+            }
+            // RK <--
 
-                if (state.error != null) {
-                    errorMessageItem(state.error)
-                }
+            if (state.error != null) {
+                errorMessageItem(state.error)
             }
         }
     }
+}
 
-    private fun LazyListScope.errorMessageItem(
-        error: Any?,
-    ) {
-        item {
-            SectionCard {
-                Column(
-                    modifier = Modifier.padding(horizontal = MaterialTheme.padding.medium),
-                    verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
-                ) {
-                    val msg = buildAnnotatedString {
-                        when (error) {
-                            is MissingRestoreComponents -> {
-                                appendLine(stringResource(MR.strings.backup_restore_content_full))
-                                // RK --> the backup's apps and plugins in no repo to install from, and its repos
-                                // that could not be read
-                                if (error.extensions.isNotEmpty()) {
-                                    appendLine()
-                                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                                        appendLine(stringResource(MR.strings.backup_restore_missing_extensions))
-                                    }
-                                    error.extensions.joinTo(
-                                        this,
-                                        separator = "\n- ",
-                                        prefix = "- ",
-                                    )
-                                }
-                                if (error.unreadRepos.isNotEmpty()) {
-                                    appendLine()
-                                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                                        appendLine(stringResource(MR.strings.restore_repos_unread))
-                                    }
-                                    error.unreadRepos.joinTo(
-                                        this,
-                                        separator = "\n- ",
-                                        prefix = "- ",
-                                    )
-                                }
-                                // RK <--
-                                if (error.sources.isNotEmpty()) {
-                                    appendLine()
-                                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                                        appendLine(stringResource(MR.strings.backup_restore_missing_sources))
-                                    }
-                                    error.sources.joinTo(
-                                        this,
-                                        separator = "\n- ",
-                                        prefix = "- ",
-                                    )
-                                }
-                                if (error.trackers.isNotEmpty()) {
-                                    appendLine()
-                                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                                        appendLine(stringResource(MR.strings.backup_restore_missing_trackers))
-                                    }
-                                    error.trackers.joinTo(
-                                        this,
-                                        separator = "\n- ",
-                                        prefix = "- ",
-                                    )
-                                }
-                            }
-
-                            is InvalidRestore -> {
-                                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                                    appendLine(stringResource(MR.strings.invalid_backup_file))
-                                }
-                                appendLine(error.uri.toString())
-
+private fun LazyListScope.errorMessageItem(
+    error: Any?,
+) {
+    item {
+        SectionCard {
+            Column(
+                modifier = Modifier.padding(horizontal = MaterialTheme.padding.medium),
+                verticalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
+            ) {
+                val msg = buildAnnotatedString {
+                    when (error) {
+                        is MissingRestoreComponents -> {
+                            appendLine(stringResource(MR.strings.backup_restore_content_full))
+                            // RK --> the backup's apps and plugins in no repo to install from, and its repos
+                            // that could not be read
+                            if (error.extensions.isNotEmpty()) {
                                 appendLine()
-
                                 withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
-                                    appendLine(stringResource(MR.strings.invalid_backup_file_error))
+                                    appendLine(stringResource(MR.strings.backup_restore_missing_extensions))
                                 }
-                                appendLine(error.message)
+                                error.extensions.joinTo(
+                                    this,
+                                    separator = "\n- ",
+                                    prefix = "- ",
+                                )
                             }
-
-                            else -> {
-                                appendLine(error.toString())
+                            if (error.unreadRepos.isNotEmpty()) {
+                                appendLine()
+                                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                                    appendLine(stringResource(MR.strings.restore_repos_unread))
+                                }
+                                error.unreadRepos.joinTo(
+                                    this,
+                                    separator = "\n- ",
+                                    prefix = "- ",
+                                )
+                            }
+                            if (error.skippedLocal.isNotEmpty()) {
+                                appendLine()
+                                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                                    appendLine(stringResource(MR.strings.restore_lnreader_local_skipped))
+                                }
+                                error.skippedLocal.joinTo(
+                                    this,
+                                    separator = "\n- ",
+                                    prefix = "- ",
+                                )
+                            }
+                            // RK <--
+                            if (error.sources.isNotEmpty()) {
+                                appendLine()
+                                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                                    appendLine(stringResource(MR.strings.backup_restore_missing_sources))
+                                }
+                                error.sources.joinTo(
+                                    this,
+                                    separator = "\n- ",
+                                    prefix = "- ",
+                                )
+                            }
+                            if (error.trackers.isNotEmpty()) {
+                                appendLine()
+                                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                                    appendLine(stringResource(MR.strings.backup_restore_missing_trackers))
+                                }
+                                error.trackers.joinTo(
+                                    this,
+                                    separator = "\n- ",
+                                    prefix = "- ",
+                                )
                             }
                         }
-                    }
 
-                    SelectionContainer {
-                        Text(text = msg)
+                        is InvalidRestore -> {
+                            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                                appendLine(stringResource(MR.strings.invalid_backup_file))
+                            }
+                            appendLine(error.uri.toString())
+
+                            appendLine()
+
+                            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                                appendLine(stringResource(MR.strings.invalid_backup_file_error))
+                            }
+                            appendLine(error.message)
+                        }
+
+                        else -> {
+                            appendLine(error.toString())
+                        }
                     }
+                }
+
+                SelectionContainer {
+                    Text(text = msg)
                 }
             }
         }
@@ -217,6 +229,7 @@ class RestoreBackupViewModel(
     @Assisted private val uri: String,
     private val backupFileValidator: BackupFileValidator,
     private val context: Context,
+    private val lnReaderConverter: LnReaderBackupConverter, // RK
 ) : ViewModel() {
 
     val state: StateFlow<RestoreBackupViewModel.State>
@@ -232,7 +245,16 @@ class RestoreBackupViewModel(
     init {
         // RK: validate now streams the file (suspend), so run it off the main thread.
         viewModelScope.launchIO {
-            validate(uri.toUri())
+            // RK --> an LNReader backup becomes a Reikai one first, and that file is what validates and restores
+            val converted = runCatchingCancellable { lnReaderConverter.convertIfLnReader(uri.toUri()) }.getOrElse {
+                setError(error = InvalidRestore(uri.toUri(), it.message.toString()), canRestore = false)
+                return@launchIO
+            }
+            converted?.let { c ->
+                state.update { it.copy(restoreUri = c.uri.toString(), skippedLocal = c.skippedLocal) }
+            }
+            validate((state.value.restoreUri ?: uri).toUri())
+            // RK <--
         }
     }
 
@@ -254,7 +276,7 @@ class RestoreBackupViewModel(
         val trusted = state.value.installs.repos.filter { it.url in state.value.trusted }
         BackupRestoreWorker.start(
             workManager = context.workManager,
-            uri = uri.toUri(),
+            uri = (state.value.restoreUri ?: uri).toUri(), // RK
             options = state.value.options,
             trusted = ApprovedRepos( // RK
                 apps = trusted.filterNot { it.isPluginRepo }.associate { it.url to it.signingKey.orEmpty() },
@@ -279,7 +301,8 @@ class RestoreBackupViewModel(
             results.missingSources.isNotEmpty() ||
             results.missingTrackers.isNotEmpty() ||
             results.installs.unavailable.isNotEmpty() || // RK
-            results.installs.unreadRepos.isNotEmpty() // RK
+            results.installs.unreadRepos.isNotEmpty() || // RK
+            state.value.skippedLocal.isNotEmpty() // RK
         ) {
             setError(
                 error = MissingRestoreComponents(
@@ -288,6 +311,7 @@ class RestoreBackupViewModel(
                     results.missingTrackers,
                     results.installs.unavailable, // RK
                     results.installs.unreadRepos, // RK
+                    state.value.skippedLocal, // RK
                 ),
                 canRestore = true,
             )
@@ -314,6 +338,9 @@ class RestoreBackupViewModel(
         // RK --> the restore's installs, and the backup repos the user trusted by address
         val installs: RestoreInstallPlan = RestoreInstallPlan(),
         val trusted: Set<String> = emptySet(),
+        // An LNReader backup's converted file, and the local novels it could not carry
+        val restoreUri: String? = null,
+        val skippedLocal: List<String> = emptyList(),
         // RK <--
     )
 }
@@ -325,6 +352,7 @@ private data class MissingRestoreComponents(
     // RK --> in no repo to install from, and the backup's repos that could not be read
     val extensions: List<String>,
     val unreadRepos: List<String>,
+    val skippedLocal: List<String>,
     // RK <--
 )
 

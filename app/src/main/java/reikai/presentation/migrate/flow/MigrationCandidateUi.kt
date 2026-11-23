@@ -1,16 +1,18 @@
 package reikai.presentation.migrate.flow
 
-import cafe.adriel.voyager.core.screen.Screen
-import cafe.adriel.voyager.navigator.Navigator
-import eu.kanade.tachiyomi.ui.manga.MangaScreen
+import mihon.core.navigation.Navigator
+import reikai.domain.entry.EntryId
+import reikai.presentation.details.DetailsOpener
+import reikai.presentation.details.detailsRoute
+import reikai.presentation.details.shows
+import reikai.presentation.details.storedDetailsRoute
 import reikai.presentation.migrate.PickMember
-import reikai.presentation.novel.details.NovelScreen
 
 /**
  * Where the flow opens an entry's details page.
  *
- * This is the one place the shared flow branches on what an entry actually is, because a details
- * screen is a per-type Voyager screen and there is no neutral one to push. Everything else about a
+ * This is the one place the shared flow branches on what an entry actually is, because the payload
+ * holds a per-type row whose id names the details page. Everything else about a
  * candidate travels through [MigrationFlowAdapter] as neutral data.
  */
 internal fun MigrationEntry.openDetails(navigator: Navigator) = navigator.pushDetails(payload)
@@ -23,18 +25,16 @@ internal fun PickMember.openDetails(navigator: Navigator) = navigator.pushDetail
 
 private fun Navigator.pushDetails(payload: MigrationPayload) {
     when (payload) {
-        is MigrationPayload.OfManga -> push(MangaScreen(payload.manga.id))
-        is MigrationPayload.OfNovel -> push(NovelScreen(payload.novel.source, payload.novel.url))
+        is MigrationPayload.OfManga -> push(EntryId.Manga(payload.manga.id).detailsRoute())
+        is MigrationPayload.OfNovel -> push(EntryId.Novel(payload.novel.id).detailsRoute())
     }
 }
 
 /** The details page of a candidate, for checking a match before committing to it. */
-internal fun MigrationCandidate.openDetails(navigator: Navigator) {
+internal fun MigrationCandidate.openDetails(opener: DetailsOpener) {
     when (val handle = handle) {
-        is MangaCandidateHandle -> navigator.push(MangaScreen(handle.manga.id, true))
-        is NovelCandidateHandle -> navigator.push(
-            NovelScreen(sourceKey, handle.item.path, handle.item.cover, fromSource = true),
-        )
+        is MangaCandidateHandle -> opener.open { EntryId.Manga(handle.manga.id).detailsRoute(fromSource = true) }
+        is NovelCandidateHandle -> opener.open { handle.item.storedDetailsRoute(sourceKey, it) }
     }
 }
 
@@ -51,17 +51,11 @@ internal fun MigrationCandidate.openDetailsAfterCommit(
     replaced: Boolean,
     migrated: MigrationEntry,
 ) {
-    val (details: Screen, previousIsMigrated: Boolean) = when (val handle = handle) {
-        is MangaCandidateHandle -> MangaScreen(handle.manga.id) to
-            ((navigator.lastItem as? MangaScreen)?.mangaId == migrated.id.rawId)
-        is NovelCandidateHandle -> {
-            val last = navigator.lastItem as? NovelScreen
-            NovelScreen(sourceKey, handle.item.path, handle.item.cover) to (
-                handle.stored != null &&
-                    last != null &&
-                    migrated.isOwnListing(last.sourceId, last.novelUrl)
-                )
-        }
+    val target = when (val handle = handle) {
+        is MangaCandidateHandle -> EntryId.Manga(handle.manga.id)
+        // A commit resolves its target to a stored row before it migrates, so one is always there.
+        is NovelCandidateHandle -> EntryId.Novel(handle.stored?.id ?: return)
     }
-    if (replaced && previousIsMigrated) navigator.replace(details) else navigator.push(details)
+    val details = target.detailsRoute()
+    if (replaced && navigator.current.shows(migrated.id)) navigator.replace(details) else navigator.push(details)
 }

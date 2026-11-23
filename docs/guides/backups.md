@@ -54,8 +54,8 @@ One backup covers both libraries: everything below applies to manga and light no
 The sources behind each [merged series](/docs/multi-source) are saved as source-and-address references, so they rebuild correctly even onto a fresh install. They ride along with **Library entries** and have no checkbox of their own.
 
 #### Settings data
-- **App settings**
-- **Extension stores** - Your extension repos, plus the list of installed [extension apps](/docs/faq/browse/extensions#extension-apps-and-plugins), manga and novel
+- **App settings** - Including the reader fonts you imported or downloaded, so the font you picked is there after a restore
+- **Extension stores** - Your extension and plugin repos, plus the list of installed [extension apps](/docs/faq/browse/extensions#extension-apps-and-plugins), manga and novel, and your light-novel plugins
 - **Source settings**
 - **Feed and saved searches** - The searches you saved on a source, and the Browse feed built on them
 - **Include sensitive settings** - Saved sign-ins: tracker logins, the FlareSolverr sign-in, and source and plugin site sign-ins. A restore never applies the FlareSolverr settings. Not included by default, and can only be ticked while App settings or Source settings is ticked
@@ -73,6 +73,9 @@ To convert your backups to JSON or to view and edit the information outside of t
 
 ## Restoring a backup
 Restore a compatible backup file in <nav to="data-and-storage">.
+
+### Restoring an LNReader backup
+Pick an LNReader backup (`lnreader_backup_….zip`) with **Restore backup** too. Its library novels come across with their read chapters, bookmarks, reading progress, history and categories, and LNReader's plugins are offered for install from the plugin repos you added, like any backup's missing extensions. Local novels are listed instead, since their files stay in LNReader, and downloaded chapters, covers LNReader saved itself and LNReader's settings are left behind. A novel you already have keeps its own read chapters and progress, adding LNReader's where they are further along. A novel whose source has changed its web addresses since you added it, as some do when they move to a new domain, opens to errors here as it would in LNReader after a refresh; migrate it to the same source to pick up the new addresses.
 
 ::: tip
 To ensure a smooth restoration process, remember to:
@@ -166,3 +169,4 @@ Pick the columns, **Title**, **Author** and **Artist** (all ticked to start), ta
 
 **Reikai** uses Mihon's backup format, so a `.tachibk` backup from Mihon, Yōkai and several other forks restores here, and a backup made here carries your manga to them.
 What comes across each way, and the steps for moving to Reikai, are in [Before you upgrade](/docs/before-you-upgrade#from-yokai-yokai-y2k-or-another-fork).
+Restoring one of these backups [groups series that share a title](/docs/multi-source#restoring-a-backup-from-another-app).

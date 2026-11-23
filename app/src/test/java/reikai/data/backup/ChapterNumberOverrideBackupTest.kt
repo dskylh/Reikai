@@ -26,11 +26,19 @@ import reikai.data.novel.NovelChapterRepositoryImpl
 import reikai.data.novel.NovelHistoryRepositoryImpl
 import reikai.data.novel.NovelRepositoryImpl
 import reikai.domain.chapter.ChapterNumberOverride
+import reikai.domain.chapter.InMemoryChapterCopyMarks
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
 import reikai.domain.db.PassThroughTransactions
 import reikai.domain.library.ContentType
+import reikai.domain.library.FakeLibraryHiddenRepository
+import reikai.domain.library.FakeLibraryManualOrderRepository
 import reikai.domain.merge.RestoreMergeGroups
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.novel.model.Novel
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
 import tachiyomi.data.chapter.ChapterRepositoryImpl
@@ -136,6 +144,9 @@ class ChapterNumberOverrideBackupTest {
             override suspend fun backedUp(database: Database, overrides: ChapterNumberOverrideRepositoryImpl) =
                 BackupManga(source = 1L, url = "u").also { backup ->
                     MangaBackupCreator(
+                        libraryHides = FakeLibraryHiddenRepository(),
+                        tombstones = NoChapterTombstoneRepository,
+                        manualOrder = FakeLibraryManualOrderRepository(),
                         mangaRepository = mockk(),
                         chapterRepository = ChapterRepositoryImpl(database),
                         trackRepository = mockk(),
@@ -147,6 +158,9 @@ class ChapterNumberOverrideBackupTest {
                         getManga = mockk(),
                         mergeGroupRepository = mockk(),
                         chapterNumberOverrides = overrides,
+                        copyMarks = InMemoryChapterCopyMarks(),
+                        localVolumes = NoLocalVolumes,
+                        volumePicks = NoVolumePicks,
                         readingLog = NoReadingLog,
                     ).chapters(listOf(Manga.create().copy(id = 1) to backup))
                 }.chapters.single().let { it.chapterNumber.toDouble() to it.sourceChapterNumber }
@@ -179,6 +193,9 @@ class ChapterNumberOverrideBackupTest {
             override suspend fun backedUp(database: Database, overrides: ChapterNumberOverrideRepositoryImpl) =
                 BackupNovel(source = "src", url = "u").also { backup ->
                     NovelBackupCreator(
+                        libraryHides = FakeLibraryHiddenRepository(),
+                        tombstones = NoChapterTombstoneRepository,
+                        manualOrder = FakeLibraryManualOrderRepository(),
                         novelRepository = mockk(),
                         novelChapterRepository = NovelChapterRepositoryImpl(database),
                         categoryRepository = mockk(),
@@ -188,12 +205,19 @@ class ChapterNumberOverrideBackupTest {
                         novelHistoryRepository = mockk(),
                         novelSourceManager = mockk(),
                         chapterNumberOverrides = overrides,
+                        copyMarks = InMemoryChapterCopyMarks(),
+                        localVolumes = NoLocalVolumes,
+                        volumePicks = NoVolumePicks,
                         readingLog = NoReadingLog,
+                        readingPace = NoReadingPace,
+                        localNovelLanguages = NoLocalNovelLanguages,
                     ).chapters(listOf(Novel.create().copy(id = 1) to backup))
                 }.chapters.single().let { it.chapterNumber to it.sourceChapterNumber }
 
             override suspend fun restore(database: Database) {
                 NovelRestorer(
+                    tombstones = NoChapterTombstoneRepository,
+                    manualOrder = FakeLibraryManualOrderRepository(),
                     novelRepository = NovelRepositoryImpl(database),
                     novelChapterRepository = NovelChapterRepositoryImpl(database),
                     categoryRepository = mockk(relaxed = true),
@@ -202,7 +226,12 @@ class ChapterNumberOverrideBackupTest {
                     setCustomNovelInfo = mockk(relaxed = true),
                     novelHistoryRepository = NovelHistoryRepositoryImpl(database),
                     chapterNumberOverrides = ChapterNumberOverrideRepositoryImpl(database),
+                    copyMarks = InMemoryChapterCopyMarks(),
+                    localVolumes = NoLocalVolumes,
+                    volumePicks = NoVolumePicks,
                     readingLog = NoReadingLog,
+                    readingPace = NoReadingPace,
+                    localNovelLanguages = NoLocalNovelLanguages,
                 ).restore(
                     BackupNovel(
                         source = "src",

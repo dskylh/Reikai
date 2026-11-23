@@ -7,40 +7,41 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentHeight
-import androidx.compose.material3.Button
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastCoerceIn
 import ca.mpreg.webgpuviewer.viewer.ComposePageSize
 import ca.mpreg.webgpuviewer.viewer.ImagePage
 import eu.kanade.presentation.reader.ChapterTransition
-import eu.kanade.presentation.theme.TachiyomiTheme
+import eu.kanade.presentation.reader.ReaderError
 import eu.kanade.presentation.util.formattedMessage
 import eu.kanade.tachiyomi.ui.reader.model.ChapterTransition
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
+import eu.kanade.tachiyomi.ui.reader.viewer.ReaderThemedContent
+import eu.kanade.tachiyomi.ui.reader.viewer.transitionDownloadState
 import eu.kanade.tachiyomi.ui.webview.WebViewActivity
 import reikai.presentation.reader.NeighbourChapterRetry
-import tachiyomi.core.common.util.lang.withIOContext
-import tachiyomi.i18n.MR
+import reikai.presentation.reader.STRIP_CAPTURE_SCALE
+import reikai.presentation.reader.keepTallestHeight
+import reikai.presentation.reader.stripCaptureSize
 import tachiyomi.presentation.core.components.CombinedCircularProgressIndicator
-import tachiyomi.presentation.core.i18n.stringResource
 
 /** The side padding `PagerTransitionHolder` gave the same transition view. */
 private const val TRANSITION_SIDE_PADDING = 64
@@ -55,6 +56,16 @@ private const val STRIP_ERROR_HEIGHT_FRACTION = 0.8f
 /** The top margin `WebtoonPageHolder` gave its spinner, as a fraction of the viewport. */
 private const val STRIP_PROGRESS_TOP_FRACTION = 0.25f
 
+// RK: a page can be built before the viewer has laid out, and its size is fixed at construction
+private fun WebGpuViewer.stripCapture(heightFraction: Float = 1f): ComposePageSize {
+    val metrics = activity.resources.displayMetrics
+    return stripCaptureSize(
+        viewerState.width.takeIf { it > 0 } ?: metrics.widthPixels,
+        viewerState.height.takeIf { it > 0 } ?: metrics.heightPixels,
+        heightFraction,
+    )
+}
+
 /**
  * The reader's own chapter and page chrome, as composables, in the reader's theme.
  *
@@ -68,22 +79,21 @@ abstract class ReaderComposePage(
 
     /**
      * The theme goes on here because the library's page knows nothing of the app's colours.
-     *
-     * Under the reader's own night mode rather than the app's: the page sits on the reader
-     * background, so a light app over a black reader would otherwise draw dark text on black.
-     * [TachiyomiTheme] reads that from the configuration, which the pager and webtoon adapters
-     * used to get by inflating their views from a reader-themed context.
      */
     @Composable
     final override fun BoxScope.Content() {
-        val context = viewer.readerThemedContext
-        CompositionLocalProvider(
-            LocalContext provides context,
-            LocalConfiguration provides context.resources.configuration,
-        ) {
-            // RK: the cover seed colour, as the other viewers theme their transition and progress views
-            TachiyomiTheme(seedColor = viewer.coverSeedColor?.let(::Color)) { PageContent() }
+        // RK --> a strip's smaller capture draws at the smaller density, so text and ring keep their size
+        val density = LocalDensity.current
+        val drawn = if (size is ComposePageSize.Of) {
+            Density(density.density / STRIP_CAPTURE_SCALE, density.fontScale)
+        } else {
+            density
         }
+        // The cover seed colour, as the other viewers theme their transition and progress views
+        CompositionLocalProvider(LocalDensity provides drawn) {
+            ReaderThemedContent(viewer.readerThemedContext, viewer.coverSeedColor?.let(::Color)) { PageContent() }
+        }
+        // RK <--
     }
 
     @Composable
@@ -98,10 +108,12 @@ class ErrorPage internal constructor(
     viewer: WebGpuViewer,
     private val viewerPage: WebGpuViewer.ViewerReaderPage?,
     private val error: Throwable?,
+    internal val failedDecoding: Boolean = false, // RK: see holdsForRetry
 ) : ReaderComposePage(
     viewer,
     // WebtoonPageHolder gave its error layout less than a screen, so the page below shows through.
-    if (viewer is WebGpuViewerContinuous) ComposePageSize.Wrap else ComposePageSize.Auto,
+    // RK: at a smaller capture, see stripCaptureSize
+    if (viewer is WebGpuViewerContinuous) viewer.stripCapture(STRIP_ERROR_HEIGHT_FRACTION) else ComposePageSize.Auto,
 ) {
 
     @Composable
@@ -110,7 +122,7 @@ class ErrorPage internal constructor(
         // As the pager's own error layout: only offered for an image that came off the web.
         val imageUrl = viewerPage?.page?.imageUrl?.takeIf { it.startsWith("http", ignoreCase = true) }
         val strip = if (viewer is WebGpuViewerContinuous) {
-            Modifier.fillMaxHeight(STRIP_ERROR_HEIGHT_FRACTION).wrapContentHeight()
+            Modifier.fillMaxHeight().wrapContentHeight() // RK: the capture is already that height
         } else {
             Modifier
         }
@@ -121,7 +133,8 @@ class ErrorPage internal constructor(
             onRetry = { viewerPage?.let { viewer.retryLoad(it) } },
             onOpenInWebView = imageUrl?.let {
                 {
-                    val sourceId = viewer.activity.viewModel.manga?.source
+                    // RK: the chapter's own source, which a merged series' anchor is not
+                    val sourceId = viewerPage?.page?.chapter?.chapter?.id?.let(viewer.activity.viewModel::getSource)?.id
                     context.startActivity(WebViewActivity.newIntent(context, it, sourceId))
                 }
             },
@@ -129,38 +142,14 @@ class ErrorPage internal constructor(
     }
 }
 
-/** `reader_error.xml`, in Compose. */
-@Composable
-internal fun ReaderError( // RK: internal, the transition's NeighbourChapterRetry draws it too
-    message: String?,
-    onRetry: () -> Unit,
-    onOpenInWebView: (() -> Unit)?,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier.padding(8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Text(
-            text = message ?: stringResource(MR.strings.decode_image_error),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onBackground,
-            textAlign = TextAlign.Center,
-        )
-        Button(onClick = onRetry) {
-            Text(stringResource(MR.strings.action_retry))
-        }
-        if (onOpenInWebView != null) {
-            Button(onClick = onOpenInWebView) {
-                Text(stringResource(MR.strings.action_open_in_web_view))
-            }
-        }
-    }
-}
-
 /** A page still downloading: the reader's progress ring. */
-class ProgressPage(viewer: WebGpuViewer) : ReaderComposePage(viewer) {
+class ProgressPage(viewer: WebGpuViewer) : ReaderComposePage(
+    viewer,
+    if (viewer is WebGpuViewerContinuous) viewer.stripCapture() else ComposePageSize.Auto, // RK: see stripCaptureSize
+) {
+    init {
+        isPlaceholder = true
+    }
 
     /**
      * 0 to 1. On the page, not in the composition, which is dropped when the page goes out of
@@ -212,10 +201,8 @@ class TransitionPage(
     @Composable
     override fun PageContent() {
         val transition = transition ?: return
-        val goingToChapterDownloaded by produceState(false, transition) {
-            // RK: the chapter's own merged source, from the download cache, as PagerTransitionHolder
-            value = withIOContext { viewer.activity.viewModel.isChapterDownloaded(transition.to) }
-        }
+        // RK: the state the other viewers bind, so the badge is right on the first frame
+        val downloadState = remember(transition) { viewer.activity.viewModel.transitionDownloadState(transition) }
 
         CompositionLocalProvider(
             LocalTextStyle provides MaterialTheme.typography.bodySmall,
@@ -230,16 +217,17 @@ class TransitionPage(
             } else {
                 Modifier.padding(horizontal = TRANSITION_SIDE_PADDING.dp)
             }
-            Box(modifier = padding) {
+            Box(modifier = padding.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                 // RK --> a neighbour chapter that failed to load shows why, with its Retry
                 Column(
+                    modifier = Modifier.keepTallestHeight(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
                     ChapterTransition(
                         transition = transition,
-                        currChapterDownloaded = transition.from.pageLoader?.isLocal == true,
-                        goingToChapterDownloaded = goingToChapterDownloaded,
+                        currChapterDownloaded = downloadState.currChapterDownloaded,
+                        goingToChapterDownloaded = downloadState.goingToChapterDownloaded,
                     )
                     NeighbourChapterRetry(prevChapter, nextChapter, onRetry = viewer::retryChapter)
                 }

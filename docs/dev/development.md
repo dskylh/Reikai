@@ -18,7 +18,7 @@ The rebase has shipped: `main` is the Mihon-based main. The forward backlog live
 
 The working rules under `.claude/rules/` are the single source of truth; this doc points to them rather than duplicating:
 
-- [architecture.md](../../.claude/rules/architecture.md): Compose + Voyager, Metro DI, `PreferenceStore`, coroutines, domain models, modules, `// RK` patch markers.
+- [architecture.md](../../.claude/rules/architecture.md): Compose + Navigation 3, Metro DI, `PreferenceStore`, coroutines, domain models, modules, `// RK` patch markers.
 - [screen-conventions.md](../../.claude/rules/screen-conventions.md): Reikai screen conventions on Mihon.
 - [workflow.md](../../.claude/rules/workflow.md): CHANGELOG, commits/PRs, release-cut, upstream + feature porting.
 - [code-quality.md](../../.claude/rules/code-quality.md), [testing.md](../../.claude/rules/testing.md), [database.md](../../.claude/rules/database.md), [security.md](../../.claude/rules/security.md).
@@ -37,9 +37,10 @@ Multi-module Gradle project; convention plugins live in `gradle/build-logic` (`i
 
 | Module | Purpose |
 |---|---|
-| `app/` | Android application (Compose + Voyager UI, AndroidX ViewModels) |
+| `app/` | Android application (Compose + Navigation 3 UI, AndroidX ViewModels) |
 | `core/common` | Shared utilities (coroutine + preference helpers) |
 | `core/archive` | Archive handling |
+| `core/navigation` | Upstream's routes and `Navigator`, the overlay-sheet and two-pane settings scenes, and Reikai's `NovelWebTarget` |
 | `core/metro` | Metro DI helpers: graph lookup (`metroGraph`) and the `IsDebugBuild` and `AppCoroutineScope` qualifiers; ViewModel wiring comes from the `metrox-viewmodel` library |
 | `core-metadata` | Local-source metadata models (`ComicInfo.xml`, the legacy JSON details file) |
 | `data/` | SQLDelight database + repository implementations |
@@ -54,7 +55,7 @@ Multi-module Gradle project; convention plugins live in `gradle/build-logic` (`i
 
 ## Key technologies
 
-Compose + Voyager (no Conductor), Metro DI, SQLDelight, OkHttp, Coil 3, kotlinx.serialization, squareup logcat logging (+ optional Firebase Crashlytics), JUnit / MockK / Kotest.
+Compose + Navigation 3 (no Conductor), Metro DI, SQLDelight, OkHttp, Coil 3, kotlinx.serialization, squareup logcat logging (+ optional Firebase Crashlytics), JUnit / MockK / Kotest.
 
 ## Reference clones
 
@@ -64,7 +65,7 @@ Reikai's own pre-rebase features are read from the `design/library-compose` bran
 
 ## Porting
 
-Two inbound flows, each with its own doc (this section is a pointer, not the record):
+Three inbound flows; the first two have their own doc (this section is a pointer, not the record):
 
 - **Mihon upstream** (the base): ported by hand from `refs/mihon`, edits to Mihon's files fenced with `// RK`. Process, ledger and frontier: [upstream-sync.md](upstream-sync.md).
 - **Borrowed features** (Komikku / Tsundoku / IReader / LNReader): per-feature, no frontier. Record: [feature-ports.md](feature-ports.md).

@@ -4,6 +4,7 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.surfaceColorAtElevation
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -16,7 +17,11 @@ import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.components.AppBarTitle
 import eu.kanade.presentation.components.DownloadDropdownMenu
 import eu.kanade.presentation.manga.DownloadAction
+import mihon.icons.custommaterialsymbols.CustomMaterialSymbols
+import mihon.icons.custommaterialsymbols.rounded.BookSmall
 import mihon.icons.materialsymbols.MaterialSymbols
+import mihon.icons.materialsymbols.rounded.ArrowDownward
+import mihon.icons.materialsymbols.rounded.ArrowUpward
 import mihon.icons.materialsymbols.rounded.Download
 import mihon.icons.materialsymbols.rounded.FilterList
 import mihon.icons.materialsymbols.rounded.FlipToBack
@@ -59,13 +64,27 @@ fun EntryToolbar(
     onClickClearDownloads: (() -> Unit)? = null,
     // Open the download folder, gated the same way: there is nothing to open until something is there.
     onClickOpenFolder: (() -> Unit)? = null,
-    // Search and word count over the downloaded text, novel-only and gated the same way.
+    // Search and word count over the chapter text on the device (downloads, or a local series' files), novel-only.
     onClickSearchText: (() -> Unit)? = null,
     onClickWordCount: (() -> Unit)? = null,
+    onClickExport: (() -> Unit)? = null,
+    // Reorder and rename a local series' volumes, non-null only while its list is split by volume.
+    onClickReorderVolumes: (() -> Unit)? = null,
+    // Join another local series as its volumes, or take a volume out into a series of its own.
+    onClickAddVolumes: (() -> Unit)? = null,
+    onClickSplitOut: (() -> Unit)? = null,
+    // Names the files on disk after the series and its volumes.
+    onClickRenameFiles: (() -> Unit)? = null,
+    onClickDeleteVolumes: (() -> Unit)? = null,
+    // Scroll to top / next unread / bottom, as icons or, with [jumpsInMenu], last in the overflow.
+    jumps: ChapterJumps? = null,
+    jumpsInMenu: Boolean = false,
 
     // For action mode
     // Correct chapter number, non-null only while exactly one chapter is selected.
     onCorrectChapterNumber: (() -> Unit)? = null,
+    // Corrections to the duplicate rule, non-null only while the list shows duplicates.
+    copyMarkActions: CopyMarkActions? = null,
     actionModeCounter: Int,
     onCancelActionMode: () -> Unit,
     onSelectAll: () -> Unit,
@@ -98,15 +117,7 @@ fun EntryToolbar(
             .copy(alpha = if (isActionMode) 1f else backgroundAlphaProvider()),
         navigateUp = navigateUp,
         actions = {
-            // Declared inside the actions RowScope so the menu anchors under the download icon.
             var downloadExpanded by remember { mutableStateOf(false) }
-            if (onClickDownload != null) {
-                DownloadDropdownMenu(
-                    expanded = downloadExpanded,
-                    onDismissRequest = { downloadExpanded = false },
-                    onDownloadClicked = onClickDownload,
-                )
-            }
             val filterTint = if (hasFilters) MaterialTheme.colorScheme.active else LocalContentColor.current
             AppBarActions(
                 actions = buildList {
@@ -153,6 +164,30 @@ fun EntryToolbar(
                                 ),
                             )
                         }
+                        copyMarkActions?.neverSkip?.let {
+                            add(
+                                AppBar.OverflowAction(
+                                    title = stringResource(MR.strings.action_never_skip),
+                                    onClick = it,
+                                ),
+                            )
+                        }
+                        copyMarkActions?.markAsCopies?.let {
+                            add(
+                                AppBar.OverflowAction(
+                                    title = stringResource(MR.strings.action_mark_as_copies),
+                                    onClick = it,
+                                ),
+                            )
+                        }
+                        copyMarkActions?.clear?.let {
+                            add(
+                                AppBar.OverflowAction(
+                                    title = stringResource(MR.strings.action_clear_copy_mark),
+                                    onClick = it,
+                                ),
+                            )
+                        }
                         return@buildList
                     }
                     if (onClickDownload != null) {
@@ -161,6 +196,36 @@ fun EntryToolbar(
                                 title = stringResource(MR.strings.manga_download),
                                 icon = MaterialSymbols.Rounded.Download,
                                 onClick = { downloadExpanded = !downloadExpanded },
+                                menu = {
+                                    DownloadDropdownMenu(
+                                        expanded = downloadExpanded,
+                                        onDismissRequest = { downloadExpanded = false },
+                                        onDownloadClicked = onClickDownload,
+                                    )
+                                },
+                            ),
+                        )
+                    }
+                    if (jumps != null && !jumpsInMenu) {
+                        add(
+                            AppBar.Action(
+                                title = stringResource(MR.strings.action_scroll_to_top),
+                                icon = MaterialSymbols.Rounded.ArrowUpward,
+                                onClick = jumps.toTop,
+                            ),
+                        )
+                        add(
+                            AppBar.Action(
+                                title = stringResource(MR.strings.action_scroll_to_next_unread),
+                                icon = CustomMaterialSymbols.Rounded.BookSmall,
+                                onClick = jumps.toNextUnread,
+                            ),
+                        )
+                        add(
+                            AppBar.Action(
+                                title = stringResource(MR.strings.action_scroll_to_bottom),
+                                icon = MaterialSymbols.Rounded.ArrowDownward,
+                                onClick = jumps.toBottom,
                             ),
                         )
                     }
@@ -174,8 +239,8 @@ fun EntryToolbar(
                     )
                     // Overflow order (both types): Refresh, Edit categories, Edit info, Migrate, Manage
                     // sources, Notes, Share, Gallery info, Search downloaded chapters, Word count, Open
-                    // folder, Clear downloads, Source settings, Show/Hide hidden. Each is gated on its
-                    // callback.
+                    // folder, Clear downloads, Source settings, Show/Hide hidden, then the scroll actions
+                    // when they sit here. Each is gated on its callback.
                     add(
                         AppBar.OverflowAction(
                             title = stringResource(MR.strings.action_webview_refresh),
@@ -239,7 +304,7 @@ fun EntryToolbar(
                     if (onClickSearchText != null) {
                         add(
                             AppBar.OverflowAction(
-                                title = stringResource(MR.strings.action_search_downloaded_text),
+                                title = stringResource(MR.strings.action_search_chapter_text),
                                 onClick = onClickSearchText,
                             ),
                         )
@@ -249,6 +314,54 @@ fun EntryToolbar(
                             AppBar.OverflowAction(
                                 title = stringResource(MR.strings.action_word_count),
                                 onClick = onClickWordCount,
+                            ),
+                        )
+                    }
+                    if (onClickReorderVolumes != null) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_reorder_volumes),
+                                onClick = onClickReorderVolumes,
+                            ),
+                        )
+                    }
+                    if (onClickAddVolumes != null) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_add_volumes),
+                                onClick = onClickAddVolumes,
+                            ),
+                        )
+                    }
+                    if (onClickSplitOut != null) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_split_out_volume),
+                                onClick = onClickSplitOut,
+                            ),
+                        )
+                    }
+                    if (onClickDeleteVolumes != null) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_delete_volumes),
+                                onClick = onClickDeleteVolumes,
+                            ),
+                        )
+                    }
+                    if (onClickRenameFiles != null) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_rename_files),
+                                onClick = onClickRenameFiles,
+                            ),
+                        )
+                    }
+                    if (onClickExport != null) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_export_epub),
+                                onClick = onClickExport,
                             ),
                         )
                     }
@@ -296,6 +409,26 @@ fun EntryToolbar(
                             ),
                         )
                     }
+                    if (jumps != null && jumpsInMenu) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_scroll_to_top),
+                                onClick = jumps.toTop,
+                            ),
+                        )
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_scroll_to_next_unread),
+                                onClick = jumps.toNextUnread,
+                            ),
+                        )
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.action_scroll_to_bottom),
+                                onClick = jumps.toBottom,
+                            ),
+                        )
+                    }
                 },
             )
         },
@@ -303,3 +436,11 @@ fun EntryToolbar(
         onCancelActionMode = onCancelActionMode,
     )
 }
+
+/** The selection's corrections to the duplicate rule; each is null where it would change nothing. */
+@Immutable
+data class CopyMarkActions(
+    val neverSkip: (() -> Unit)?,
+    val markAsCopies: (() -> Unit)?,
+    val clear: (() -> Unit)?,
+)

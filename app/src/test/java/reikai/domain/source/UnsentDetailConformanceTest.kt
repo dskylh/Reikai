@@ -13,10 +13,15 @@ import mihon.domain.source.interactor.UpdateMangaFromRemote
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.MethodSource
 import reikai.data.novel.NovelChapterRepositoryImpl
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.NovelRepositoryImpl
 import reikai.data.novel.NovelStatusCode
 import reikai.data.novel.refreshNovelFromSource
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstones
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.local.LocalSeriesLocks
 import reikai.domain.novel.model.Novel
 import reikai.novel.host.ChapterItem
 import reikai.novel.host.SourceNovel
@@ -136,6 +141,7 @@ class MangaRefreshHalf : RefreshHalf {
             coverCache = mockk(relaxed = true),
             libraryPreferences = LibraryPreferences(InMemoryPreferenceStore()),
             downloadManager = mockk(relaxed = true),
+            seriesLocks = LocalSeriesLocks(NoLocalVolumes).apply { open() },
         )
 
         update(source, manga, fetchDetails = true).getOrThrow()
@@ -182,7 +188,7 @@ class NovelRefreshHalf : RefreshHalf {
             NovelChapterRepositoryImpl(database),
             novels,
             LibraryPreferences(InMemoryPreferenceStore()),
-            NoChapterNumberOverrides,
+            NovelChapterSyncRules(NoChapterNumberOverrides, InMemoryChapterCopyMarks(), NoChapterTombstones),
             coverCache = mockk(relaxed = true),
             novelDownloadManager = mockk(relaxed = true),
         )

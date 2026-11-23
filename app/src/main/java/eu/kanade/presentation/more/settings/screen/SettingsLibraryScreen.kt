@@ -8,19 +8,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.util.fastMap
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.Navigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.presentation.category.visualName
 import eu.kanade.presentation.more.settings.Preference
 import eu.kanade.tachiyomi.data.library.LibraryUpdateWorker
-import eu.kanade.tachiyomi.ui.category.CategoryScreen
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import mihon.app.di.appGraph
+import mihon.core.navigation.CategoryRoute
+import mihon.core.navigation.LocalNavigator
 import reikai.data.novel.update.NovelUpdateWorker
+import reikai.domain.library.ContentType
 import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.novel.NovelPreferences
-import reikai.presentation.library.preferredsources.PreferredSourcesScreen
+import reikai.domain.task.TaskBannerPreferences
+import reikai.presentation.library.preferredsources.PreferredSourcesRoute
 import reikai.presentation.library.sortedByCategoryPref
 import reikai.presentation.settings.categoryFilterPreference
 import reikai.presentation.settings.updateScheduleRows
@@ -36,7 +37,8 @@ import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.pluralStringResource
 import tachiyomi.presentation.core.i18n.stringResource
 
-object SettingsLibraryScreen : SearchableSettings {
+@Serializable
+data object SettingsLibraryScreen : SearchableSettings {
 
     @Composable
     @ReadOnlyComposable
@@ -50,6 +52,7 @@ object SettingsLibraryScreen : SearchableSettings {
         val novelPreferences = remember { context.appGraph.novelPreferences } // RK
         // RK: master merging switch, hosted in the Sources group below
         val reikaiLibraryPreferences = remember { context.appGraph.reikaiLibraryPreferences }
+        val taskBannerPreferences = remember { context.appGraph.taskBannerPreferences } // RK
         // RK: novel categories for the novel update-categories filter
         val getNovelCategories = remember { context.appGraph.getNovelCategories }
         // RK --> in the category sort order, as every other category picker lists them
@@ -63,7 +66,6 @@ object SettingsLibraryScreen : SearchableSettings {
         return listOf(
             // RK: pass novel prefs + categories so the Categories group also hosts the novel default category
             getCategoriesGroup(
-                LocalNavigator.currentOrThrow,
                 allCategories,
                 libraryPreferences,
                 novelPreferences,
@@ -72,9 +74,9 @@ object SettingsLibraryScreen : SearchableSettings {
             getGlobalUpdateGroup(allCategories, libraryPreferences, reikaiLibraryPreferences), // RK: update errors
             // RK: background light-novel chapter updates
             getNovelUpdateGroup(novelPreferences, novelCategories, reikaiLibraryPreferences),
-            getBehaviorGroup(libraryPreferences, novelPreferences),
+            getBehaviorGroup(libraryPreferences, novelPreferences, taskBannerPreferences), // RK
             // RK: merge-group preferred-source ranking
-            getSourcesGroup(LocalNavigator.currentOrThrow, reikaiLibraryPreferences),
+            getSourcesGroup(reikaiLibraryPreferences),
         )
     }
 
@@ -88,6 +90,7 @@ object SettingsLibraryScreen : SearchableSettings {
         return Preference.PreferenceGroup(
             // RK: same "Global update" concept as the manga group, content-typed for consistency.
             title = contentTypedCategory(MR.strings.pref_category_library_update, MR.strings.content_type_novels),
+            visible = showsContent(ContentType.NOVELS), // RK
             preferenceItems = updateScheduleRows(
                 novelPreferences.libraryUpdateInterval(),
                 novelPreferences.libraryUpdateDeviceRestrictions(),
@@ -128,9 +131,9 @@ object SettingsLibraryScreen : SearchableSettings {
     // RK -->
     @Composable
     private fun getSourcesGroup(
-        navigator: Navigator,
         reikaiLibraryPreferences: ReikaiLibraryPreferences,
     ): Preference.PreferenceGroup {
+        val navigator = LocalNavigator.current
         return Preference.PreferenceGroup(
             // RK: named for what it holds. Every row here is about merging a series across its
             // sources, including the preferred-sources ranking, which only the merge path reads.
@@ -150,6 +153,7 @@ object SettingsLibraryScreen : SearchableSettings {
                         MR.strings.pref_suggest_group_same_title,
                         MR.strings.content_type_manga,
                     ),
+                    visible = showsContent(ContentType.MANGA), // RK
                     subtitle = stringResource(MR.strings.pref_suggest_group_same_title_summary),
                 ),
                 Preference.PreferenceItem.SwitchPreference(
@@ -158,12 +162,13 @@ object SettingsLibraryScreen : SearchableSettings {
                         MR.strings.pref_suggest_group_same_title,
                         MR.strings.content_type_novels,
                     ),
+                    visible = showsContent(ContentType.NOVELS), // RK
                     subtitle = stringResource(MR.strings.pref_suggest_group_same_title_summary),
                 ),
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_preferred_sources),
                     subtitle = stringResource(MR.strings.pref_preferred_sources_summary),
-                    onClick = { navigator.push(PreferredSourcesScreen()) },
+                    onClick = { navigator.push(PreferredSourcesRoute) },
                 ),
             ),
         )
@@ -172,7 +177,6 @@ object SettingsLibraryScreen : SearchableSettings {
 
     @Composable
     private fun getCategoriesGroup(
-        navigator: Navigator,
         allCategories: List<Category>,
         libraryPreferences: LibraryPreferences,
         // RK: novel default-category pref + novel categories, so both defaults sit in one group
@@ -180,6 +184,7 @@ object SettingsLibraryScreen : SearchableSettings {
         novelCategories: List<Category>,
     ): Preference.PreferenceGroup {
         val context = LocalContext.current
+        val navigator = LocalNavigator.current
         val scope = rememberCoroutineScope()
         // RK: the edit-categories screen lists every category of both libraries, so this counts them all
         val everyCategory by remember { context.appGraph.categoryRepository.getUnfilteredAsFlow() }
@@ -208,19 +213,21 @@ object SettingsLibraryScreen : SearchableSettings {
                         count = userCategoriesCount,
                         userCategoriesCount,
                     ),
-                    onClick = { navigator.push(CategoryScreen()) },
+                    onClick = { navigator.push(CategoryRoute) },
                 ),
                 Preference.PreferenceItem.ListPreference(
                     preference = libraryPreferences.defaultCategory,
                     entries = ids.zip(labels).toMap(),
                     // RK: content-type label, since a novel default-category twin sits below.
                     title = contentTypedCategory(MR.strings.default_category, MR.strings.content_type_manga),
+                    visible = showsContent(ContentType.MANGA), // RK
                 ),
                 // RK --> novel default category, alongside the manga one
                 Preference.PreferenceItem.ListPreference(
                     preference = novelPreferences.defaultNovelCategory(),
                     entries = novelIds.zip(novelLabels).toMap(),
                     title = contentTypedCategory(MR.strings.default_category, MR.strings.content_type_novels),
+                    visible = showsContent(ContentType.NOVELS), // RK
                 ),
                 // RK <--
                 Preference.PreferenceItem.SwitchPreference(
@@ -249,6 +256,7 @@ object SettingsLibraryScreen : SearchableSettings {
         return Preference.PreferenceGroup(
             // RK: content-type header, pairs with the novel library-update group.
             title = contentTypedCategory(MR.strings.pref_category_library_update, MR.strings.content_type_manga),
+            visible = showsContent(ContentType.MANGA), // RK
             // RK --> interval, restrictions and categories rows shared with the novel and gallery checkers
             preferenceItems = updateScheduleRows(
                 libraryPreferences.autoUpdateInterval,
@@ -272,10 +280,7 @@ object SettingsLibraryScreen : SearchableSettings {
                     entries = smartUpdateEntries(), // RK: shared with the light-novel group
                     title = stringResource(MR.strings.pref_library_update_smart_update),
                 ),
-                Preference.PreferenceItem.SwitchPreference(
-                    preference = libraryPreferences.newShowUpdatesCount,
-                    title = stringResource(MR.strings.pref_library_update_show_tab_badge),
-                ),
+                // RK: the Updates badge switch moved to Behavior, since every library update feeds the badge
                 // RK --> records update failures for the Update errors screen, moved here from Advanced
                 Preference.PreferenceItem.SwitchPreference(
                     preference = reikaiLibraryPreferences.trackUpdateErrors,
@@ -293,10 +298,21 @@ object SettingsLibraryScreen : SearchableSettings {
         // RK: novels' own missing-chapter toggle sits here too, so the pair reads as one setting per
         // content type rather than a row that looks duplicated.
         novelPreferences: NovelPreferences,
+        taskBannerPreferences: TaskBannerPreferences, // RK
     ): Preference.PreferenceGroup {
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.pref_behavior),
             preferenceItems = listOf(
+                // RK: here rather than under an update group, so hiding a type cannot take it away
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = libraryPreferences.newShowUpdatesCount,
+                    title = stringResource(MR.strings.pref_library_update_show_tab_badge),
+                ),
+                // RK: one banner for the manga and novel updates, so here for the same reason
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = taskBannerPreferences.showUpdating,
+                    title = stringResource(MR.strings.pref_show_updating_banner),
+                ),
                 Preference.PreferenceItem.ListPreference(
                     preference = libraryPreferences.swipeToStartAction,
                     entries = mapOf(
@@ -342,6 +358,7 @@ object SettingsLibraryScreen : SearchableSettings {
                         MR.strings.pref_hide_missing_chapter_indicators,
                         MR.strings.content_type_manga,
                     ),
+                    visible = showsContent(ContentType.MANGA), // RK
                 ),
                 // RK -->
                 Preference.PreferenceItem.SwitchPreference(
@@ -350,6 +367,7 @@ object SettingsLibraryScreen : SearchableSettings {
                         MR.strings.pref_hide_missing_chapter_indicators,
                         MR.strings.content_type_novels,
                     ),
+                    visible = showsContent(ContentType.NOVELS), // RK
                 ),
                 // RK <--
             ),

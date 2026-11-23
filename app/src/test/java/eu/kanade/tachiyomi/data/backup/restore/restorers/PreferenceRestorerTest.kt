@@ -4,6 +4,9 @@ import android.content.Context
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.service.TrackPreferences
+import eu.kanade.tachiyomi.core.security.PrivacyPreferences
+import eu.kanade.tachiyomi.core.security.SecurityPreferences
+import eu.kanade.tachiyomi.core.security.SecurityPreferences.SecureScreenMode
 import eu.kanade.tachiyomi.data.backup.create.BackupCreateWorker
 import eu.kanade.tachiyomi.data.backup.models.BackupPreference
 import eu.kanade.tachiyomi.data.backup.models.BooleanPreferenceValue
@@ -12,6 +15,7 @@ import eu.kanade.tachiyomi.data.backup.models.PreferenceValue
 import eu.kanade.tachiyomi.data.backup.models.StringPreferenceValue
 import eu.kanade.tachiyomi.data.backup.models.StringSetPreferenceValue
 import eu.kanade.tachiyomi.data.library.LibraryUpdateWorker
+import eu.kanade.tachiyomi.extension.ExtensionManager
 import eu.kanade.tachiyomi.network.NetworkPreferences
 import eu.kanade.tachiyomi.network.interceptor.FLARESOLVERR_URL_KEY
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
@@ -22,8 +26,10 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
 import io.mockk.verify
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import mihon.domain.extension.model.ContentWarning
+import mihon.domain.migration.models.MigrationFlag
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
@@ -42,12 +48,16 @@ import reikai.domain.novel.DEAD_READER_PADDING_KEY
 import reikai.domain.novel.DEAD_READER_TAP_TO_SCROLL_KEY
 import reikai.domain.novel.DEAD_READER_TTS_BUTTON_KEYS
 import reikai.domain.novel.DEAD_READER_TTS_ENABLED_KEY
+import reikai.domain.novel.LnSourceIdentity
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelTapLayout
+import reikai.domain.novel.model.NovelMigrationFlag
 import reikai.domain.source.ReikaiSourcePreferences
 import reikai.novel.content.NovelCodeSnippet
 import reikai.novel.content.NovelSnippets
+import reikai.novel.source.NovelSourceManager
 import reikai.presentation.recents.EmittingPreferenceStore
+import reikai.util.testAppScope
 import tachiyomi.domain.category.interactor.GetCategories
 
 /**
@@ -62,9 +72,18 @@ class PreferenceRestorerTest {
     private val novelPreferences = NovelPreferences(store)
     private val sourcePreferences = SourcePreferences(store)
     private val networkPreferences = NetworkPreferences(store, isDebugBuild = false)
+    private val securityPreferences = SecurityPreferences(store)
+    private val privacyPreferences = PrivacyPreferences(store)
+    private val novelSources = NovelSourceManager(
+        scope = testAppScope(),
+        installer = { error("loaded the plugins") },
+        extensionManager = mockk<ExtensionManager> { every { loadedNovelExtensionsFlow } returns flowOf(emptyList()) },
+        prefs = novelPreferences,
+    )
     private val context = mockk<Context>()
 
     private val restorer = PreferenceRestorer(
+        lnPluginHost = { mockk(relaxed = true) },
         context = context,
         getCategories = mockk<GetCategories>(),
         preferenceStore = store,
@@ -76,6 +95,9 @@ class PreferenceRestorerTest {
             networkPreferences,
             TrackPreferences(store),
             mockk<BasePreferences> { every { extensionInstaller.key() } returns INSTALLER_KEY },
+            securityPreferences,
+            privacyPreferences,
+            novelSources,
         ),
     )
 
@@ -179,6 +201,14 @@ class PreferenceRestorerTest {
         store.getString(key, "").isSet() shouldBe false
     }
 
+    // It orders the queue on the device that wrote it, which a backup does not carry.
+    @Test
+    fun `the download queue's card order is not restored`() = runTest {
+        restoreString(ReikaiSourcePreferences.DOWNLOAD_QUEUE_ORDER_KEY, "MANGA-1,NOVEL-2")
+
+        store.getString(ReikaiSourcePreferences.DOWNLOAD_QUEUE_ORDER_KEY, "").isSet() shouldBe false
+    }
+
     @Test
     @DisplayName("a backup taken with novel auto-scroll on starts it when the reader opens")
     fun retiredAutoScrollReachesStartOnOpen() = runTest {
@@ -199,6 +229,61 @@ class PreferenceRestorerTest {
         )
 
         novelPreferences.readerTapLayout(paged = false).get() shouldBe NovelTapLayout.THIRDS
+    }
+
+    private suspend fun restoreMasks(marked: Boolean, manga: Int? = null, novels: Int? = null) = restorer.restoreApp(
+        listOfNotNull(
+            manga?.let { BackupPreference(sourcePreferences.migrationFlags.key(), IntPreferenceValue(it)) },
+            novels?.let { BackupPreference(novelPreferences.novelMigrationFlags().key(), IntPreferenceValue(it)) },
+            BackupPreference(AppPreferenceCarry.CUSTOM_INFO_OPTION_MARKER_KEY, BooleanPreferenceValue(true))
+                .takeIf { marked },
+        ),
+        backupCategories = null,
+    )
+
+    @Test
+    fun `a manga migration mask saved before the custom info option gains it`() = runTest {
+        restoreMasks(marked = false, manga = MigrationFlag.CHAPTER.flag)
+
+        sourcePreferences.migrationFlags.get() shouldBe setOf(MigrationFlag.CHAPTER, MigrationFlag.CUSTOM_INFO)
+    }
+
+    @Test
+    fun `a novel migration mask saved before the custom info option gains it`() = runTest {
+        restoreMasks(marked = false, novels = NovelMigrationFlag.CHAPTER.bit)
+
+        novelPreferences.novelMigrationFlags().get() shouldBe
+            (NovelMigrationFlag.CHAPTER.bit or NovelMigrationFlag.CUSTOM_INFO.bit)
+    }
+
+    @Test
+    fun `a manga migration mask from a backup that knows the option keeps it off`() = runTest {
+        restoreMasks(marked = true, manga = MigrationFlag.CHAPTER.flag)
+
+        sourcePreferences.migrationFlags.get() shouldBe setOf(MigrationFlag.CHAPTER)
+    }
+
+    @Test
+    fun `a novel migration mask from a backup that knows the option keeps it off`() = runTest {
+        restoreMasks(marked = true, novels = NovelMigrationFlag.CHAPTER.bit)
+
+        novelPreferences.novelMigrationFlags().get() shouldBe NovelMigrationFlag.CHAPTER.bit
+    }
+
+    @Test
+    fun `an old backup leaves a migration mask it does not carry as the device has it`() = runTest {
+        novelPreferences.novelMigrationFlags().set(NovelMigrationFlag.CHAPTER.bit)
+
+        restoreMasks(marked = false, manga = MigrationFlag.CHAPTER.flag)
+
+        novelPreferences.novelMigrationFlags().get() shouldBe NovelMigrationFlag.CHAPTER.bit
+    }
+
+    @Test
+    fun `the custom info option marker is not written into the store`() = runTest {
+        restoreMasks(marked = true)
+
+        store.getBoolean(AppPreferenceCarry.CUSTOM_INFO_OPTION_MARKER_KEY, false).isSet() shouldBe false
     }
 
     /** Disabled is also the default, so only the stored value shows the off choice was carried. */
@@ -321,6 +406,83 @@ class PreferenceRestorerTest {
         novelPreferences.readerBottomButtons().get() shouldBe customised
     }
 
+    /** A backup may be someone else's, so it can turn these toward the safer choice and never away from it. */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("saferSwitches")
+    @DisplayName("a restore never loosens a privacy or security switch")
+    fun restoreNeverLoosens(name: String, key: String, safe: Boolean) = runTest {
+        store.getBoolean(key, safe).set(safe)
+
+        restorer.restoreApp(listOf(BackupPreference(key, BooleanPreferenceValue(!safe))), backupCategories = null)
+
+        store.getBoolean(key, !safe).get() shouldBe safe
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("saferSwitches")
+    @DisplayName("a restore still tightens a privacy or security switch")
+    fun restoreStillTightens(name: String, key: String, safe: Boolean) = runTest {
+        store.getBoolean(key, !safe).set(!safe)
+
+        restorer.restoreApp(listOf(BackupPreference(key, BooleanPreferenceValue(safe))), backupCategories = null)
+
+        store.getBoolean(key, !safe).get() shouldBe safe
+    }
+
+    @Test
+    @DisplayName("a backup that never locks leaves a locking device as it was")
+    fun restoreKeepsTheLockDelay() = runTest {
+        securityPreferences.lockAppAfter.set(0)
+
+        restore(securityPreferences.lockAppAfter.key(), -1)
+
+        securityPreferences.lockAppAfter.get() shouldBe 0
+    }
+
+    @Test
+    @DisplayName("a backup that locks sooner shortens the lock delay")
+    fun restoreShortensTheLockDelay() = runTest {
+        securityPreferences.lockAppAfter.set(-1)
+
+        restore(securityPreferences.lockAppAfter.key(), 5)
+
+        securityPreferences.lockAppAfter.get() shouldBe 5
+    }
+
+    @Test
+    @DisplayName("a backup that never hides the screen leaves it hidden")
+    fun restoreKeepsTheSecureScreen() = runTest {
+        securityPreferences.secureScreen.set(SecureScreenMode.ALWAYS)
+
+        restoreString(securityPreferences.secureScreen.key(), SecureScreenMode.NEVER.name)
+
+        securityPreferences.secureScreen.get() shouldBe SecureScreenMode.ALWAYS
+    }
+
+    @Test
+    @DisplayName("a backup that hides the screen in incognito hides a never-hidden one")
+    fun restoreTightensTheSecureScreen() = runTest {
+        securityPreferences.secureScreen.set(SecureScreenMode.NEVER)
+
+        restoreString(securityPreferences.secureScreen.key(), SecureScreenMode.INCOGNITO.name)
+
+        securityPreferences.secureScreen.get() shouldBe SecureScreenMode.INCOGNITO
+    }
+
+    /** The record is how a novel whose plugin is gone keeps its name, so the device's own must survive. */
+    @Test
+    @DisplayName("a restore adds the backup's seen sources and keeps the device's")
+    fun restoreMergesSeenSources() = runTest {
+        novelPreferences.seenNovelSources().set(mapOf("a" to LnSourceIdentity(name = "Mine", site = "https://a")))
+
+        restoreString(novelPreferences.seenNovelSources().key(), """{"a":{"name":"Theirs"},"b":{"name":"B"}}""")
+
+        novelPreferences.seenNovelSources().get() shouldBe mapOf(
+            "a" to LnSourceIdentity(name = "Mine", site = "https://a"),
+            "b" to LnSourceIdentity(name = "B"),
+        )
+    }
+
     @Test
     @DisplayName("a live preference is still restored")
     fun aLivePreferenceIsRestored() = runTest {
@@ -352,12 +514,27 @@ class PreferenceRestorerTest {
             Arguments.of(DEAD_READER_TAP_TO_SCROLL_KEY, BooleanPreferenceValue(true)),
             Arguments.of(DEAD_READER_AUTO_SCROLL_KEY, BooleanPreferenceValue(true)),
             Arguments.of(ReikaiSourcePreferences.DEAD_SHOW_NSFW_SOURCE_KEY, BooleanPreferenceValue(false)),
-            Arguments.of(DEAD_READER_TTS_ENABLED_KEY, BooleanPreferenceValue(true)),
-            Arguments.of(ReikaiSourcePreferences.DEAD_DOWNLOAD_CONTENT_TYPE_KEY, StringPreferenceValue("NOVELS")),
-            Arguments.of(ReikaiLibraryPreferences.DEAD_LAST_USED_NOVEL_PAGE_KEY, IntPreferenceValue(3)),
-            Arguments.of(ReikaiLibraryPreferences.DEAD_LAST_USED_ALL_PAGE_KEY, IntPreferenceValue(3)),
-            Arguments.of(DEAD_PLUGINS_NEED_REVALIDATION_KEY, BooleanPreferenceValue(true)),
-        ) + DEAD_READER_TTS_BUTTON_KEYS.map { Arguments.of(it, IntPreferenceValue(120)) }
+        ) +
+            // Every key and prefix the carry skips, read from its own lists so a new entry is covered too.
+            AppPreferenceCarry.SKIPPED_KEYS.map { Arguments.of(it, IntPreferenceValue(3)) } +
+            AppPreferenceCarry.SKIPPED_PREFIXES.map { Arguments.of("${it}42", IntPreferenceValue(3)) }
+
+        @JvmStatic
+        fun saferSwitches(): List<Arguments> {
+            val store = EmittingPreferenceStore()
+            val network = NetworkPreferences(store, isDebugBuild = false)
+            val privacy = PrivacyPreferences(store)
+            val security = SecurityPreferences(store)
+            return listOf(
+                Arguments.of("header redaction", network.redactSensitiveHeaders.key(), true),
+                Arguments.of("verbose logging", network.verboseLogging.key(), false),
+                Arguments.of("crash reports", privacy.crashlytics.key(), false),
+                Arguments.of("analytics", privacy.analytics.key(), false),
+                Arguments.of("the app lock", security.useAuthenticator.key(), true),
+                Arguments.of("hidden notification content", security.hideNotificationContent.key(), true),
+                Arguments.of("hidden adult notifications", security.hideAdultNotificationContent.key(), true),
+            )
+        }
 
         @JvmStatic
         fun untrustedKeys(): List<Arguments> {

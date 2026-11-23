@@ -6,6 +6,8 @@ import android.content.Intent
 import android.provider.Settings
 import android.webkit.WebStorage
 import android.webkit.WebView
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -20,12 +22,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.core.net.toUri
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.presentation.more.settings.Preference
-import eu.kanade.presentation.more.settings.screen.advanced.ClearDatabaseScreen
-import eu.kanade.presentation.more.settings.screen.debug.DebugInfoScreen
 import eu.kanade.tachiyomi.data.library.MetadataUpdateWorker
 import eu.kanade.tachiyomi.network.NetworkPreferences
 import eu.kanade.tachiyomi.network.PREF_DOH_360
@@ -40,20 +38,29 @@ import eu.kanade.tachiyomi.network.PREF_DOH_NJALLA
 import eu.kanade.tachiyomi.network.PREF_DOH_QUAD101
 import eu.kanade.tachiyomi.network.PREF_DOH_QUAD9
 import eu.kanade.tachiyomi.network.PREF_DOH_SHECAN
-import eu.kanade.tachiyomi.ui.more.OnboardingScreen
 import eu.kanade.tachiyomi.util.system.isReleaseBuildType
 import eu.kanade.tachiyomi.util.system.isShizukuInstalled
 import eu.kanade.tachiyomi.util.system.powerManager
 import eu.kanade.tachiyomi.util.system.setDefaultSettings
 import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.system.workManager
-import exh.debug.SettingsDebugScreen
+import exh.debug.SettingsDebugRoute
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import logcat.LogPriority
 import mihon.app.di.appGraph
+import mihon.core.navigation.ClearDatabaseRoute
+import mihon.core.navigation.DebugInfoRoute
+import mihon.core.navigation.LocalNavigator
+import mihon.core.navigation.OnboardingRoute
 import okhttp3.Headers
+import reikai.data.chapter.writeCopyMarkReport
+import reikai.domain.library.ContentType
 import reikai.domain.novel.NovelPreferences
 import reikai.presentation.settings.bypassPreferenceItems
+import reikai.presentation.settings.forgetAllWebStorage
+import reikai.util.isDebugInspectorBuild
+import reikai.util.webContentsDebugging
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.withUIContext
@@ -64,7 +71,8 @@ import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
 import java.io.File
 
-object SettingsAdvancedScreen : SearchableSettings {
+@Serializable
+data object SettingsAdvancedScreen : SearchableSettings {
 
     @ReadOnlyComposable
     @Composable
@@ -74,14 +82,13 @@ object SettingsAdvancedScreen : SearchableSettings {
     override fun getPreferences(): List<Preference> {
         val scope = rememberCoroutineScope()
         val context = LocalContext.current
-        val navigator = LocalNavigator.currentOrThrow
+        val navigator = LocalNavigator.current
 
         val graph = remember { context.appGraph }
         val basePreferences = remember { graph.basePreferences }
         val networkPreferences = remember { graph.networkPreferences }
         val libraryPreferences = remember { graph.libraryPreferences }
-        // RK: listOfNotNull outlived the optional ExHentai login row it was for; no entry is null now
-        return listOfNotNull(
+        return listOf(
             // RK --> upstream's loose rows at the top grouped under what they have in common (see
             // docs/dev/subsystems/architecture.md). The update-error switches live in Settings -> Library,
             // the adult-sources gate in Browse and sources, and clearing merges in the Library group below.
@@ -117,12 +124,12 @@ object SettingsAdvancedScreen : SearchableSettings {
                     ),
                     Preference.PreferenceItem.TextPreference(
                         title = stringResource(MR.strings.pref_debug_info),
-                        onClick = { navigator.push(DebugInfoScreen()) },
+                        onClick = { navigator.push(DebugInfoRoute) },
                     ),
                     Preference.PreferenceItem.TextPreference(
                         title = stringResource(MR.strings.open_debug_menu),
                         subtitle = stringResource(MR.strings.open_debug_menu_summary),
-                        onClick = { navigator.push(SettingsDebugScreen()) },
+                        onClick = { navigator.push(SettingsDebugRoute) },
                     ),
                 ),
             ),
@@ -131,7 +138,7 @@ object SettingsAdvancedScreen : SearchableSettings {
                 preferenceItems = listOf(
                     Preference.PreferenceItem.TextPreference(
                         title = stringResource(MR.strings.pref_onboarding_guide),
-                        onClick = { navigator.push(OnboardingScreen()) },
+                        onClick = { navigator.push(OnboardingRoute) },
                     ),
                 ),
             ),
@@ -199,7 +206,7 @@ object SettingsAdvancedScreen : SearchableSettings {
     @Composable
     private fun getDataGroup(): Preference.PreferenceGroup {
         val context = LocalContext.current
-        val navigator = LocalNavigator.currentOrThrow
+        val navigator = LocalNavigator.current
 
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.label_data),
@@ -216,7 +223,7 @@ object SettingsAdvancedScreen : SearchableSettings {
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_clear_database),
                     subtitle = stringResource(MR.strings.pref_clear_database_summary),
-                    onClick = { navigator.push(ClearDatabaseScreen()) },
+                    onClick = { navigator.push(ClearDatabaseRoute) },
                 ),
             ),
         )
@@ -240,6 +247,8 @@ object SettingsAdvancedScreen : SearchableSettings {
                     title = stringResource(MR.strings.pref_clear_cookies),
                     onClick = {
                         networkHelper.cookieJar.removeAll()
+                        // RK: the copy of a site's sign-in LN plugins keep goes too, as LNReader's does
+                        context.appGraph.lnPluginHost.forgetAllWebStorage(context.appGraph.preferenceStore)
                         context.toast(MR.strings.cookies_cleared)
                     },
                 ),
@@ -255,6 +264,8 @@ object SettingsAdvancedScreen : SearchableSettings {
                                 clearSslPreferences()
                             }
                             WebStorage.getInstance().deleteAllData()
+                            // RK: and the copy of it LN plugins keep
+                            context.appGraph.lnPluginHost.forgetAllWebStorage(context.appGraph.preferenceStore)
                             scope.launchIO {
                                 context.applicationInfo?.dataDir?.let { File("$it/app_webview/").deleteRecursively() }
                                 withUIContext { context.toast(MR.strings.webview_data_deleted) }
@@ -332,6 +343,21 @@ object SettingsAdvancedScreen : SearchableSettings {
         // Their database work runs off the main thread and finishes if the screen is left
         val appScope = remember { graph.appCoroutineScope }
         val appContext = context.applicationContext
+        val exportCopyMarks = rememberLauncherForActivityResult(CreateDocument("application/json")) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            appScope.launchIO {
+                val count = writeCopyMarkReport(
+                    appContext,
+                    uri,
+                    graph.chapterCopyMarks,
+                    graph.sourceManager,
+                    graph.novelSourceManager,
+                )
+                val message = count?.let { appContext.stringResource(MR.strings.copy_marks_exported, it) }
+                    ?: appContext.stringResource(MR.strings.copy_marks_export_failed)
+                withUIContext { appContext.toast(message) }
+            }
+        }
         // RK <--
 
         return Preference.PreferenceGroup(
@@ -346,7 +372,7 @@ object SettingsAdvancedScreen : SearchableSettings {
                     subtitle = stringResource(MR.strings.pref_reset_viewer_flags_summary),
                     onClick = {
                         scope.launch {
-                            val success = context.appGraph.resetViewerFlags.await()
+                            val success = context.appGraph.resetEntryViewerFlags.await() // RK: both content types
                             val message = if (success) {
                                 MR.strings.pref_reset_viewer_flags_success
                             } else {
@@ -355,6 +381,18 @@ object SettingsAdvancedScreen : SearchableSettings {
                             context.toast(message)
                         }
                     },
+                ),
+                // RK: shows what Skip duplicate chapters folds together, so a wrong call can be seen and reported
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = graph.reikaiLibraryPreferences.showSkippedDuplicates,
+                    title = stringResource(MR.strings.pref_show_skipped_duplicates),
+                    subtitle = stringResource(MR.strings.pref_show_skipped_duplicates_summary),
+                ),
+                // RK: the user's Never skip and copy marks, saved as a file to attach to a report on the rule
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_export_copy_marks),
+                    subtitle = stringResource(MR.strings.pref_export_copy_marks_summary),
+                    onClick = { exportCopyMarks.launch("reikai-duplicate-marks.json") },
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = libraryPreferences.updateMangaTitles,
@@ -375,6 +413,7 @@ object SettingsAdvancedScreen : SearchableSettings {
                 // collapsed after the rebuild (both now clear every group), so it is one action per type.
                 Preference.PreferenceItem.TextPreference(
                     title = contentTypedCategory(MR.strings.pref_clear_merges, MR.strings.content_type_manga),
+                    visible = showsContent(ContentType.MANGA), // RK
                     subtitle = stringResource(MR.strings.pref_clear_merges_summary),
                     onClick = {
                         appScope.launch {
@@ -385,6 +424,7 @@ object SettingsAdvancedScreen : SearchableSettings {
                 ),
                 Preference.PreferenceItem.TextPreference(
                     title = contentTypedCategory(MR.strings.pref_clear_merges, MR.strings.content_type_novels),
+                    visible = showsContent(ContentType.NOVELS), // RK
                     subtitle = stringResource(MR.strings.pref_clear_merges_summary),
                     onClick = {
                         appScope.launch {
@@ -397,6 +437,7 @@ object SettingsAdvancedScreen : SearchableSettings {
                 // (fixed, but rows written before the fix stay wrong until something re-fetches them).
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_repair_novel_details),
+                    visible = showsContent(ContentType.NOVELS), // RK
                     subtitle = stringResource(MR.strings.pref_repair_novel_details_summary),
                     onClick = {
                         appScope.launch {
@@ -428,18 +469,28 @@ object SettingsAdvancedScreen : SearchableSettings {
         // RK
         novelPreferences: NovelPreferences,
     ): Preference.PreferenceGroup {
+        val context = LocalContext.current // RK
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.pref_category_reader),
             preferenceItems = listOf(
                 Preference.PreferenceItem.SwitchPreference(
                     preference = basePreferences.highQualityRenderer,
                     title = stringResource(MR.strings.pref_high_quality_renderer),
+                    visible = showsContent(ContentType.MANGA), // RK
                 ),
                 // RK -->
                 Preference.PreferenceItem.SwitchPreference(
                     preference = novelPreferences.readerWebViewDevTools(),
                     title = stringResource(MR.strings.pref_novel_webview_dev_tools),
+                    visible = showsContent(ContentType.NOVELS),
                     subtitle = stringResource(MR.strings.pref_novel_webview_dev_tools_summary),
+                    // The switch is process-wide, so it changes now rather than when a novel page is next built.
+                    onValueChanged = { on ->
+                        WebView.setWebContentsDebuggingEnabled(
+                            webContentsDebugging(on, context.isDebugInspectorBuild()),
+                        )
+                        true
+                    },
                 ),
                 // RK <--
             ),

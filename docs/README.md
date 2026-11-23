@@ -26,11 +26,14 @@ To change or understand a feature, this is every doc that covers it: the user do
 | Built-in sources | [built-in-sources.md](built-in-sources.md) | [adult-sources.md](dev/subsystems/adult-sources.md) |
 | MangaDex enhanced source | [built-in-sources.md](built-in-sources.md) | [adult-sources.md](dev/subsystems/adult-sources.md) |
 | Light novels | [about.md](about.md) | [browse-and-sources.md](dev/subsystems/browse-and-sources.md), [ln-plugin-host.md](dev/subsystems/ln-plugin-host.md) |
+| Manga reader | [guides/reader-settings.md](guides/reader-settings.md), [faq/reader.md](faq/reader.md) | [reader.md](dev/subsystems/reader.md) |
 | Novel reader | [novel-reader.md](novel-reader.md), [guides/novel-reader-settings.md](guides/novel-reader-settings.md) | [reader.md](dev/subsystems/reader.md), [novel-reader-rendering.md](dev/subsystems/novel-reader-rendering.md) |
 | Updates, History and Recents | [recents.md](recents.md) | [recents.md](dev/subsystems/recents.md) |
+| Downloads | [faq/downloads.md](faq/downloads.md) | [downloads.md](dev/subsystems/downloads.md) |
+| Migration | [guides/source-migration.md](guides/source-migration.md) | [migrate.md](dev/subsystems/migrate.md) |
 | Statistics | [statistics.md](statistics.md) | [statistics.md](dev/subsystems/statistics.md) |
 | Feed and saved searches | [feed.md](feed.md) | [browse-and-sources.md](dev/subsystems/browse-and-sources.md) |
-| Opening shared links | [shared-links.md](shared-links.md) | none |
+| Opening shared links | [shared-links.md](shared-links.md) | [browse-and-sources.md](dev/subsystems/browse-and-sources.md), [adult-sources.md](dev/subsystems/adult-sources.md) |
 | Library shell | [library-layout.md](library-layout.md) | [library.md](dev/subsystems/library.md) |
 | Unified manga + novel UI | (none yet) | [content-layer.md](dev/subsystems/content-layer.md) |
 

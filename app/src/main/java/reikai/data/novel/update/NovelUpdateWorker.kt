@@ -2,7 +2,6 @@ package reikai.data.novel.update
 
 import android.content.Context
 import android.content.pm.ServiceInfo
-import android.os.Build
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
@@ -11,7 +10,6 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import dev.zacsweers.metro.Inject
-import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.data.cache.CoverCache
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.util.storage.getUriCompat
@@ -19,8 +17,6 @@ import eu.kanade.tachiyomi.util.system.isRunning
 import eu.kanade.tachiyomi.util.system.setForegroundSafely
 import eu.kanade.tachiyomi.util.system.workManager
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.datetime.TimeZone
@@ -32,26 +28,30 @@ import mihon.core.metro.metroGraph
 import mihon.core.migration.Migrator
 import reikai.data.library.EntryCheck
 import reikai.data.library.LibraryUpdateRun
+import reikai.data.library.UpdateProgressList
 import reikai.data.library.UpdateRunLedger
 import reikai.data.library.checkUpdateEntry
+import reikai.data.library.libraryUpdateGate
 import reikai.data.library.libraryUpdateManualRequest
 import reikai.data.library.libraryUpdatePeriodicRequest
-import reikai.data.library.shouldDeferLibraryUpdate
 import reikai.data.library.stopLibraryUpdate
+import reikai.data.library.updateBySource
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.refreshNovelFromSource
 import reikai.data.updateerror.UpdateErrorEntry
 import reikai.data.updateerror.UpdateErrorLog
 import reikai.data.updateerror.UpdateErrorSection
 import reikai.data.updateerror.updateFailureMessage
 import reikai.domain.category.isUpdateScope
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
-import reikai.domain.entry.GetEntryCustomInfo
+import reikai.domain.chapter.LocalChapterTombstones
+import reikai.domain.download.SourceContacts
 import reikai.domain.library.ContentType
 import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.library.ReleaseInterval
 import reikai.domain.library.smartUpdateFacts
 import reikai.domain.library.smartUpdateSkip
-import reikai.domain.manga.AdultContentChecker
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRepository
@@ -62,6 +62,8 @@ import reikai.domain.novel.updateerror.DeleteNovelUpdateErrors
 import reikai.domain.novel.updateerror.UpsertNovelUpdateError
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.install.LnPluginInstaller
+import reikai.novel.install.RunSources
+import reikai.novel.install.unreachable
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.util.runCatchingCancellable
@@ -70,6 +72,7 @@ import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.library.service.LibraryPreferences
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.time.Clock
 import kotlin.time.Instant
 
@@ -107,7 +110,7 @@ class NovelUpdateWorker(
 
     @Inject private lateinit var libraryPreferences: LibraryPreferences
 
-    @Inject private lateinit var chapterNumberOverrides: ChapterNumberOverrideRepository
+    @Inject private lateinit var syncRules: NovelChapterSyncRules
 
     @Inject private lateinit var coverCache: CoverCache
 
@@ -120,28 +123,24 @@ class NovelUpdateWorker(
 
     @Inject private lateinit var libraryUpdateRun: LibraryUpdateRun
 
-    @Inject private lateinit var securityPreferences: SecurityPreferences
+    @Inject private lateinit var sourceContacts: SourceContacts
 
-    @Inject private lateinit var adultChecker: AdultContentChecker
-
-    @Inject private lateinit var getEntryCustomInfo: GetEntryCustomInfo
-    private val notifier = NovelUpdateNotifier(context, securityPreferences, adultChecker, getEntryCustomInfo)
+    @Inject private lateinit var notifier: NovelUpdateNotifier
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
         val notification = notifier.progress(null, 0, 0)
         val id = Notifications.ID_NOVEL_LIBRARY_PROGRESS
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ForegroundInfo(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            ForegroundInfo(id, notification)
-        }
+        return ForegroundInfo(id, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
     }
 
     override suspend fun doWork(): Result {
         // A WorkManager start has no MainActivity to wait for the migrations first
         Migrator.await()
         val restrictions = preferences.libraryUpdateDeviceRestrictions().get()
-        if (shouldDeferLibraryUpdate(restrictions, WORK_NAME_AUTO, WORK_NAME_MANUAL)) return Result.retry()
+        val shown = reikaiLibraryPreferences.shownContent.get()
+        libraryUpdateGate(shown, restrictions, WORK_NAME_AUTO, WORK_NAME_MANUAL)?.let {
+            return it
+        }
         setForegroundSafely()
         // Stamp the run start for the Updates "Last updated" line (matches manga LibraryUpdateWorker).
         preferences.novelLibraryUpdateLastTimestamp().set(System.currentTimeMillis())
@@ -181,7 +180,7 @@ class NovelUpdateWorker(
         val exclude = preferences.novelUpdateCategoriesExclude().get().mapTo(mutableSetOf()) { it.toLong() }
         // The library rows carry the categories (an uncategorized novel as Default, 0, as the manga job
         // reads them) and the chapter counts the rules read, so nothing else is loaded to decide. In
-        // title order, as the manga job runs.
+        // title order within a source, as the manga job runs.
         val favorites = novelRepo.getLibraryNovelAsFlow().first()
             .filter { entry ->
                 isUpdateScope(entry.categories, categoryId, include, exclude) &&
@@ -191,24 +190,24 @@ class NovelUpdateWorker(
             .map { it.novel }
         if (favorites.isEmpty()) return
 
-        val failed = mutableListOf<UpdateErrorEntry>()
-        favorites.forEachIndexed { index, novel ->
-            currentCoroutineContext().ensureActive()
+        val failed = CopyOnWriteArrayList<UpdateErrorEntry>()
+        val updates = UpdateProgressList<Novel>(favorites.size) { updating, done, total ->
+            notifier.showProgress(updating, done, total)
+            ledger.progressed(done, total)
+        }
+        val sources = RunSources(installer, sourceManager)
+        updateBySource(favorites, sourceOf = Novel::source, sourceContacts) { novel ->
             val outcome = checkUpdateEntry(
                 stillInLibrary = { novelRepo.getById(novel.id)?.favorite == true },
-                // [index] is how many are already done, which is what the bar reports while this one runs;
-                // again once it is done, so the bar actually reaches its end.
-                progress = { check ->
-                    notifier.showProgress(novel, index, favorites.size)
-                    check()
-                    notifier.showProgress(novel, index + 1, favorites.size)
-                },
+                progress = { check -> updates.around(novel, check) },
                 trackErrors = trackErrors,
                 clearError = { deleteNovelUpdateErrors.byNovelIds(listOf(novel.id)) },
                 recordError = { upsertNovelUpdateError.await(novel.id, it) },
                 failureMessage = { with(context) { it.updateFailureMessage() } },
             ) {
-                val newChapters = checkNovel(novel, sourceManager.getOrThrow(novel.source), fetchWindow)
+                val source = sources.get(novel.source)
+                    ?: throw installer.failures.value.unreachable(novel.source, context)
+                val newChapters = checkNovel(novel, source, fetchWindow)
                 if (newChapters.isNotEmpty()) {
                     // Queued after the run rather than here, so a merge group's sources cannot each
                     // fetch the same chapter.
@@ -240,7 +239,7 @@ class NovelUpdateWorker(
         chapterRepo,
         novelRepo,
         libraryPreferences,
-        chapterNumberOverrides,
+        syncRules,
         coverCache,
         novelDownloadManager = downloadManager,
         fetchWindow = fetchWindow,

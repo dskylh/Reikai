@@ -15,12 +15,17 @@ import io.mockk.mockkStatic
 import io.mockk.runs
 import io.mockk.unmockkObject
 import io.mockk.unmockkStatic
+import io.mockk.verify
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -36,7 +41,9 @@ import reikai.domain.novel.model.NovelChapter
 import reikai.domain.source.ReikaiSourcePreferences
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
+import reikai.presentation.recents.EmittingPreferenceStore
 import reikai.util.mockIoDispatcher
+import reikai.util.sourceContacts
 import reikai.util.testAppScope
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.download.service.DownloadPreferences
@@ -48,13 +55,18 @@ import kotlin.time.Instant
  * changed. The manager's own scope runs on the test scheduler, so its store writes finish under
  * advanceUntilIdle.
  */
+@OptIn(ExperimentalStdlibApi::class)
 class NovelDownloadManagerDrainTest {
 
     private val novel = Novel.create().copy(id = 1L, source = "src", title = "Novel")
-    private val chapters = listOf(10L, 11L).map { id ->
+    private val otherNovel = Novel.create().copy(id = 2L, source = "other", title = "Other")
+    private val chapters = listOf(10L, 11L).map { chapter(it, novelId = 1L) }
+    private val otherChapter = chapter(20L, novelId = 2L)
+
+    private fun chapter(id: Long, novelId: Long) =
         NovelChapter(
             id = id,
-            novelId = 1L,
+            novelId = novelId,
             url = "u$id",
             name = "Ch $id",
             read = false,
@@ -66,12 +78,12 @@ class NovelDownloadManagerDrainTest {
             dateUpload = null,
             page = "",
         )
-    }
 
     /** Holds the first chapter's fetch the way a blocking write holds a cancelled worker. */
     private val firstFetch = CompletableDeferred<Unit>()
 
     private val io = StandardTestDispatcher()
+    private val contacts = io.scheduler.sourceContacts()
 
     private val prefs = FakeSharedPreferences()
     private val context = mockk<Context>(relaxed = true) {
@@ -79,7 +91,7 @@ class NovelDownloadManagerDrainTest {
         every { getSystemService(NotificationManager::class.java) } returns mockk<NotificationManager>(relaxed = true)
     }
     private val chapterRepo = mockk<NovelChapterRepository> {
-        chapters.forEach { ch -> coEvery { getById(ch.id) } returns ch }
+        (chapters + otherChapter).forEach { ch -> coEvery { getById(ch.id) } returns ch }
     }
     private val source = mockk<NovelSource> {
         every { minimumRequestDelayMs } returns 0L
@@ -89,15 +101,34 @@ class NovelDownloadManagerDrainTest {
         }
         coEvery { parseChapter("u11") } returns "text"
     }
-    private val sourceManager = mockk<NovelSourceManager>().also { coEvery { it.get("src") } returns source }
+    private val otherSource = mockk<NovelSource> {
+        every { minimumRequestDelayMs } returns 0L
+        coEvery { parseChapter("u20") } returns "text"
+    }
+    private val sourceManager = mockk<NovelSourceManager>().also {
+        coEvery { it.get("src") } returns source
+        coEvery { it.get("other") } returns otherSource
+    }
 
     private val written = mutableListOf<Long>()
+    private val writtenNames = mutableListOf<String>()
+    private var writeDispatcher: CoroutineDispatcher? = null
     private val saver = mockk<NovelChapterSaver> {
-        coEvery { save(any(), any(), any(), any()) } answers {
+        coEvery { prepare(any(), any(), any()) } answers { secondArg() }
+        coEvery { write(any(), any(), any()) } coAnswers {
+            writeDispatcher = currentCoroutineContext()[CoroutineDispatcher]
             written += secondArg<NovelChapter>().id
+            writtenNames += "${firstArg<Novel>().title}/${secondArg<NovelChapter>().name}"
             NovelChapterSaver.SaveResult.SAVED
         }
     }
+
+    private val provider = mockk<NovelDownloadProvider>(relaxed = true) { every { availableSpace() } returns -1L }
+    private val novelRepo = mockk<NovelRepository> {
+        coEvery { getById(1L) } returns novel
+        coEvery { getById(2L) } returns otherNovel
+    }
+    private val downloadPreferences = DownloadPreferences(EmittingPreferenceStore())
 
     private lateinit var manager: NovelDownloadManager
 
@@ -108,16 +139,21 @@ class NovelDownloadManagerDrainTest {
         mockkStatic(Context::activeNetworkState)
         every { any<Context>().activeNetworkState() } returns NetworkState(true, true, true)
         mockIoDispatcher(io)
-        manager = NovelDownloadManager(
+        manager = newManager(sourceLimit = 5)
+    }
+
+    private fun newManager(sourceLimit: Int): NovelDownloadManager {
+        downloadPreferences.parallelSourceLimit.set(sourceLimit)
+        return NovelDownloadManager(
             scope = testAppScope(),
             context = context,
-            provider = mockk(relaxed = true) { every { availableSpace() } returns -1L },
-            cache = mockk(relaxed = true) { every { downloadedChapterIds(novel, any()) } returns emptySet() },
+            provider = provider,
+            cache = mockk(relaxed = true) { every { downloadedChapterIds(any(), any()) } returns emptySet() },
             chapterRepo = chapterRepo,
-            novelRepo = mockk<NovelRepository> { coEvery { getById(1L) } returns novel },
+            novelRepo = novelRepo,
             sourceManager = sourceManager,
             installer = mockk { coEvery { ensureLoaded() } just runs },
-            downloadPreferences = DownloadPreferences(InMemoryPreferenceStore()),
+            downloadPreferences = downloadPreferences,
             sourcePreferences = ReikaiSourcePreferences(InMemoryPreferenceStore()),
             novelPreferences = NovelPreferences(InMemoryPreferenceStore()),
             saver = saver,
@@ -125,6 +161,7 @@ class NovelDownloadManagerDrainTest {
             adultChecker = mockk { coEvery { adultNovelIdsAmong(any()) } returns emptySet() },
             sourceTitles = mockk(),
             getEntryCustomInfo = mockk { coEvery { await(any()) } returns null },
+            sourceContacts = contacts,
         )
     }
 
@@ -133,6 +170,235 @@ class NovelDownloadManagerDrainTest {
         unmockkObject(NovelDownloadWorker.Companion)
         unmockkStatic(Context::activeNetworkState)
         unmockkStatic(Dispatchers::class)
+    }
+
+    @Test
+    fun `a slow source does not hold up another source`() = runTest(io) {
+        whileFirstFetchHeld(chapters.take(1) + otherChapter) {
+            manager.queueState.value.map { it.chapterId } shouldBe listOf(10L)
+        }
+    }
+
+    @Test
+    fun `a source fetches one chapter at a time`() = runTest(io) {
+        whileFirstFetchHeld(chapters) {
+            manager.queueState.value.map { it.chapterId } shouldBe listOf(10L, 11L)
+        }
+    }
+
+    @Test
+    fun `the parallel source limit keeps a source waiting`() = runTest(io) {
+        manager = newManager(sourceLimit = 1)
+
+        whileFirstFetchHeld(chapters.take(1) + otherChapter) {
+            manager.queueState.value.map { it.chapterId } shouldBe listOf(10L, 20L)
+        }
+    }
+
+    @Test
+    fun `every novel with a fetch running shows as downloading`() = runTest(io) {
+        val otherFetch = CompletableDeferred<Unit>()
+        coEvery { otherSource.parseChapter("u20") } coAnswers {
+            otherFetch.await()
+            "text"
+        }
+
+        whileFirstFetchHeld(chapters.take(1) + otherChapter) {
+            manager.downloadingNovelIds.first() shouldBe setOf(1L, 2L)
+            otherFetch.complete(Unit)
+        }
+    }
+
+    @Test
+    fun `a source's pacing holds back its next chapter and nothing else`() = runTest(io) {
+        every { source.minimumRequestDelayMs } returns 1_000L
+        firstFetch.complete(Unit)
+        manager.downloadChapters(chapters + otherChapter)
+
+        launch { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        runCurrent()
+
+        manager.queueState.value.map { it.chapterId } shouldBe listOf(11L)
+    }
+
+    @Test
+    fun `a drain ends once every source is done`() = runTest(io) {
+        firstFetch.complete(Unit)
+        manager.downloadChapters(chapters + otherChapter)
+
+        val drain = launch { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        advanceUntilIdle()
+        val ended = drain.isCompleted
+        drain.cancel()
+
+        (ended to manager.queueState.value) shouldBe (true to emptyList())
+    }
+
+    @Test
+    fun `a chapter queued mid-drain reaches a free lane`() = runTest(io) {
+        whileFirstFetchHeld(chapters.take(1)) {
+            manager.downloadChapters(listOf(otherChapter))
+            runCurrent()
+
+            manager.queueState.value.map { it.chapterId } shouldBe listOf(10L)
+        }
+    }
+
+    @Test
+    fun `a limit raised mid-drain reaches a waiting source`() = runTest(io) {
+        manager = newManager(sourceLimit = 1)
+
+        whileFirstFetchHeld(chapters.take(1) + otherChapter) {
+            downloadPreferences.parallelSourceLimit.set(2)
+            runCurrent()
+
+            written shouldBe listOf(20L)
+        }
+    }
+
+    @Test
+    fun `a source with nothing left frees its slot without waiting out its pace`() = runTest(io) {
+        every { source.minimumRequestDelayMs } returns 1_000L
+        firstFetch.complete(Unit)
+        manager = newManager(sourceLimit = 1)
+        manager.downloadChapters(chapters.take(1) + otherChapter)
+
+        launch { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        runCurrent()
+
+        written shouldBe listOf(10L, 20L)
+    }
+
+    @Test
+    fun `a slow chapter's images hold up no other source's write`() = runTest(io) {
+        val images = CompletableDeferred<Unit>()
+        coEvery { saver.prepare(source, any(), any()) } coAnswers {
+            images.await()
+            secondArg()
+        }
+        firstFetch.complete(Unit)
+        manager.downloadChapters(chapters.take(1) + otherChapter)
+
+        launch { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        runCurrent()
+        val writtenWhileHeld = written.toList()
+        images.complete(Unit)
+        advanceUntilIdle()
+
+        writtenWhileHeld shouldBe listOf(20L)
+    }
+
+    @Test
+    fun `a chapter renamed while its fetch runs is saved under its new name`() = runTest(io) {
+        whileFirstFetchHeld(chapters.take(1)) {
+            coEvery { chapterRepo.getById(10L) } returns chapters[0].copy(name = "New")
+        }
+
+        writtenNames shouldBe listOf("Novel/New")
+    }
+
+    @Test
+    fun `a novel renamed while its first chapter's fetch runs is saved under its new title`() = runTest(io) {
+        whileFirstFetchHeld(chapters.take(1)) {
+            coEvery { novelRepo.getById(1L) } returns novel.copy(title = "New")
+        }
+
+        writtenNames shouldBe listOf("New/Ch 10")
+    }
+
+    /** Held while a save writes, so a rename can never miss the file or folder that save is making. */
+    @Test
+    fun `a chapter rename waits for a write in progress`() = runTest(io) {
+        whileWriteHeld {
+            launch { manager.renameChapter(novel, chapters[0], chapters[0].copy(name = "New")) }
+            runCurrent()
+
+            verify(exactly = 0) { provider.renameChapter(any(), any(), any()) }
+        }
+    }
+
+    @Test
+    fun `a novel rename waits for a write in progress before it looks for the folder`() = runTest(io) {
+        whileWriteHeld {
+            launch { manager.renameNovel(novel, "New") { true } }
+            runCurrent()
+
+            verify(exactly = 0) { provider.findNovelDir(any()) }
+        }
+    }
+
+    /** A title stored mid-write would hand the next save a folder name the move then finds taken. */
+    @Test
+    fun `a novel's new title waits for a write in progress before it is stored`() = runTest(io) {
+        var stored = false
+        whileWriteHeld {
+            launch {
+                manager.renameNovel(novel, "New") {
+                    stored = true
+                    true
+                }
+            }
+            runCurrent()
+
+            stored shouldBe false
+        }
+    }
+
+    private suspend fun TestScope.whileWriteHeld(checks: suspend () -> Unit) {
+        val write = CompletableDeferred<Unit>()
+        coEvery { saver.write(any(), any(), any()) } coAnswers {
+            write.await()
+            NovelChapterSaver.SaveResult.SAVED
+        }
+        firstFetch.complete(Unit)
+        manager.downloadChapters(chapters.take(1))
+        launch { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        runCurrent()
+        try {
+            checks()
+        } finally {
+            write.complete(Unit)
+        }
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun `a drain runs on the IO dispatcher whatever started it`() = runTest(io) {
+        firstFetch.complete(Unit)
+        manager.downloadChapters(chapters.take(1))
+
+        launch(StandardTestDispatcher(testScheduler)) { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        advanceUntilIdle()
+
+        writeDispatcher shouldBe io
+    }
+
+    @Test
+    fun `a drain paused for the network reports once each check, not once per lane`() = runTest(io) {
+        every { any<Context>().activeNetworkState() } returns NetworkState(false, false, false)
+        manager.downloadChapters(chapters.take(1))
+        var reports = 0
+
+        val drain = launch { manager.runQueue(onProgress = { reports++ }, onError = { _, _, _, _ -> }) }
+        runCurrent()
+        val firstCheck = reports
+        advanceTimeBy(5_001L)
+        drain.cancel()
+
+        (firstCheck to reports) shouldBe (1 to 2)
+    }
+
+    /** Runs the drain over [queued] and [checks] it with chapter 10's fetch held, then lets it finish. */
+    private suspend fun TestScope.whileFirstFetchHeld(queued: List<NovelChapter>, checks: suspend () -> Unit) {
+        manager.downloadChapters(queued)
+        launch { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        runCurrent()
+        try {
+            checks()
+        } finally {
+            firstFetch.complete(Unit)
+        }
+        advanceUntilIdle()
     }
 
     @Test
@@ -148,6 +414,22 @@ class NovelDownloadManagerDrainTest {
         advanceUntilIdle()
 
         manager.queueState.value shouldBe emptyList()
+    }
+
+    @Test
+    fun `a drain started while a paused one is unwinding leaves its chapter alone until then`() = runTest(io) {
+        manager.downloadChapters(chapters)
+        val paused = launch { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        runCurrent()
+        paused.cancel()
+
+        launch { manager.runQueue(onProgress = {}, onError = { _, _, _, _ -> }) }
+        runCurrent()
+        val state = manager.queueState.value.first { it.chapterId == 10L }.state
+        firstFetch.complete(Unit)
+        advanceUntilIdle()
+
+        state shouldBe NovelDownload.State.DOWNLOADING
     }
 
     @Test

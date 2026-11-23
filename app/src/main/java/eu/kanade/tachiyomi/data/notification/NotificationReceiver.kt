@@ -12,7 +12,7 @@ import eu.kanade.domain.chapter.interactor.SetReadStatus
 import eu.kanade.tachiyomi.data.backup.restore.BackupRestoreWorker
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.data.library.LibraryUpdateWorker
-import eu.kanade.tachiyomi.ui.main.MainActivity
+import eu.kanade.tachiyomi.data.library.MetadataUpdateWorker
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.util.system.cancelNotification
 import eu.kanade.tachiyomi.util.system.getParcelableExtraCompat
@@ -31,6 +31,7 @@ import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.novel.download.NovelDownloadManager
 import reikai.presentation.details.novelDetailsIntent
+import reikai.util.MainActivityTarget
 import tachiyomi.core.common.Constants
 import tachiyomi.domain.chapter.interactor.GetChapter
 import tachiyomi.domain.chapter.model.Chapter
@@ -73,8 +74,6 @@ class NotificationReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         context.appGraph.inject(this)
         when (intent.action) {
-            // Dismiss notification
-            ACTION_DISMISS_NOTIFICATION -> dismissNotification(context, intent.getIntExtra(EXTRA_NOTIFICATION_ID, -1))
             // Resume the download service
             ACTION_RESUME_DOWNLOADS -> downloadManager.startDownloads()
             // Pause the download service
@@ -176,15 +175,6 @@ class NotificationReceiver : BroadcastReceiver() {
     // RK <--
 
     /**
-     * Dismiss the notification
-     *
-     * @param notificationId the id of the notification
-     */
-    private fun dismissNotification(context: Context, notificationId: Int) {
-        context.cancelNotification(notificationId)
-    }
-
-    /**
      * Called to start share intent to share image
      *
      * @param context context of application
@@ -221,6 +211,7 @@ class NotificationReceiver : BroadcastReceiver() {
     private fun cancelLibraryUpdate(context: Context) {
         launchAsync {
             LibraryUpdateWorker.stop(context)
+            MetadataUpdateWorker.stop(context.workManager) // RK: it posts the same notice, with this Cancel
         }
     }
 
@@ -306,8 +297,6 @@ class NotificationReceiver : BroadcastReceiver() {
         private const val ACTION_PAUSE_DOWNLOADS = "$ID.$NAME.ACTION_PAUSE_DOWNLOADS"
         private const val ACTION_CLEAR_DOWNLOADS = "$ID.$NAME.ACTION_CLEAR_DOWNLOADS"
 
-        private const val ACTION_DISMISS_NOTIFICATION = "$ID.$NAME.ACTION_DISMISS_NOTIFICATION"
-
         private const val EXTRA_URI = "$ID.$NAME.URI"
         private const val EXTRA_NOTIFICATION_ID = "$ID.$NAME.NOTIFICATION_ID"
         private const val EXTRA_GROUP_ID = "$ID.$NAME.EXTRA_GROUP_ID"
@@ -359,26 +348,6 @@ class NotificationReceiver : BroadcastReceiver() {
         internal fun clearDownloadsPendingBroadcast(context: Context): PendingIntent {
             val intent = Intent(context, NotificationReceiver::class.java).apply {
                 action = ACTION_CLEAR_DOWNLOADS
-            }
-            return PendingIntent.getBroadcast(
-                context,
-                0,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-        }
-
-        /**
-         * Returns [PendingIntent] that starts a service which dismissed the notification
-         *
-         * @param context context of application
-         * @param notificationId id of notification
-         * @return [PendingIntent]
-         */
-        internal fun dismissNotificationPendingBroadcast(context: Context, notificationId: Int): PendingIntent {
-            val intent = Intent(context, NotificationReceiver::class.java).apply {
-                action = ACTION_DISMISS_NOTIFICATION
-                putExtra(EXTRA_NOTIFICATION_ID, notificationId)
             }
             return PendingIntent.getBroadcast(
                 context,
@@ -479,7 +448,7 @@ class NotificationReceiver : BroadcastReceiver() {
          */
         internal fun openChapterPendingActivity(context: Context, manga: Manga, groupId: Int): PendingIntent {
             val newIntent =
-                Intent(context, MainActivity::class.java).setAction(Constants.SHORTCUT_MANGA)
+                Intent(context, MainActivityTarget::class.java).setAction(Constants.SHORTCUT_MANGA) // RK
                     .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     .putExtra(Constants.MANGA_EXTRA, manga.id)
                     .putExtra("notificationId", manga.id.hashCode())
@@ -553,7 +522,7 @@ class NotificationReceiver : BroadcastReceiver() {
          * @param mangaId id of the entry to open
          */
         internal fun openEntryPendingActivity(context: Context, mangaId: Long): PendingIntent {
-            val newIntent = Intent(context, MainActivity::class.java).setAction(Constants.SHORTCUT_MANGA)
+            val newIntent = Intent(context, MainActivityTarget::class.java).setAction(Constants.SHORTCUT_MANGA) // RK
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 .putExtra(Constants.MANGA_EXTRA, mangaId)
                 .putExtra("notificationId", mangaId.hashCode())
@@ -589,12 +558,11 @@ class NotificationReceiver : BroadcastReceiver() {
             novelDownloaderPendingBroadcast(context, ACTION_CANCEL_NOVEL_DOWNLOAD)
 
         /**
-         * A novel's details, which open by source and url rather than by row id as a manga's do. Opening
-         * them clears the novel's new-chapters notice, as opening a manga does: every caller shares one
-         * PendingIntent per novel, since extras are not part of its identity.
+         * A novel's details. Opening them clears the novel's new-chapters notice, as opening a manga does:
+         * every caller shares one PendingIntent per novel, since extras are not part of its identity.
          */
         internal fun openNovelPendingActivity(context: Context, novel: Novel): PendingIntent {
-            val intent = novelDetailsIntent(context, novel.source, novel.url).apply {
+            val intent = novelDetailsIntent(context, novel.id).apply {
                 flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 putExtra("notificationId", NovelNewChaptersNotice.id(novel.id))
                 putExtra("groupId", NovelNewChaptersNotice.SUMMARY_ID)
@@ -716,7 +684,8 @@ class NotificationReceiver : BroadcastReceiver() {
          * @return [PendingIntent]
          */
         internal fun openExtensionsPendingActivity(context: Context): PendingIntent {
-            val intent = Intent(context, MainActivity::class.java).apply {
+            val intent = Intent(context, MainActivityTarget::class.java).apply {
+                // RK
                 action = Constants.SHORTCUT_EXTENSIONS
                 addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }

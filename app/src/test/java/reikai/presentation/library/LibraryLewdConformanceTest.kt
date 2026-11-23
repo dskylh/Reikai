@@ -181,6 +181,7 @@ class LibraryLewdConformanceTest {
                     badgePrefs = NO_BADGES,
                     showSourceIcons = false,
                     querySource = { LibraryQuerySource(it, SOURCE_NAME.lowercase(), "en", isLocal = false) },
+                    localLanguages = emptyMap(),
                     sourceBadge = { SourceBadge.Generic },
                 )
                 val sourceById = novels.associate { it.id to it.source }
@@ -244,6 +245,7 @@ class LibraryLewdConformanceTest {
 
         fun lewdPrefs(lewd: TriState) = LibraryFilterPrefs(
             downloaded = TriState.DISABLED,
+            local = TriState.DISABLED,
             unread = TriState.DISABLED,
             started = TriState.DISABLED,
             bookmarked = TriState.DISABLED,

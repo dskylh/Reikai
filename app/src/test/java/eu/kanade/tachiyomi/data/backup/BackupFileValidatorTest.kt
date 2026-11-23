@@ -39,11 +39,13 @@ import mihon.domain.extension.repository.ExtensionStoreRepository
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
+import reikai.data.backup.FOREIGN_MERGED_SOURCE_ID
 import reikai.data.backup.RestoreInstallSources
 import reikai.domain.novel.LnInstalledPluginMetadata
 import reikai.domain.novel.LnSourceIdentity
 import reikai.domain.novel.NovelPreferences
 import reikai.novel.registry.LnRegistryFetcher
+import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.presentation.recents.EmittingPreferenceStore
 import tachiyomi.domain.source.model.StubSource
@@ -66,6 +68,7 @@ class BackupFileValidatorTest {
         val novelSources = mockk<NovelSourceManager>()
         coEvery { novelSources.ensureLoaded() } just runs
         coEvery { novelSources.get(any()) } returns null
+        coEvery { novelSources.nameOf(any()) } answers { firstArg() }
         return validator(novelSources, fields.asList(), trackerManager, extensions, sourceManager)
     }
 
@@ -103,12 +106,11 @@ class BackupFileValidatorTest {
         novelSourceManager = novelSources,
         parser = ProtoBuf,
         restoreInstalls = RestoreInstallSources(
-            extensionManager = extensions,
-            novelPreferences = deviceNovelPreferences,
             // No repo anywhere, so every missing app and plugin is one to install by hand.
+            extensionManager = extensions.also { coEvery { it.fetchListingsByStore() } returns emptyMap() },
+            novelPreferences = deviceNovelPreferences,
             storeRepository = mockk<ExtensionStoreRepository> {
                 coEvery { getAll() } returns emptyList()
-                coEvery { fetchExtensionsByStore() } returns emptyMap()
             },
             storeService = mockk<ExtensionStoreService>(),
             registryFetcher = LnRegistryFetcher { emptyList() },
@@ -163,6 +165,18 @@ class BackupFileValidatorTest {
         validator(novel, name).validate(mockk<Uri>()).missingSources shouldBe listOf("Foo")
     }
 
+    // The registry is empty until something loads the plugins, and a cold open straight to Restore loads nothing.
+    @Test
+    fun `an installed novel source the registry has not loaded yet is not missing`() = runTest {
+        var loaded = false
+        val novelSources = mockk<NovelSourceManager>()
+        coEvery { novelSources.ensureLoaded() } answers { loaded = true }
+        coEvery { novelSources.get(any()) } answers { if (loaded) mockk<NovelSource>() else null }
+        coEvery { novelSources.nameOf(any()) } answers { firstArg() }
+
+        validator(novelSources, listOf(novel)).validate(mockk<Uri>()).missingSources shouldBe emptyList()
+    }
+
     @Test
     fun `a missing manga source backed up with no name is named by its stub`() = runTest {
         val source =
@@ -175,6 +189,31 @@ class BackupFileValidatorTest {
 
         validator(source, sourceManager = sources).validate(mockk<Uri>()).missingSources shouldBe
             listOf(stub.toString())
+    }
+
+    @Test
+    fun `a fork's merged source is not named, since the restore leaves its rows out`() = runTest {
+        val merged = 101 to ProtoBuf.encodeToByteArray(
+            BackupSource.serializer(),
+            BackupSource(name = "MergedSource", sourceId = FOREIGN_MERGED_SOURCE_ID),
+        )
+        val missing =
+            101 to ProtoBuf.encodeToByteArray(BackupSource.serializer(), BackupSource(name = "Foo", sourceId = 5L))
+        val sources = mockk<SourceManager> { coEvery { get(any<Long>()) } returns null }
+
+        validator(merged, missing, sourceManager = sources).validate(mockk<Uri>()).missingSources shouldBe
+            listOf("Foo")
+    }
+
+    // The manga half answers from its stub the same way, so an older backup still names what this device saw.
+    @Test
+    fun `a backup made before novel source names is named by this device's record`() = runTest {
+        val novelSources = mockk<NovelSourceManager>()
+        coEvery { novelSources.ensureLoaded() } just runs
+        coEvery { novelSources.get(any()) } returns null
+        coEvery { novelSources.nameOf("tachiyomi:123") } returns "Seen here"
+
+        validator(novelSources, listOf(novel)).validate(mockk<Uri>()).missingSources shouldBe listOf("Seen here")
     }
 
     @Test

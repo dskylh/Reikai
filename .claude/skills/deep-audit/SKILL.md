@@ -12,7 +12,7 @@ allowed-tools:
 ---
 
 Audit a whole range of Reikai work with many agents, verify every finding adversarially, and report.
-**This skill writes one file, the ledger, and nothing else.** It never edits code, never fixes, never
+**This skill writes one file, the ledger (`ledger.jsonl`), and nothing else.** It never edits code, never fixes, never
 commits. Fixing is a separate step, and each fix starts by attacking its finding again before
 touching anything, which is what keeps fixes honest.
 
@@ -47,6 +47,16 @@ raised to match, it is "Dynamic workflow size" in the app's config.
   Off by default: it needs CLI Gradle, which is intermittent on this machine, and it runs one test at a
   time.
 - **`--yes`**: skip the approval stop after the map.
+- **Whole-tree mode** (workflow args, no flag): pass `files` (repo-relative paths) to audit those files as
+  they stand now, however old. `rkFiles` names the ones that are Mihon's, audited for their `// RK` islands;
+  `wave` labels the run; `focus` adds a sentence to every prompt. Slices are cut in code by area, so every
+  listed file lands in exactly one, and the map returns `coverage` to prove it. `base...head` becomes the
+  history window the sibling and deleted-code lenses read. Parity checks the behaviours the area's docs
+  describe rather than `[Unreleased]`.
+- **`verifyLows`** (workflow arg): low findings go through the same batched skeptic as mediums instead of
+  being listed unverified.
+- **`hygiene`** lens: process death, hardcoded or mismatched strings, accessibility and calls above
+  minSdk, over slices tagged `screens`, batched three to an agent.
 - **A `+Nk` token target** in the owner's message caps the run: once it is spent, remaining agents fail
   and are reported as uncovered. It counts output tokens only, so it is a backstop, not a meter.
 
@@ -90,9 +100,12 @@ Read these, and pass them to the workflow verbatim as `ground`:
 
 - **`parked`**: the `## Parked` section of `Handoff.md` (gitignored, on disk). Parked items are not
   findings.
-- **`ledger`**: the table rows in [ledger.md](ledger.md). A finding refuted before is not raised again
-  while its reason still holds. Only verifiers see it, filtered to the files a finding cites and each
-  reason cut to its first sentence; finders never carry it.
+- **`ledger`**: the output of `pwsh .claude/skills/deep-audit/ledger.ps1 load`, one line per row of
+  [ledger.jsonl](ledger.jsonl). Each row carries its file's blob at HEAD when it was refuted, so its
+  status is decided by the code: `holds` while the file is unchanged, `recheck` once it has changed, and
+  a row whose file is gone is left out. Only verifiers see it, filtered to the files a finding cites and
+  each reason cut to its first sentence; a `recheck` row reaches them as a lead to re-verify, not a
+  refutation to lean on. Finders never carry it.
 
 Deferred and declined items live in the Decisions sections of `docs/dev/subsystems/` and in `docs/dev/parked.md`. The agents are told to read the record for
 their surface themselves; don't inline those docs.
@@ -168,14 +181,25 @@ Say plainly that the run was read-only, and which findings still need a device.
 
 ## Step 5: The ledger
 
-Append each refuted finding to [ledger.md](ledger.md) as one row: the range, `file:line`, the claim in
-a short phrase, why it was refuted. **Leave the file uncommitted**; committing it is the owner's call.
-A row stops holding once its reason stops being true, so a later run may re-raise it with the new
-evidence.
+Each refuted finding goes to the one place that keeps it, by why it was refuted:
+
+- **A test or a shared rule already pins it**: nothing is written; the test is the record.
+- **It is that way by design or by a ruling**: if the area's subsystem doc already records the decision,
+  write a ledger row of kind `design` naming that doc. If no doc records it, write no row and list it
+  under Stale docs in the report, so the owner adds the Decisions line.
+- **Otherwise** (a false premise, a harmless case, an inherited upstream shape): a ledger row of kind
+  `false-premise`, `harmless` or `upstream`.
+
+Write rows with `pwsh .claude/skills/deep-audit/ledger.ps1 add -Path <rows.json>`, a JSON array of
+`{file, symbol, line, claim, reason, kind, doc, range}` with `file` repo-relative and `symbol` the
+function or class the finding is about (it survives edits a line number does not). The script hashes
+each file and refuses a `design` row without `doc`. **Commit the ledger as soon as a run changes it**, in
+a commit of its own (owner ruling). `ledger.ps1 prune` drops rows whose file is gone, and `ledger.ps1 render` prints the
+whole ledger as a table with each row's status.
 
 ## Rules
 
-- Read-only. No code edits, no fixes, no commits, no pushes. The ledger is the only write.
+- Read-only. No code edits, no fixes, no commits, no pushes. `ledger.jsonl` is the only write.
 - Never skip the approval stop after the map unless `--yes` was passed.
 - Never report a finding the verifiers refuted, and never promote a traced high finding to confirmed.
 - Never let a zero stand for coverage: a lens that returned nothing is reported with what it searched.

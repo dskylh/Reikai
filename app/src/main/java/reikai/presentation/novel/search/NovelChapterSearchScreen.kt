@@ -1,5 +1,6 @@
 package reikai.presentation.novel.search
 
+import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
@@ -7,8 +8,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Assisted
 import dev.zacsweers.metro.AssistedFactory
@@ -17,20 +17,25 @@ import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
-import eu.kanade.presentation.util.Screen
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import kotlinx.serialization.Serializable
+import mihon.core.navigation.LocalNavigator
 import reikai.domain.novel.model.NovelChapter
 import reikai.novel.content.ChapterSearchSnippet
 import reikai.novel.content.ChapterTextSearch
 import reikai.novel.content.NovelRegexReplacements
 import reikai.novel.download.NovelDownloadedTexts
+import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchIO
+import tachiyomi.core.common.util.lang.withUIContext
+import tachiyomi.i18n.MR
 import java.util.concurrent.atomic.AtomicLong
 import java.util.regex.PatternSyntaxException
 
@@ -39,33 +44,11 @@ import java.util.regex.PatternSyntaxException
  * [sourceScoped] names, or [novelId]'s whole merge group. Novels only, since a manga chapter on disk is
  * images with no text to search. Ported from Tsundoku's entry chapter search.
  */
-class NovelChapterSearchScreen(
-    private val novelId: Long,
-    private val sourceScoped: Boolean,
-) : Screen() {
-
-    @Composable
-    override fun Content() {
-        val navigator = LocalNavigator.currentOrThrow
-        val context = LocalContext.current
-        val viewModel = assistedMetroViewModel<Model, Model.Factory> {
-            create(novelId = novelId, sourceScoped = sourceScoped)
-        }
-        val state by viewModel.state.collectAsStateWithLifecycle()
-
-        NovelChapterSearchContent(
-            state = state,
-            navigateUp = navigator::pop,
-            onQueryChange = viewModel::updateQuery,
-            onSearch = viewModel::search,
-            onOptionsChange = viewModel::updateOptions,
-            onResultClick = { chapter ->
-                context.startActivity(
-                    ReaderActivity.newNovelIntent(context, chapter.novelId, chapter.id, sourceScoped),
-                )
-            },
-        )
-    }
+@Serializable
+data class NovelChapterSearchRoute(
+    val novelId: Long,
+    val sourceScoped: Boolean,
+) : NavKey {
 
     // Not private: a graph-contributed factory has to be visible to the generated graph code.
     @AssistedInject
@@ -73,6 +56,7 @@ class NovelChapterSearchScreen(
         @Assisted private val novelId: Long,
         @Assisted private val sourceScoped: Boolean,
         private val downloadedTexts: NovelDownloadedTexts,
+        private val appContext: Context,
     ) : ViewModel() {
 
         val state: StateFlow<State>
@@ -91,8 +75,11 @@ class NovelChapterSearchScreen(
         init {
             viewModelScope.launchIO {
                 val chapters = downloadedTexts.chaptersOf(novelId, sourceScoped).onDisk
-                state.update { it.copy(chapters = chapters) }
-                if (state.value.pendingSearch) search()
+                // On Main, where search runs, so a search between its chapters read and its pending mark is not lost.
+                withUIContext {
+                    state.update { it.copy(chapters = chapters) }
+                    if (state.value.pendingSearch) search()
+                }
             }
         }
 
@@ -143,6 +130,17 @@ class NovelChapterSearchScreen(
                 downloadedTexts.readEach(chapters) { chapter, text ->
                     val matches = text?.let {
                         ChapterTextSearch.findMatches(it, regex, isActive = { context.isActive })
+                    }
+                    // Too slow on one chapter is too slow on all, and each would leave a thread matching.
+                    if (text != null && matches == null) {
+                        updateFor(generation) {
+                            it.copy(
+                                regexError = appContext.stringResource(MR.strings.novel_regex_too_slow),
+                                isSearching = false,
+                            )
+                        }
+                        context.cancel()
+                        return@readEach
                     }
                     updateFor(generation) { s ->
                         s.copy(
@@ -196,4 +194,27 @@ class NovelChapterSearchScreen(
     ) {
         val totalMatches: Int get() = results.sumOf { it.matchCount }
     }
+}
+
+@Composable
+fun NovelChapterSearchScreen(novelId: Long, sourceScoped: Boolean) {
+    val navigator = LocalNavigator.current
+    val context = LocalContext.current
+    val viewModel = assistedMetroViewModel<NovelChapterSearchRoute.Model, NovelChapterSearchRoute.Model.Factory> {
+        create(novelId = novelId, sourceScoped = sourceScoped)
+    }
+    val state by viewModel.state.collectAsStateWithLifecycle()
+
+    NovelChapterSearchContent(
+        state = state,
+        navigateUp = navigator::pop,
+        onQueryChange = viewModel::updateQuery,
+        onSearch = viewModel::search,
+        onOptionsChange = viewModel::updateOptions,
+        onResultClick = { chapter ->
+            context.startActivity(
+                ReaderActivity.newNovelIntent(context, chapter.novelId, chapter.id, sourceScoped),
+            )
+        },
+    )
 }

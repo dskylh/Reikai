@@ -21,6 +21,7 @@ import mihon.domain.source.interactor.UpdateMangaFromRemote
 import reikai.domain.source.NovelLinkTarget
 import reikai.domain.source.ResolveMangaLink
 import reikai.domain.source.ResolveNovelLink
+import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.domain.chapter.interactor.GetChapterByUrlAndMangaId
 import tachiyomi.domain.chapter.model.Chapter
@@ -52,6 +53,7 @@ class DeepLinkViewModel(
     }
 
     init {
+        // RK: coroutine helper in place of upstream's raw dispatcher
         viewModelScope.launchIO {
             // RK --> link hooks, then stored rows, then checked guesses, manga before novel within each
             state.value = upstreamHook(query)
@@ -66,12 +68,13 @@ class DeepLinkViewModel(
     }
 
     private fun NovelLinkTarget.toState(): State = when (this) {
-        is NovelLinkTarget.Novel -> State.NovelResult(sourceId, url)
+        is NovelLinkTarget.Novel -> State.NovelResult(novelId)
         is NovelLinkTarget.Chapter -> State.NovelChapterResult(novelId, chapterId)
     }
 
     private suspend fun upstreamHook(query: String): State? {
-        run {
+        // An extension that throws reading the link is a miss, so the later tiers still run
+        return runCatchingCancellable {
             // RK <--
             val source = sourceManager.getAll()
                 .filterIsInstance<ResolvableSource>()
@@ -88,7 +91,7 @@ class DeepLinkViewModel(
             }
 
             // RK --> a miss falls through to the next tier instead of ending the search
-            return if (manga == null) {
+            if (manga == null) {
                 null
             } else {
                 if (chapter == null) {
@@ -97,7 +100,7 @@ class DeepLinkViewModel(
                     State.Result(manga, chapter.id)
                 }
             }
-        }
+        }.getOrNull()
         // RK <--
     }
 
@@ -121,7 +124,7 @@ class DeepLinkViewModel(
 
         // RK -->
         @Immutable
-        data class NovelResult(val sourceId: String, val url: String) : State
+        data class NovelResult(val novelId: Long) : State
 
         @Immutable
         data class NovelChapterResult(val novelId: Long, val chapterId: Long) : State

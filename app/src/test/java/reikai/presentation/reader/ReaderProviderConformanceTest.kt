@@ -6,6 +6,7 @@ import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import io.kotest.matchers.shouldBe
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,7 +17,11 @@ import org.junit.jupiter.params.provider.Arguments
 import org.junit.jupiter.params.provider.MethodSource
 import reikai.domain.entry.EntryId
 import reikai.domain.novel.NovelPreferences
+import reikai.domain.reader.ChapterProgress
 import reikai.domain.reader.ChapterTitleFormat
+import reikai.domain.reader.ReaderPosition
+import reikai.domain.reader.ReaderProgressLook
+import reikai.domain.reader.ReaderProgressSize
 import reikai.presentation.recents.EmittingPreferenceStore
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.chapter.model.Chapter
@@ -105,6 +110,27 @@ class ReaderProviderConformanceTest {
         provider.chrome.first().entry shouldBe probe.entry
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("lookProbes")
+    fun `the progress line looks as its own reader's setting says`(probe: ReaderProgressLookProbe) = runTest {
+        val look = ReaderProgressLook(ReaderProgressSize.HUGE, isBacked = true)
+
+        probe.provider(look).progressLook.first() shouldBe look
+    }
+
+    /** Filling is for screens that cannot show the tint, so every other reader keeps the tint. */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("fillProbes")
+    fun `the bar does not fill its buttons by default`(probe: ReaderBarFillProbe) = runTest {
+        probe.provider(filled = null).bottomButtonsFilled.first() shouldBe false
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("fillProbes")
+    fun `the bar fills its buttons when its own reader's setting says`(probe: ReaderBarFillProbe) = runTest {
+        probe.provider(filled = true).bottomButtonsFilled.first() shouldBe true
+    }
+
     /** A reader that opens scrolling on its own is a choice made in Settings, never the default. */
     @ParameterizedTest(name = "{0}")
     @MethodSource("sessions")
@@ -115,12 +141,43 @@ class ReaderProviderConformanceTest {
         provider.autoScrollOnOpen.get() shouldBe false
     }
 
+    /** A merged series' pace is learned from every member's chapters, so its length names them all. */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("lengthProbes")
+    fun `a merged series' chapter length names every member`(probe: ReaderChapterLengthProbe) = runTest {
+        val provider = probe.provider(ownerRecorded = true)
+
+        provider.chapterLength.first { it != null }?.seriesIds shouldBe setOf(1L, 2L)
+    }
+
+    /** Incognito is asked of the chapter's own source, which differs between a merged series' members. */
+    @ParameterizedTest(name = "{0} recorded {1}")
+    @MethodSource("recordedProbes")
+    fun `a chapter is recorded as its own owner's source says`(probe: ReaderChapterLengthProbe, recorded: Boolean) =
+        runTest {
+            val provider = probe.provider(ownerRecorded = recorded)
+
+            provider.chapterLength.first { it != null }?.recorded shouldBe recorded
+        }
+
     companion object {
         @JvmStatic
         fun probes() = listOf(MangaOrientationProbe(), NovelOrientationProbe())
 
         @JvmStatic
+        fun lengthProbes() = listOf(MangaChapterLengthProbe(), NovelChapterLengthProbe())
+
+        @JvmStatic
+        fun recordedProbes() = lengthProbes().flatMap { listOf(Arguments.of(it, true), Arguments.of(it, false)) }
+
+        @JvmStatic
         fun titleProbes() = listOf(MangaChapterTitleProbe(), NovelChapterTitleProbe())
+
+        @JvmStatic
+        fun lookProbes() = listOf(MangaProgressLookProbe(), NovelProgressLookProbe())
+
+        @JvmStatic
+        fun fillProbes() = listOf(MangaBarFillProbe(), NovelBarFillProbe())
 
         @JvmStatic
         fun sessions() = listOf(
@@ -145,6 +202,42 @@ class ReaderProviderConformanceTest {
             ),
         )
     }
+}
+
+/** One content type's provider, with that reader's own progress look set. */
+interface ReaderProgressLookProbe {
+    fun provider(look: ReaderProgressLook): ReaderProvider
+}
+
+class MangaProgressLookProbe : ReaderProgressLookProbe {
+
+    override fun toString() = "manga"
+
+    override fun provider(look: ReaderProgressLook): ReaderProvider = MangaReaderProvider(
+        viewModel = mockk(relaxed = true),
+        readerPreferences = ReaderPreferences(EmittingPreferenceStore()).apply {
+            progressSize.set(look.size)
+            progressBacked.set(look.isBacked)
+        },
+        downloadManager = mockk(relaxed = true),
+        titleWords = EnglishChapterTitleWords,
+    )
+}
+
+class NovelProgressLookProbe : ReaderProgressLookProbe {
+
+    override fun toString() = "novel"
+
+    override fun provider(look: ReaderProgressLook): ReaderProvider = NovelReaderProvider(
+        viewModel = mockk(relaxed = true),
+        novelPreferences = NovelPreferences(EmittingPreferenceStore()).apply {
+            readerProgressSize().set(look.size)
+            readerProgressBacked().set(look.isBacked)
+        },
+        fontManager = mockk(),
+        imageRequests = mockk(),
+        titleWords = EnglishChapterTitleWords,
+    )
 }
 
 /** One content type's provider, built so that its stored flag and its default are told apart. */
@@ -252,4 +345,98 @@ class NovelChapterTitleProbe : ReaderChapterTitleProbe {
             titleWords = EnglishChapterTitleWords,
         )
     }
+}
+
+/**
+ * One content type's provider open on series 1, merged with series 2, showing a chapter series 2 owns.
+ * Only the owner answers [ownerRecorded]; the opened series answers the opposite, so a provider asking
+ * the wrong one fails.
+ */
+interface ReaderChapterLengthProbe {
+    fun provider(ownerRecorded: Boolean): ReaderProvider
+}
+
+class MangaChapterLengthProbe : ReaderChapterLengthProbe {
+
+    override fun toString() = "manga"
+
+    override fun provider(ownerRecorded: Boolean): ReaderProvider {
+        val chapter = Chapter.create().copy(id = 5L, mangaId = 2L)
+        val state = ReaderViewModel.State(
+            manga = Manga.create().copy(id = 1L),
+            viewerChapters = ViewerChapters(ReaderChapter(chapter), null, null),
+            position = ReaderPosition(5L, ChapterProgress.Pages(0, 10)),
+        )
+        return MangaReaderProvider(
+            viewModel = mockk(relaxed = true) {
+                every { this@mockk.state } returns MutableStateFlow(state)
+                every { seriesIds } returns setOf(1L, 2L)
+                coEvery { isRecorded(2L) } returns ownerRecorded
+                coEvery { isRecorded(1L) } returns !ownerRecorded
+            },
+            readerPreferences = ReaderPreferences(InMemoryPreferenceStore()),
+            downloadManager = mockk(relaxed = true),
+            titleWords = EnglishChapterTitleWords,
+        )
+    }
+}
+
+class NovelChapterLengthProbe : ReaderChapterLengthProbe {
+
+    override fun toString() = "novel"
+
+    override fun provider(ownerRecorded: Boolean): ReaderProvider {
+        val chapter = mockk<NovelReaderViewModel.LoadedChapter> {
+            every { chapterId } returns 5L
+            every { novelId } returns 2L
+            every { html } returns "<p>one two three</p>"
+        }
+        return NovelReaderProvider(
+            viewModel = mockk(relaxed = true) {
+                every { novelId } returns 1L
+                every { memberIds } returns listOf(1L, 2L)
+                every { this@mockk.chapter } returns MutableStateFlow(chapter)
+                coEvery { isRecorded(2L) } returns ownerRecorded
+                coEvery { isRecorded(1L) } returns !ownerRecorded
+            },
+            novelPreferences = NovelPreferences(InMemoryPreferenceStore()),
+            fontManager = mockk(),
+            imageRequests = mockk(),
+            titleWords = EnglishChapterTitleWords,
+        )
+    }
+}
+
+/** One content type's provider, with that reader's own bar fill set, or left alone when null. */
+interface ReaderBarFillProbe {
+    fun provider(filled: Boolean?): ReaderProvider
+}
+
+class MangaBarFillProbe : ReaderBarFillProbe {
+
+    override fun toString() = "manga"
+
+    override fun provider(filled: Boolean?): ReaderProvider = MangaReaderProvider(
+        viewModel = mockk(relaxed = true),
+        readerPreferences = ReaderPreferences(EmittingPreferenceStore()).apply {
+            filled?.let(readerBottomButtonsFilled::set)
+        },
+        downloadManager = mockk(relaxed = true),
+        titleWords = EnglishChapterTitleWords,
+    )
+}
+
+class NovelBarFillProbe : ReaderBarFillProbe {
+
+    override fun toString() = "novel"
+
+    override fun provider(filled: Boolean?): ReaderProvider = NovelReaderProvider(
+        viewModel = mockk(relaxed = true),
+        novelPreferences = NovelPreferences(EmittingPreferenceStore()).apply {
+            filled?.let(readerBottomButtonsFilled()::set)
+        },
+        fontManager = mockk(),
+        imageRequests = mockk(),
+        titleWords = EnglishChapterTitleWords,
+    )
 }

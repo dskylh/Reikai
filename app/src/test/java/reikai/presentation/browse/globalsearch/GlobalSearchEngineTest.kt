@@ -2,12 +2,9 @@ package reikai.presentation.browse.globalsearch
 
 import eu.kanade.domain.source.service.SourcePreferences
 import io.kotest.matchers.shouldBe
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -16,6 +13,8 @@ import reikai.domain.source.ReikaiSourcePreferences
 import reikai.domain.source.SourceKey
 import reikai.presentation.browse.catalogue.EntryBrowseRow
 import reikai.presentation.recents.EmittingPreferenceStore
+import reikai.util.resetVirtualDispatchers
+import reikai.util.virtualDispatchers
 
 /**
  * Global search remembers which sources it last covered, and says why a finished search shows nothing
@@ -38,18 +37,41 @@ class GlobalSearchEngineTest {
         override suspend fun search(row: BrowseSearchRow, query: String): List<EntryBrowseRow> = emptyList()
     }
 
+    // The engine searches on IO, which this puts on the test scheduler beside Main.
     @BeforeEach
     fun setUp() {
-        Dispatchers.setMain(dispatcher)
+        virtualDispatchers(dispatcher)
     }
 
     @AfterEach
     fun tearDown() {
-        Dispatchers.resetMain()
+        resetVirtualDispatchers()
     }
 
-    private fun engine(provider: GlobalSearchProvider = FakeProvider(), initial: SearchSourceFilter? = null) =
-        GlobalSearchEngine(listOf(provider), "query", null, initial, preferences, SourcePreferences(store))
+    private fun engine(
+        provider: GlobalSearchProvider = FakeProvider(),
+        initial: SearchSourceFilter? = null,
+        scoped: ContentType? = null,
+    ) = GlobalSearchEngine(listOf(provider), "query", scoped, initial, preferences, SourcePreferences(store))
+
+    @Test
+    fun `a search scoped to a hidden type runs the shown type`() = runTest(dispatcher) {
+        preferences.shownContent.set(ContentType.NOVELS)
+
+        engine(scoped = ContentType.MANGA).state.first { it.searched }.contentType shouldBe ContentType.NOVELS
+    }
+
+    /** The tab row hides itself then, so a search left on Novels must move to the type still shown. */
+    @Test
+    fun `hiding the search's type while the screen is open moves it to the shown type`() = runTest(dispatcher) {
+        preferences.browseContentType.set(ContentType.NOVELS)
+        val engine = engine()
+        engine.state.first { it.searched }
+
+        preferences.shownContent.set(ContentType.MANGA)
+
+        engine.state.first { it.contentType == ContentType.MANGA }.contentType shouldBe ContentType.MANGA
+    }
 
     @Test
     fun `a search opens on the sources last chosen`() = runTest(dispatcher) {

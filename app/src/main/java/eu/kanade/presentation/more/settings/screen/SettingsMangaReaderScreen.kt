@@ -11,6 +11,7 @@ import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReadingMode
 import eu.kanade.tachiyomi.util.system.hasDisplayCutout
+import kotlinx.serialization.Serializable
 import mihon.app.di.appGraph
 import reikai.domain.novel.NovelTapLayout
 import reikai.domain.reader.ChapterTitleFormat
@@ -27,6 +28,9 @@ import reikai.presentation.reader.railOnLeftPreference
 import reikai.presentation.reader.readerBottomButtonsPreference
 import reikai.presentation.reader.readerFlashGroup
 import reikai.presentation.reader.readerOrientationChoices
+import reikai.presentation.reader.settings.MangaReaderSettingsRows
+import reikai.presentation.reader.settings.readerProgressPreferenceItems
+import reikai.presentation.reader.settings.webGpuViewerGroup
 import reikai.presentation.reader.volumeKeyScrollPreference
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.pluralStringResource
@@ -42,7 +46,8 @@ import java.text.NumberFormat
  * not twin debt: docs/dev/subsystems/architecture.md. Load ahead only on Wi-Fi has no novel twin either
  * (docs/dev/subsystems/reader.md).
  */
-object SettingsMangaReaderScreen : SearchableSettings {
+@Serializable
+data object SettingsMangaReaderScreen : SearchableSettings {
 
     @ReadOnlyComposable
     @Composable
@@ -55,10 +60,14 @@ object SettingsMangaReaderScreen : SearchableSettings {
 
         // RK: the two renderers read different width controls, so the group offers whichever one is
         // live. Side padding is inert under the high quality renderer and Min width under the old one, and
-        // so is the volume-key scroll amount, since that renderer's long strip turns whole pages.
+        // so is the volume-key scroll amount, since that renderer's long strip scrolls half a screen.
         val highQualityRenderer by remember { context.appGraph.basePreferences.highQualityRenderer }
             .collectAsState()
         val loadAheadOnlyOverWifi by readerPref.loadAheadOnlyOverWifi.collectAsState()
+        // RK --> the rows the running renderer honours
+        val dualPageView by readerPref.dualPageView.collectAsState()
+        val rows = MangaReaderSettingsRows(highQualityRenderer, dualPageView)
+        // RK <--
 
         return listOf(
             Preference.PreferenceItem.ListPreference(
@@ -75,6 +84,7 @@ object SettingsMangaReaderScreen : SearchableSettings {
                     250 to stringResource(MR.strings.double_tap_anim_speed_fast),
                 ),
                 title = stringResource(MR.strings.pref_double_tap_anim_speed),
+                visible = rows.doubleTapAnimSpeed, // RK
             ),
             Preference.PreferenceItem.SwitchPreference(
                 preference = readerPref.showReadingMode,
@@ -106,8 +116,9 @@ object SettingsMangaReaderScreen : SearchableSettings {
             getDisplayGroup(readerPreferences = readerPref),
             getEInkGroup(readerPreferences = readerPref),
             getReadingGroup(readerPreferences = readerPref),
-            getPagedGroup(readerPreferences = readerPref),
+            getPagedGroup(readerPreferences = readerPref, rows = rows), // RK
             getWebtoonGroup(readerPreferences = readerPref, highQualityRenderer = highQualityRenderer), // RK
+            webGpuViewerGroup(readerPref, rows), // RK
             getNavigationGroup(readerPreferences = readerPref, highQualityRenderer = highQualityRenderer), // RK
             getActionsGroup(readerPreferences = readerPref),
         )
@@ -148,11 +159,14 @@ object SettingsMangaReaderScreen : SearchableSettings {
                     preference = readerPreferences.keepScreenOn,
                     title = stringResource(MR.strings.pref_keep_screen_on),
                 ),
-                Preference.PreferenceItem.SwitchPreference(
-                    preference = readerPreferences.showPageNumber,
-                    title = stringResource(MR.strings.pref_show_page_number),
-                ),
-                // RK -->
+                // RK --> the page number row with the progress rows, gated as the reader sheet gates them
+                *readerProgressPreferenceItems(
+                    progressLabel = MR.strings.pref_show_page_number,
+                    showProgress = readerPreferences.showPageNumber,
+                    showTimeLeft = readerPreferences.showTimeLeft,
+                    progressSize = readerPreferences.progressSize,
+                    progressBacked = readerPreferences.progressBacked,
+                ).toTypedArray(),
                 Preference.PreferenceItem.ListPreference(
                     preference = readerPreferences.chapterTitleFormat,
                     entries = ChapterTitleFormat.entries.associateWith { stringResource(it.titleRes) },
@@ -220,7 +234,10 @@ object SettingsMangaReaderScreen : SearchableSettings {
     }
 
     @Composable
-    private fun getPagedGroup(readerPreferences: ReaderPreferences): Preference.PreferenceGroup {
+    internal fun getPagedGroup( // internal for SettingsMangaReaderPagedGroupTest
+        readerPreferences: ReaderPreferences,
+        rows: MangaReaderSettingsRows, // RK
+    ): Preference.PreferenceGroup {
         val navModePref = readerPreferences.navigationModePager
         val imageScaleTypePref = readerPreferences.imageScaleType
         val dualPageSplitPref = readerPreferences.dualPageSplitPaged
@@ -230,6 +247,7 @@ object SettingsMangaReaderScreen : SearchableSettings {
         val imageScaleType by imageScaleTypePref.collectAsState()
         val dualPageSplit by dualPageSplitPref.collectAsState()
         val rotateToFit by rotateToFitPref.collectAsState()
+        val cropBorders by readerPreferences.cropBorders.collectAsState() // RK
 
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.pager_viewer),
@@ -271,6 +289,7 @@ object SettingsMangaReaderScreen : SearchableSettings {
                         .mapIndexed { index, it -> index + 1 to stringResource(it) }
                         .toMap(),
                     title = stringResource(MR.strings.pref_image_scale_type),
+                    visible = rows.singlePageRows, // RK
                 ),
                 Preference.PreferenceItem.ListPreference(
                     preference = readerPreferences.zoomStart,
@@ -278,15 +297,24 @@ object SettingsMangaReaderScreen : SearchableSettings {
                         .mapIndexed { index, it -> index + 1 to stringResource(it) }
                         .toMap(),
                     title = stringResource(MR.strings.pref_zoom_start),
+                    visible = rows.singlePageRows, // RK
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.cropBorders,
                     title = stringResource(MR.strings.pref_crop_borders),
+                    visible = rows.singlePageRows, // RK
                 ),
+                // RK --> beside the switch it needs, as the reader sheet has it
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = readerPreferences.cropInsteadOfZoom,
+                    title = stringResource(MR.strings.pref_crop_instead_of_zoom),
+                    visible = rows.cropInsteadOfZoom(cropBorders),
+                ),
+                // RK <--
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.landscapeZoom,
                     title = stringResource(MR.strings.pref_landscape_zoom),
-                    visible = imageScaleType == 1,
+                    visible = imageScaleType == 1 && rows.singlePageRows, // RK
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.navigateToPan,
@@ -296,6 +324,7 @@ object SettingsMangaReaderScreen : SearchableSettings {
                 Preference.PreferenceItem.SwitchPreference(
                     preference = dualPageSplitPref,
                     title = stringResource(MR.strings.pref_dual_page_split),
+                    visible = rows.singlePageRows, // RK
                     onValueChanged = {
                         rotateToFitPref.set(false)
                         true
@@ -305,11 +334,12 @@ object SettingsMangaReaderScreen : SearchableSettings {
                     preference = readerPreferences.dualPageInvertPaged,
                     title = stringResource(MR.strings.pref_dual_page_invert),
                     subtitle = stringResource(MR.strings.pref_dual_page_invert_summary),
-                    visible = dualPageSplit,
+                    visible = dualPageSplit && rows.singlePageRows, // RK
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = rotateToFitPref,
                     title = stringResource(MR.strings.pref_page_rotate),
+                    visible = rows.singlePageRows, // RK
                     onValueChanged = {
                         dualPageSplitPref.set(false)
                         true
@@ -318,7 +348,7 @@ object SettingsMangaReaderScreen : SearchableSettings {
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.dualPageRotateToFitInvert,
                     title = stringResource(MR.strings.pref_page_rotate_invert),
-                    visible = rotateToFit,
+                    visible = rotateToFit && rows.singlePageRows, // RK
                 ),
             ),
         )
@@ -354,6 +384,8 @@ object SettingsMangaReaderScreen : SearchableSettings {
                         readerPreferences.setTapLayout(pager = false, it)
                         false
                     },
+                    // That renderer's strip reads the paged viewer's zones
+                    visible = !highQualityRenderer,
                     // RK <--
                 ),
                 Preference.PreferenceItem.ListPreference(
@@ -362,7 +394,7 @@ object SettingsMangaReaderScreen : SearchableSettings {
                     entries = MangaTapLayouts.invertModes(navMode)
                         .associateWith { stringResource(it.titleRes) },
                     title = stringResource(MR.strings.pref_read_with_tapping_inverted),
-                    visible = MangaTapLayouts.offersInvert(navMode), // RK
+                    visible = MangaTapLayouts.offersInvert(navMode) && !highQualityRenderer, // RK
                 ),
                 // RK -->
                 Preference.PreferenceItem.SliderPreference(
@@ -370,14 +402,14 @@ object SettingsMangaReaderScreen : SearchableSettings {
                     valueRange = NovelTapZones.BOTTOM_ZONE_PERCENT,
                     title = stringResource(MR.strings.pref_tap_bottom_zone_height),
                     valueText = { "$it%" },
-                    visible = MangaTapLayouts.added(navMode) == NovelTapLayout.BOTTOM,
+                    visible = MangaTapLayouts.added(navMode) == NovelTapLayout.BOTTOM && !highQualityRenderer,
                 ),
                 // RK <--
                 // RK --> Min width under the high quality renderer, upstream's side padding otherwise
                 if (highQualityRenderer) {
                     Preference.PreferenceItem.SliderPreference(
                         preference = readerPreferences.continuousMinWidth,
-                        valueRange = 1..100,
+                        valueRange = ReaderPreferences.CONTINUOUS_MIN_WIDTH_MIN..100,
                         title = stringResource(MR.strings.pref_continuous_minwidth),
                         valueText = { numberFormat.format(it / 100f) },
                     )
@@ -427,6 +459,7 @@ object SettingsMangaReaderScreen : SearchableSettings {
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.webtoonDoubleTapZoomEnabled,
                     title = stringResource(MR.strings.pref_double_tap_zoom),
+                    visible = !highQualityRenderer, // RK
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.webtoonDisableZoomOut,

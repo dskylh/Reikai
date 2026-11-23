@@ -4,16 +4,21 @@ import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.data.cache.CoverCache
 import kotlinx.coroutines.CancellationException
 import logcat.LogPriority
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.refreshNovelFromSource
 import reikai.domain.backup.mergedHistory
 import reikai.domain.category.GetNovelCategories
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.LocalChapterTombstones
 import reikai.domain.chapter.isRecognizedChapterNumber
 import reikai.domain.db.Transactions
+import reikai.domain.entry.CarryCustomInfo
 import reikai.domain.entry.EntryId
 import reikai.domain.library.ContentType
+import reikai.domain.library.HideSeries
+import reikai.domain.migration.MigrationSwapEffects
 import reikai.domain.novel.NovelChapterRepository
-import reikai.domain.novel.NovelGroupCategories
 import reikai.domain.novel.NovelHistoryRepository
 import reikai.domain.novel.NovelMergeManager
 import reikai.domain.novel.NovelRepository
@@ -25,8 +30,8 @@ import reikai.domain.novel.model.NovelMigrationFlag
 import reikai.domain.novel.model.NovelUpdate
 import reikai.domain.novel.model.hasCustomCover
 import reikai.domain.readinglog.ReadingLogRepository
+import reikai.domain.readinglog.ReadingPaceRepository
 import reikai.domain.readinglog.sessionMoves
-import reikai.domain.track.source.SourceTrackerDispatcher
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.source.NovelSourceManager
 import tachiyomi.core.common.util.system.logcat
@@ -45,7 +50,6 @@ import kotlin.time.Clock
 class MigrateNovelUseCase(
     private val novelChapterRepository: NovelChapterRepository,
     private val getNovelCategories: GetNovelCategories,
-    private val setNovelCategories: SetNovelCategories,
     private val novelMergeManager: NovelMergeManager,
     // A Provider: constructing the manager restores the persisted download queue and can start the
     // download worker, which building a migration must not do.
@@ -57,17 +61,18 @@ class MigrateNovelUseCase(
     private val sourceManager: NovelSourceManager,
     private val novelRepository: NovelRepository,
     private val libraryPreferences: LibraryPreferences,
-    private val chapterNumberOverrides: ChapterNumberOverrideRepository,
+    private val syncRules: NovelChapterSyncRules,
     // So the favorite swap and the merge-group rewrite can share one transaction; see below.
     private val transactions: Transactions,
-    private val sourceTracker: SourceTrackerDispatcher,
+    private val swapEffects: MigrationSwapEffects,
     private val novelHistoryRepository: NovelHistoryRepository,
     private val readingLog: ReadingLogRepository,
+    private val readingPace: ReadingPaceRepository,
+    private val hideSeries: HideSeries,
+    private val carryCustomInfo: CarryCustomInfo,
 ) {
 
     private val novelDownloadManager: NovelDownloadManager get() = novelDownloadManagerProvider()
-
-    private val groupCategories = NovelGroupCategories(getNovelCategories, setNovelCategories)
 
     suspend operator fun invoke(
         current: Novel,
@@ -104,7 +109,7 @@ class MigrateNovelUseCase(
                     novelChapterRepository,
                     novelRepository,
                     libraryPreferences,
-                    chapterNumberOverrides,
+                    syncRules,
                     coverCache,
                     novelDownloadManager,
                 )
@@ -122,16 +127,24 @@ class MigrateNovelUseCase(
                         "Chapter-state carry failed (${current.id} -> ${target.id})"
                     }
                 }
-                computeHistoryMigration(
+                val history = computeHistoryMigration(
                     currentChapters,
                     targetChapters,
                     novelHistoryRepository.getHistoryByNovelId(current.id),
                     novelHistoryRepository.getHistoryByNovelId(target.id),
-                ).forEach { novelHistoryRepository.upsertNovelHistory(it) }
-                readingLog.move(
-                    ContentType.NOVELS,
-                    sessionMoves(matchedSourceChapters(currentChapters, targetChapters).toList()),
                 )
+                check(novelHistoryRepository.upsertAllNovelHistory(history)) {
+                    "History carry failed (${current.id} -> ${target.id})"
+                }
+                val matched = matchedSourceChapters(currentChapters, targetChapters)
+                readingLog.move(ContentType.NOVELS, sessionMoves(matched.toList()))
+                // The listened share of the history time carried above, so a listened chapter stays one.
+                // Word counts stay behind: the target's text is its own, counted when it is next read.
+                val listened = readingPace.novelChapterPace(listOf(current.id))
+                    .associate { it.chapterId to it.listenedMs }
+                matched.forEach { (targetId, sourceId) ->
+                    listened[sourceId]?.takeIf { it > 0 }?.let { readingPace.keepListenedTime(targetId, it) }
+                }
             }
 
             // Read here, written once the target is in the library, see the group write below
@@ -142,10 +155,11 @@ class MigrateNovelUseCase(
             }
 
             // Carry tracker links onto the target, re-pointed to its id (matching manga migration). The
-            // source's own track rows are left intact, which is correct for a Copy.
-            upsertNovelTrack.awaitAll(
-                getNovelTracks.await(current.id).map { it.copy(novelId = target.id) },
-            )
+            // source's own track rows are left intact, which is correct for a Copy. Checked, so a dropped
+            // link fails the row before the swap.
+            check(upsertNovelTrack.awaitAll(getNovelTracks.await(current.id).map { it.copy(novelId = target.id) })) {
+                "Tracker carry failed (${current.id} -> ${target.id})"
+            }
 
             // Delete the old source's downloaded chapters (parity with manga's REMOVE_DOWNLOAD). The
             // file delete is a no-op when nothing is downloaded. Downloads are never auto re-fetched
@@ -164,6 +178,10 @@ class MigrateNovelUseCase(
                 }
                 // Bump the target's coverLastModified so coil reloads, mirroring NovelCoverViewModel.
                 updateNovel.awaitUpdateCoverLastModified(target.id)
+            }
+            // Before the swap, as manga, so a failed write fails the row with the library untouched.
+            if (NovelMigrationFlag.CUSTOM_INFO in flags) {
+                carryCustomInfo.await(EntryId.Novel(current.id), EntryId.Novel(target.id))
             }
 
             // The favorite swap and the merge-group rewrite are ONE unit of work, with the swap
@@ -185,26 +203,28 @@ class MigrateNovelUseCase(
                 viewerFlags = current.viewerFlags
                 if (NovelMigrationFlag.NOTES in flags) notes = current.notes
             }
-            transactions.run {
-                // Keep the merge consistent: the target takes the source's place in the group on a
-                // replace, or joins it on a copy.
-                if (replace) {
-                    novelMergeManager.replaceInGroup(current.id, target.id)
-                } else if (group.size > 1) {
-                    novelMergeManager.merge(group.toList() + target.id)
-                }
-                // The repository swallows into a Boolean; a false MUST fail the row, or a half swap
-                // could drop the entry from the library with the row reading Migrated. Throwing here
-                // rolls the group rewrite back with it, which is the point of the shared transaction.
-                check(novelRepository.updateAll(listOfNotNull(currentUpdate, targetUpdate))) {
-                    "Migration favorite swap failed (${current.id} -> ${target.id})"
+            transactions.runThrowingOnRollback {
+                hideSeries.keepAcrossSwap(EntryId.Novel(current.id), EntryId.Novel(target.id), replace) {
+                    // Keep the merge consistent: the target takes the source's place in the group on a
+                    // replace, or joins it on a copy.
+                    if (replace) {
+                        novelMergeManager.replaceInGroup(current.id, target.id)
+                    } else if (group.size > 1) {
+                        novelMergeManager.merge(group.toList() + target.id)
+                    }
+                    // The repository swallows into a Boolean; a false MUST fail the row, or a half swap
+                    // could drop the entry from the library with the row reading Migrated. Throwing here
+                    // rolls the group rewrite back with it, which is the point of the shared transaction.
+                    check(novelRepository.updateAll(listOfNotNull(currentUpdate, targetUpdate))) {
+                        "Migration favorite swap failed (${current.id} -> ${target.id})"
+                    }
                 }
             }
-            groupCategories.fileMigrationTarget(target.id, categoryIds, novelMergeManager)
-            sourceTracker.migrated(
+            swapEffects.afterSwap(
                 EntryId.Novel(current.id),
                 EntryId.Novel(target.id),
                 replace,
+                categoryIds,
                 carriedChapters = NovelMigrationFlag.CHAPTER in flags,
             )
         } catch (e: Throwable) {

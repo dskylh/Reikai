@@ -6,10 +6,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -45,22 +48,24 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.manga.components.MangaCover
-import eu.kanade.presentation.util.Screen
 import eu.kanade.presentation.util.formatChapterNumber
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.coroutines.Dispatchers
+import kotlinx.serialization.Serializable
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.Check
 import mihon.icons.materialsymbols.rounded.DoneAll
 import mihon.icons.materialsymbols.rounded.MoreVert
 import mihon.icons.materialsymbols.rounded.Search
 import reikai.domain.library.ContentType
+import reikai.presentation.details.DetailsOpener
+import reikai.presentation.details.rememberDetailsOpener
 import reikai.presentation.migrate.flow.MigratingEntryRow.CommitPhase
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.Scaffold
@@ -69,51 +74,59 @@ import tachiyomi.presentation.core.i18n.pluralStringResource
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.screens.EmptyScreen
 import tachiyomi.presentation.core.screens.LoadingScreen
+import kotlin.random.Random
 
 /**
  * The shared migration list: one row per entry being migrated, with the batch commit at the bottom.
  * Serves both content types through [MigrationFlowAdapter]; nothing here branches on a content type.
  */
-class EntryMigrationListScreen(
-    private val contentType: ContentType,
-    private val entryIds: List<Long>,
+@Serializable
+data class EntryMigrationListRoute(
+    val contentType: ContentType,
+    val entryIds: List<Long>,
     /** The extra search term for this run; see [MigrationTuning.extraQuery]. */
-    private val extraQuery: String?,
-) : Screen(), MigrationFlowScreen {
+    val extraQuery: String?,
+    /** Keys the picks a pushed catalogue sends back; see [MigrationPickFor]. Saved with the route. */
+    internal val flowId: Long = Random.nextLong(),
+) : NavKey, MigrationFlowRoute
 
-    @Composable
-    override fun Content() {
-        val navigator = LocalNavigator.currentOrThrow
-        val context = LocalContext.current
-        val adapter = rememberMigrationAdapter(contentType)
-        val viewModel = assistedMetroViewModel<EntryMigrationListViewModel, EntryMigrationListViewModel.Factory> {
-            create(
-                entryIds = entryIds,
-                adapter = adapter,
-                extraQuery = extraQuery,
-                io = Dispatchers.IO,
-            )
-        }
-        val state by viewModel.state.collectAsState()
-
-        if (state.finished) {
-            // A migrated row leaves the list as it succeeds, so by the time the flow pops there is
-            // nothing on screen that says what happened. The count is the only report the user gets,
-            // and it goes out as a toast because the screen this pops back to varies (details,
-            // library, browse, history) and none of them offers a snackbar host to reach.
-            val migratedCount = state.migratedCount
-            val migratedMessage =
-                pluralStringResource(MR.plurals.migrationFlow_migratedCount, migratedCount, migratedCount)
-            LaunchedEffect(Unit) {
-                if (migratedCount > 0) context.toast(migratedMessage)
-                // Unwind the whole flow, not one step: the screen below is a stale flow step.
-                navigator.popUntil { it !is MigrationFlowScreen }
-            }
-            return
-        }
-
-        EntryMigrationList(state = state, viewModel = viewModel)
+@Composable
+fun EntryMigrationListScreen(
+    contentType: ContentType,
+    entryIds: List<Long>,
+    extraQuery: String?,
+    flowId: Long,
+) {
+    val navigator = LocalNavigator.current
+    val context = LocalContext.current
+    val adapter = rememberMigrationAdapter(contentType)
+    val viewModel = assistedMetroViewModel<EntryMigrationListViewModel, EntryMigrationListViewModel.Factory> {
+        create(
+            entryIds = entryIds,
+            adapter = adapter,
+            extraQuery = extraQuery,
+            io = Dispatchers.IO,
+        )
     }
+    val state by viewModel.state.collectAsState()
+
+    if (state.finished) {
+        // A migrated row leaves the list as it succeeds, so by the time the flow pops there is
+        // nothing on screen that says what happened. The count is the only report the user gets,
+        // and it goes out as a toast because the screen this pops back to varies (details,
+        // library, browse, history) and none of them offers a snackbar host to reach.
+        val migratedCount = state.migratedCount
+        val migratedMessage =
+            pluralStringResource(MR.plurals.migrationFlow_migratedCount, migratedCount, migratedCount)
+        LaunchedEffect(Unit) {
+            if (migratedCount > 0) context.toast(migratedMessage)
+            // Unwind the whole flow, not one step: the screen below is a stale flow step.
+            navigator.popTo(::isOutsideMigrationFlow)
+        }
+        return
+    }
+
+    EntryMigrationList(state = state, viewModel = viewModel, flowId = flowId)
 }
 
 /**
@@ -124,19 +137,20 @@ class EntryMigrationListScreen(
 internal fun EntryMigrationList(
     state: EntryMigrationListViewModel.State,
     viewModel: EntryMigrationListViewModel,
+    flowId: Long,
 ) {
-    val navigator = LocalNavigator.currentOrThrow
-
-    // A deep pick is made on a screen pushed over this one, so it is collected on the way back.
-    LaunchedEffect(state.isLoading) {
-        if (!state.isLoading) viewModel.collectPendingPick()
-    }
+    val navigator = LocalNavigator.current
+    // One for the screen: a row's own would be cancelled as it scrolls away, and would not hold off a tap on another.
+    val opener = rememberDetailsOpener()
 
     PickOutcomeToast(state.pickOutcome, viewModel::consumePickOutcome)
 
     // Back is guarded all the way through the commit: rows are being mutated.
     val guardExit = !state.finished && state.rows.isNotEmpty()
     BackHandler(enabled = guardExit) { viewModel.showExitConfirm() }
+
+    // A deep pick is made on a screen pushed over this one, so it arrives once the rows are back.
+    MigrationPickEffect(flowId, viewModel, ready = !state.isLoading, viewModel::takePick)
 
     if (state.isLoading) {
         LoadingScreen()
@@ -152,7 +166,7 @@ internal fun EntryMigrationList(
                     if (guardExit) {
                         viewModel.showExitConfirm()
                     } else {
-                        navigator.popUntil { it !is MigrationFlowScreen }
+                        navigator.popTo(::isOutsideMigrationFlow)
                     }
                 },
                 scrollBehavior = scrollBehavior,
@@ -174,25 +188,7 @@ internal fun EntryMigrationList(
         },
         bottomBar = {
             if (state.allSearched && state.committableCount > 0 && !state.isBusy) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(MaterialTheme.padding.medium),
-                    horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
-                ) {
-                    OutlinedButton(
-                        onClick = { viewModel.showConfirm(replace = false) },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(text = "${stringResource(MR.strings.copy)} (${state.committableCount})")
-                    }
-                    Button(
-                        onClick = { viewModel.showConfirm(replace = true) },
-                        modifier = Modifier.weight(1f),
-                    ) {
-                        Text(text = "${stringResource(MR.strings.migrate)} (${state.committableCount})")
-                    }
-                }
+                MigrationCommitBar(state.committableCount, onCommit = { viewModel.showConfirm(replace = it) })
             }
         },
     ) { contentPadding ->
@@ -215,6 +211,8 @@ internal fun EntryMigrationList(
                         row = row,
                         busy = state.isBusy,
                         viewModel = viewModel,
+                        opener = opener,
+                        flowId = flowId,
                         modifier = Modifier.animateItem(),
                     )
                 }
@@ -233,7 +231,7 @@ internal fun EntryMigrationList(
             // A commit still running would otherwise be cancelled halfway by the pop, with
             // nothing said about what had already been written.
             viewModel.cancelCommit()
-            navigator.popUntil { it !is MigrationFlowScreen }
+            navigator.popTo(::isOutsideMigrationFlow)
         },
     )
 }
@@ -277,9 +275,11 @@ private fun MigrationRow(
     row: MigratingEntryRow,
     busy: Boolean,
     viewModel: EntryMigrationListViewModel,
+    opener: DetailsOpener,
+    flowId: Long,
     modifier: Modifier = Modifier,
 ) {
-    val navigator = LocalNavigator.currentOrThrow
+    val navigator = LocalNavigator.current
     // Collected inside the item so one row settling recomposes that row, not the whole list.
     val search by row.search.collectAsState()
     val commit by row.commit.collectAsState()
@@ -324,7 +324,7 @@ private fun MigrationRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clickable { target.openDetails(navigator) },
+                        modifier = Modifier.clickable { target.openDetails(opener) },
                     )
                 }
                 RowStatusLine(row = row, status = status, viewModel = viewModel)
@@ -341,7 +341,7 @@ private fun MigrationRow(
         // Gated on the rules, not on `expanded` alone: a row that can no longer take a target must
         // not keep a picker whose candidates are all dead taps.
         if (expanded && actions.canPick) {
-            OverridePicker(row = row, viewModel = viewModel)
+            OverridePicker(row = row, viewModel = viewModel, opener = opener, flowId = flowId)
         }
     }
 }
@@ -351,8 +351,10 @@ private fun MigrationRow(
 private fun OverridePicker(
     row: MigratingEntryRow,
     viewModel: EntryMigrationListViewModel,
+    opener: DetailsOpener,
+    flowId: Long,
 ) {
-    val navigator = LocalNavigator.currentOrThrow
+    val navigator = LocalNavigator.current
     val context = LocalContext.current
     val overrides by row.overrides.collectAsState()
     var query by rememberSaveable(row.entry.id.toString()) { mutableStateOf(row.entry.title) }
@@ -389,9 +391,9 @@ private fun OverridePicker(
                         showsFormat = showsFormat,
                         isCurrentSource = strip.sourceKey == row.entry.sourceKey,
                         onPick = { viewModel.pick(row.entry.id, it) },
-                        onPreview = { it.openDetails(navigator) },
+                        onPreview = { it.openDetails(opener) },
                         onBrowseSource = {
-                            if (!openDeepPicker(navigator, row.entry, strip.sourceKey, query)) {
+                            if (!openDeepPicker(navigator, row.entry, strip.sourceKey, query, flowId)) {
                                 context.toast(MR.strings.internal_error)
                             }
                         },
@@ -663,6 +665,32 @@ private fun ProgressDialog(
             }
         },
     )
+}
+
+/**
+ * Copy and Migrate for [count] entries. Padded clear of the navigation bar itself, as upstream's own
+ * action bars are: the app draws edge to edge and the host scaffold consumes only the side insets.
+ */
+@Composable
+internal fun MigrationCommitBar(
+    count: Int,
+    onCommit: (replace: Boolean) -> Unit,
+    windowInsets: WindowInsets = WindowInsets.navigationBars,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .windowInsetsPadding(windowInsets)
+            .padding(MaterialTheme.padding.medium),
+        horizontalArrangement = Arrangement.spacedBy(MaterialTheme.padding.small),
+    ) {
+        OutlinedButton(onClick = { onCommit(false) }, modifier = Modifier.weight(1f)) {
+            Text(text = "${stringResource(MR.strings.copy)} ($count)")
+        }
+        Button(onClick = { onCommit(true) }, modifier = Modifier.weight(1f)) {
+            Text(text = "${stringResource(MR.strings.migrate)} ($count)")
+        }
+    }
 }
 
 @Composable

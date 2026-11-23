@@ -1,0 +1,576 @@
+package reikai.data.local
+
+import android.net.Uri
+import androidx.test.core.app.ApplicationProvider
+import com.hippo.unifile.UniFile
+import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.matchers.should
+import io.kotest.matchers.shouldBe
+import io.kotest.matchers.types.beInstanceOf
+import io.mockk.coEvery
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.spyk
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.runTest
+import nl.adaptivity.xmlutil.serialization.XML
+import org.junit.After
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.ParameterizedRobolectricTestRunner
+import org.robolectric.Robolectric
+import reikai.data.local.ImportProblem.Reason.NoStorage
+import reikai.data.novel.NovelChapterSyncRules
+import reikai.domain.chapter.InMemoryChapterCopyMarks
+import reikai.domain.chapter.NoChapterTombstones
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.entry.EntryId
+import reikai.domain.library.ContentType
+import reikai.domain.local.InMemoryLocalFileJournal
+import reikai.domain.local.LocalGroups
+import reikai.domain.local.LocalSeriesBlockedException
+import reikai.domain.local.LocalSeriesLocks
+import reikai.domain.local.LocalVolumeOwnerRepository
+import reikai.domain.local.VolumeOwner
+import reikai.domain.novel.NovelRepository
+import reikai.domain.novel.model.Novel
+import reikai.novel.host.SourceNovel
+import reikai.novel.local.LocalNovelSource
+import reikai.presentation.browse.AddOutcome
+import reikai.presentation.browse.MangaLibraryAdder
+import reikai.presentation.novel.browse.NovelLibraryAdder
+import reikai.storage.FakeSafProvider
+import reikai.storage.FakeSafProvider.ChildListingFault
+import reikai.storage.FolderUnreadableException
+import reikai.storage.IN_FLIGHT_SUFFIX
+import tachiyomi.domain.manga.model.Manga
+import tachiyomi.domain.storage.service.StorageManager
+import java.io.File
+
+/** Copying picked files into a local source folder and adding the series, for each content type. */
+@RunWith(ParameterizedRobolectricTestRunner::class)
+class LocalImportTest(private val type: ContentType) {
+
+    private val context = ApplicationProvider.getApplicationContext<android.app.Application>()
+    private val root = File(context.cacheDir, "local-${type.name}").apply {
+        deleteRecursively()
+        mkdirs()
+    }
+
+    private var storageRoot: UniFile = UniFile.fromFile(root)!!
+    private val journal = InMemoryLocalFileJournal()
+    private var owners = emptyList<VolumeOwner>()
+
+    /** The novel series paths a row was written for. */
+    private val novelRows = mutableSetOf<String>()
+
+    /** The series path each add stored and refreshed. */
+    private val added = mutableListOf<String>()
+
+    /** Makes every store of a series throw, as a database write that fails would. */
+    private var storeFails = false
+    private val seriesLocks = LocalSeriesLocks(NoLocalVolumes).apply { open() }
+    private val organizer =
+        LocalOrganizer(context, journal, mockk(), seriesLocks, CoroutineScope(Dispatchers.Unconfined))
+
+    // Storage, the source's own parse and the database are the boundary; each add's favorite write is refused.
+    private val localImport = LocalImport(
+        context = context,
+        storageManager = mockk<StorageManager> {
+            every { getLocalSourceDirectory() } answers { storageRoot }
+            every { getLocalNovelsDirectory() } answers { storageRoot }
+        },
+        localNovels = mockk<LocalNovelSource> {
+            coEvery { parseNovel(any()) } answers {
+                check(!storeFails)
+                SourceNovel(firstArg<String>().also { added += it })
+            }
+        },
+        novelRepository = mockk<NovelRepository> {
+            // The row is written, though not handed back, so its id is read back by the series' path.
+            coEvery { insertOrGet(any()) } answers {
+                novelRows += firstArg<Novel>().url
+                null
+            }
+            coEvery { getByUrlAndSource(any(), any()) } answers {
+                Novel.create().copy(id = 7L).takeIf { firstArg<String>() in novelRows }
+            }
+        },
+        novelChapterRepository = mockk(),
+        libraryPreferences = mockk(),
+        syncRules = NovelChapterSyncRules(mockk(), InMemoryChapterCopyMarks(), NoChapterTombstones),
+        journal = journal,
+        novelAdder = mockk<NovelLibraryAdder> { coEvery { addToBatch(any(), any(), any()) } returns AddOutcome.Failed },
+        mangaAdder = mockk<MangaLibraryAdder> { coEvery { addToBatch(any(), any()) } returns AddOutcome.Failed },
+        networkToLocalManga = mockk {
+            coEvery { this@mockk.invoke(any<Manga>()) } answers {
+                check(!storeFails)
+                added += firstArg<Manga>().url
+                Manga.create().copy(id = 7L)
+            }
+        },
+        updateMangaFromRemote = mockk {
+            coEvery { this@mockk.invoke(any<Manga>(), any(), any(), any(), any()) } returns Result.success(mockk())
+        },
+        seriesLocks = seriesLocks,
+        organizer = organizer,
+        owners = object : LocalVolumeOwnerRepository {
+            override suspend fun all(type: ContentType) = owners
+        },
+        xml = XML.v1 {},
+        coverCache = mockk(),
+        novelDownloadManager = { mockk() },
+    )
+
+    @Before
+    fun setUp() {
+        Robolectric.setupContentProvider(ImportDocuments::class.java, ImportDocuments.AUTHORITY)
+        ImportDocuments.documents["1"] = ImportDocuments.Document("a.cbz", 3L, null, "abc".toByteArray())
+    }
+
+    @After
+    fun tearDown() {
+        ImportDocuments.documents.clear()
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun `a series the library refused to add is reported, not opened`() = runTest {
+        val result = localImport.import(listOf(group("Foo")), addToLibrary = true, categoryIds = emptyList())
+
+        (result.problems.map { it.reason } to result.series.single().entry) shouldBe
+            (listOf(ImportProblem.Reason.AddFailed) to null)
+    }
+
+    // Each type's details page opens by row id, so a series is stored whether or not it joins the library.
+    @Test
+    fun `a series kept out of the library has a row to open`() = runTest {
+        val result = localImport.import(listOf(group("Foo")), addToLibrary = false, categoryIds = emptyList())
+
+        result.series.single().entry shouldBe EntryId.of(type, 7L)
+    }
+
+    @Test
+    fun `a series kept out of the library whose store fails is reported, not opened`() = runTest {
+        storeFails = true
+
+        val result = localImport.import(listOf(group("Foo")), addToLibrary = false, categoryIds = emptyList())
+
+        (result.problems.map { it.reason } to result.series.single().entry) shouldBe
+            (listOf(ImportProblem.Reason.StoreFailed) to null)
+    }
+
+    @Test
+    fun `a series joins the folder a past import made under another spelling`() = runTest {
+        File(root, "Foo Bar").mkdirs()
+
+        localImport.import(
+            listOf(localImport.inspect(group("foo-bar"))),
+            addToLibrary = false,
+            categoryIds = emptyList(),
+        )
+
+        root.list()!!.toList() shouldBe listOf("Foo Bar")
+    }
+
+    /** The preview showed it joining, so a hiccup on the folder's own query must not make it a new series. */
+    @Test
+    fun `a series joins its folder though that folder's own query fails`() = runTest {
+        File(root, "Foo Bar").mkdirs()
+        val joining = localImport.inspect(group("foo-bar"))
+        storageRoot = spyk(UniFile.fromFile(root)!!) { every { findFile("Foo Bar") } returns null }
+
+        localImport.import(listOf(joining), addToLibrary = false, categoryIds = emptyList())
+
+        (root.list()!!.toList() to File(root, "Foo Bar").list()!!.size) shouldBe (listOf("Foo Bar") to 1)
+    }
+
+    @Test
+    fun `a series kept separate gets a folder of its own beside the one it matched`() = runTest {
+        File(root, "Foo Bar").mkdirs()
+        val separate = localImport.inspect(group("foo-bar")).copy(separate = true)
+
+        localImport.import(listOf(separate), addToLibrary = false, categoryIds = emptyList())
+
+        root.list()!!.sorted() shouldBe listOf("Foo Bar", "foo-bar")
+    }
+
+    /** A split-out series has no folder, only its rows; a folder at its name would be one its listing skips. */
+    @Test
+    fun `a new series never takes a name a local group's rows hold`() = runTest {
+        owners = listOf(VolumeOwner("Foo", VolumeOwner.WHOLE, "Foo"))
+
+        localImport.import(listOf(group("Foo")), addToLibrary = false, categoryIds = emptyList())
+
+        root.list()!!.toList() shouldBe listOf("Foo (2)")
+    }
+
+    /** Combined whole into another series, the folder is no series of its own: a new file joins it and lists there. */
+    @Test
+    fun `an import into a folder another series holds whole reports that series`() = runTest {
+        File(root, "Foo").mkdirs()
+        owners = listOf(VolumeOwner("Foo", VolumeOwner.WHOLE, "Bar"))
+
+        val reported = localImport.import(
+            listOf(localImport.inspect(group("Foo"))),
+            addToLibrary = false,
+            categoryIds = emptyList(),
+        ).series.single()
+
+        (reported.path to reported.title to listsUnder("Foo")) shouldBe ("Bar" to "Bar" to ("Foo" to "Bar"))
+    }
+
+    @Test
+    fun `the preview of a folder another series holds whole names that series`() = runTest {
+        File(root, "Foo").mkdirs()
+        owners = listOf(VolumeOwner("Foo", VolumeOwner.WHOLE, "Bar"))
+
+        localImport.inspect(group("Foo")).listsUnder shouldBe "Bar"
+    }
+
+    /** A manga file lands among the folder's loose chapters, which a row can lend; a novel book has no such unit. */
+    @Test
+    fun `an import into a folder whose loose chapters another series holds reports the series that lists it`() =
+        runTest {
+            File(root, "Foo").mkdirs()
+            owners = listOf(VolumeOwner("Foo", VolumeOwner.LOOSE, "Bar"))
+
+            val reported = localImport.import(
+                listOf(localImport.inspect(group("Foo"))),
+                addToLibrary = false,
+                categoryIds = emptyList(),
+            ).series.single().path
+
+            (reported to listsUnder("Foo")) shouldBe
+                (LOOSE_HOLDER.getValue(type) to ("Foo" to LOOSE_HOLDER.getValue(type)))
+        }
+
+    /** A Combine can lend the folder after the preview showed it joining, and the import goes with it. */
+    @Test
+    fun `an import reports the series a combine gave the folder to after its preview`() = runTest {
+        File(root, "Foo").mkdirs()
+        val joining = localImport.inspect(group("Foo"))
+        owners = listOf(VolumeOwner("Foo", VolumeOwner.WHOLE, "Bar"))
+
+        val result = localImport.import(listOf(joining), addToLibrary = false, categoryIds = emptyList())
+
+        (result.series.single().path to listsUnder("Foo")) shouldBe ("Bar" to ("Foo" to "Bar"))
+    }
+
+    @Test
+    fun `an import into a held folder adds the series that lists the file`() = runTest {
+        File(root, "Foo").mkdirs()
+        owners = listOf(VolumeOwner("Foo", VolumeOwner.WHOLE, "Bar"))
+
+        localImport.import(listOf(localImport.inspect(group("Foo"))), addToLibrary = true, categoryIds = emptyList())
+
+        added shouldBe listOf("Bar")
+    }
+
+    @Test
+    fun `a new series names its files as Rename files would`() = runTest {
+        localImport.import(listOf(group("Foo")), addToLibrary = false, categoryIds = emptyList())
+
+        File(root, "Foo").list()!!.toList() shouldBe listOf(NEW_NAME.getValue(type))
+    }
+
+    @Test
+    fun `a file the series already holds is skipped when asked`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+        val skipping = localImport.inspect(group("Foo")).copy(onDuplicate = DuplicateChoice.Skip)
+
+        localImport.import(listOf(skipping), addToLibrary = false, categoryIds = emptyList())
+
+        File(root, "Foo").list()!!.toList() shouldBe listOf("old")
+    }
+
+    @Test
+    fun `a series whose every file was skipped is not reported as imported`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+        val skipping = localImport.inspect(group("Foo")).copy(onDuplicate = DuplicateChoice.Skip)
+
+        val result = localImport.import(listOf(skipping), addToLibrary = false, categoryIds = emptyList())
+
+        result.series shouldBe emptyList()
+    }
+
+    @Test
+    fun `a replaced file keeps its name and takes the new contents`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+        val replacing = localImport.inspect(group("Foo")).copy(onDuplicate = DuplicateChoice.Replace)
+
+        localImport.import(listOf(replacing), addToLibrary = false, categoryIds = emptyList())
+
+        (File(root, "Foo").list()!!.toList() to File(root, "Foo/old").readText()) shouldBe (listOf("old") to "abc")
+    }
+
+    /** The old book stepped aside and could not take its name back, so only the next start's replay can mend it. */
+    @Test
+    fun `a replace that strands the old book aside leaves its row for the replay to finish`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+        val replacing = localImport.inspect(group("Foo")).copy(onDuplicate = DuplicateChoice.Replace)
+        FakeSafProvider.onCall = { call, target -> if (call == "renameDocument" && target.name == "old") error("no") }
+
+        localImport.import(listOf(replacing), addToLibrary = false, categoryIds = emptyList())
+        FakeSafProvider.onCall = null
+        val locks = LocalSeriesLocks(NoLocalVolumes)
+        val organizer = LocalOrganizer(context, journal, mockk(), locks, CoroutineScope(Dispatchers.Unconfined))
+        LocalFileJournalReplay(context, journal, locks, organizer).replay()
+
+        (File(root, "Foo").list()!!.toList() to File(root, "Foo/old").readText()) shouldBe (listOf("old") to "abc")
+    }
+
+    /** An Organize would rename the folder under the row, which names the folder's document and so never finds it. */
+    @Test
+    fun `a replace that strands the old book aside refuses the series until it is mended`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+        val replacing = localImport.inspect(group("Foo")).copy(onDuplicate = DuplicateChoice.Replace)
+        FakeSafProvider.onCall = { call, target -> if (call == "renameDocument" && target.name == "old") error("no") }
+
+        localImport.import(listOf(replacing), addToLibrary = false, categoryIds = emptyList())
+        FakeSafProvider.onCall = null
+
+        runCatching { seriesLocks.withSeries(type, "Foo") {} }.exceptionOrNull() should
+            beInstanceOf<LocalSeriesBlockedException>()
+    }
+
+    /** The user's way out when no retry can mend the row: the files stay as the failed Replace left them. */
+    @Test
+    fun `forgetting a stranded replace lets the series be held again and moves no file`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+        val replacing = localImport.inspect(group("Foo")).copy(onDuplicate = DuplicateChoice.Replace)
+        FakeSafProvider.onCall = { call, target -> if (call == "renameDocument" && target.name == "old") error("no") }
+        localImport.import(listOf(replacing), addToLibrary = false, categoryIds = emptyList())
+        val stranded = File(root, "Foo").list()!!.sorted()
+
+        organizer.forget(type, listOf("Foo"))
+        FakeSafProvider.onCall = null
+
+        Triple(
+            runCatching {
+                seriesLocks.withSeries(type, "Foo") {}
+            }.isSuccess,
+            journal.all(),
+            File(root, "Foo").list()!!.sorted(),
+        )
+            .shouldBe(Triple(true, emptyList(), stranded))
+    }
+
+    /** A kill mid-copy must not leave a cut-off book under a name the series lists. */
+    @Test
+    fun `a new file is written under an in-flight name and named only once whole`() = runTest {
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+        val opened = mutableListOf<String>()
+        FakeSafProvider.onCall = { call, target -> if (call == "openDocument") opened += target.name }
+
+        localImport.import(listOf(group("Foo")), addToLibrary = false, categoryIds = emptyList())
+        FakeSafProvider.onCall = null
+
+        (opened to File(root, "Foo").list()!!.toList()) shouldBe
+            (listOf(NEW_NAME.getValue(type) + IN_FLIGHT_SUFFIX) to listOf(NEW_NAME.getValue(type)))
+    }
+
+    /** No listing reads an in-flight name, so nothing else would ever clear one a killed copy left. */
+    @Test
+    fun `a new file clears the in-flight copy a killed import left under its name`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/" + NEW_NAME.getValue(type) + IN_FLIGHT_SUFFIX).writeText("cut")
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+
+        localImport.import(listOf(localImport.inspect(group("Foo"))), addToLibrary = false, categoryIds = emptyList())
+
+        File(root, "Foo").list()!!.toList() shouldBe listOf(NEW_NAME.getValue(type))
+    }
+
+    /** A replacing copy killed mid-write is no journal row yet, so only its next write can clear what it left. */
+    @Test
+    fun `a replacing file clears the in-flight copy a killed replace left under its name`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+        File(root, "Foo/old$IN_FLIGHT_SUFFIX").writeText("cut")
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+        val replacing = localImport.inspect(group("Foo")).copy(onDuplicate = DuplicateChoice.Replace)
+
+        localImport.import(listOf(replacing), addToLibrary = false, categoryIds = emptyList())
+
+        (File(root, "Foo").list()!!.toList() to File(root, "Foo/old").readText()) shouldBe (listOf("old") to "abc")
+    }
+
+    @Test
+    fun `a file kept beside its duplicate is copied too`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+
+        localImport.import(listOf(localImport.inspect(group("Foo"))), addToLibrary = false, categoryIds = emptyList())
+
+        File(root, "Foo").list()!!.size shouldBe 2
+    }
+
+    @Test
+    fun `a newer copy the user chose to replace takes the old book's name and place`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/Old.cbz").writeText("old version")
+        val group = localImport.inspect(group("Foo")).copy(
+            newerCopies = mapOf(ImportDocuments.uri("1") to "Old.cbz"),
+            onNewerCopy = DuplicateChoice.Replace,
+        )
+
+        localImport.import(listOf(group), addToLibrary = false, categoryIds = emptyList())
+
+        (File(root, "Foo").list()!!.toList() to File(root, "Foo/Old.cbz").readText()) shouldBe
+            (listOf("Old.cbz") to "abc")
+    }
+
+    @Test
+    fun `a series folder on picked storage that cannot be listed whole takes no file`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/Old.cbz").writeText("old version")
+        // No provider answers this picked folder's count, so its listing cannot be told whole.
+        val picked = spyk(UniFile.fromFile(File(root, "Foo"))!!) {
+            every { uri } returns Uri.parse("$PICKED/document/primary%3AManga%2FFoo")
+        }
+        storageRoot = spyk(UniFile.fromFile(root)!!) { every { listFiles() } returns arrayOf(picked) }
+
+        localImport.import(listOf(group("Foo").copy(existing = "Foo")), addToLibrary = false, categoryIds = emptyList())
+
+        File(root, "Foo").list()!!.toList() shouldBe listOf("Old.cbz")
+    }
+
+    /** A short listing of the root hides the folder the title matches, and the preview would show a new series. */
+    @Test
+    fun `a preview over a root that cannot be listed whole reports the series as a storage problem`() = runTest {
+        File(root, "Foo").mkdirs()
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+        FakeSafProvider.faultedFolder = root
+        FakeSafProvider.childListingFaults += ChildListingFault.Short(0)
+
+        val (groups, problems) = localImport.inspectAll(listOf(group("Foo")))
+
+        (groups to problems) shouldBe (emptyList<ImportGroup>() to listOf(ImportProblem("Foo", NoStorage)))
+    }
+
+    /** A short listing of the folder it joins hides the copies it already holds, which the preview asks about. */
+    @Test
+    fun `a preview over a joined folder that cannot be listed whole reports a storage problem`() = runTest {
+        File(root, "Foo").mkdirs()
+        File(root, "Foo/old").writeText("xyz")
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+        FakeSafProvider.faultedFolder = File(root, "Foo")
+        FakeSafProvider.childListingFaults += ChildListingFault.Short(0)
+
+        val (groups, problems) = localImport.inspectAll(listOf(group("Foo")))
+
+        (groups to problems) shouldBe (emptyList<ImportGroup>() to listOf(ImportProblem("Foo", NoStorage)))
+    }
+
+    /** A series the user picked is found in the root's listing too, so a short one cannot read as no such series. */
+    @Test
+    fun `a series picked to join is looked up in a listing trusted whole`() = runTest {
+        File(root, "Foo").mkdirs()
+        FakeSafProvider.install(context, context.cacheDir)
+        storageRoot = FakeSafProvider.picked(context, root)
+        FakeSafProvider.faultedFolder = root
+        FakeSafProvider.childListingFaults += ChildListingFault.Short(0)
+
+        shouldThrow<FolderUnreadableException> { localImport.inspect(group("Other"), target = "Foo") }
+    }
+
+    @Test
+    fun `an import waits on the user while a newer copy is unanswered`() {
+        group("Foo").copy(existing = "Foo", newerCopies = mapOf(ImportDocuments.uri("1") to "Old.cbz"))
+            .asksAboutNewerCopies shouldBe true
+    }
+
+    @Test
+    fun `a comic's series is read from its ComicInfo with its entities decoded, as the local source reads it`() {
+        val comicInfo = """<?xml version="1.0"?><ComicInfo><Series>Fish &amp; Chips</Series></ComicInfo>"""
+
+        localImport.comicInfo(comicInfo.toByteArray())?.series?.value shouldBe "Fish & Chips"
+    }
+
+    @Test
+    fun `an import goes ahead once the user has answered about a newer copy`() {
+        group("Foo").copy(
+            existing = "Foo",
+            newerCopies = mapOf(ImportDocuments.uri("1") to "Old.cbz"),
+            onNewerCopy = DuplicateChoice.Replace,
+        ).asksAboutNewerCopies shouldBe false
+    }
+
+    @Test
+    fun `a series made separate does not wait on a newer copy in the folder it no longer joins`() {
+        group("Foo").copy(existing = "Foo", separate = true, newerCopies = mapOf(ImportDocuments.uri("1") to "Old.cbz"))
+            .asksAboutNewerCopies shouldBe false
+    }
+
+    @Test
+    fun `a file that arrives shorter than its size fails its copy`() = runTest {
+        ImportDocuments.documents["1"] = ImportDocuments.Document("a.cbz", 3L, null, "ab".toByteArray())
+
+        localImport.import(listOf(group("Foo")), addToLibrary = false, categoryIds = emptyList())
+            .problems.map { it.reason } shouldBe listOf(ImportProblem.Reason.CopyFailed)
+    }
+
+    @Test
+    fun `a loose book picked to join is never deleted`() = runTest {
+        File(root, "Book.epub").writeText("book")
+
+        localImport.import(
+            listOf(localImport.inspect(group("Other"), target = "Book.epub")),
+            addToLibrary = false,
+            categoryIds = emptyList(),
+        )
+
+        File(root, "Book.epub").readText() shouldBe "book"
+    }
+
+    /** The folder holding the one file in [folder], paired with the series its local source lists that file under. */
+    private fun listsUnder(folder: String): Pair<String, String> {
+        val file = File(root, folder).list()!!.single()
+        val volume = mapOf(ContentType.MANGA to VolumeOwner.LOOSE)[type] ?: file
+        return folder to LocalGroups(owners).ownerOf(folder, volume)
+    }
+
+    private fun group(title: String) = ImportGroup(
+        key = "$type:$title",
+        type = type,
+        title = title,
+        author = null,
+        cover = null,
+        files = listOf(ImportFile(ImportDocuments.uri("1"), "a.cbz", 3L)),
+        canBeEitherType = false,
+    )
+
+    companion object {
+        private const val PICKED = "content://com.android.externalstorage.documents/tree/primary%3AManga"
+
+        // A book takes the series and its volume; a comic keeps its own name, which names its chapter.
+        // A novel book is no loose chapter, so a loose row lends it nothing.
+        private val LOOSE_HOLDER = mapOf(ContentType.MANGA to "Bar", ContentType.NOVELS to "Foo")
+
+        private val NEW_NAME = mapOf(ContentType.MANGA to "a.cbz", ContentType.NOVELS to "Foo - Vol. 1.epub")
+
+        @JvmStatic
+        @ParameterizedRobolectricTestRunner.Parameters(name = "{0}")
+        fun types() = listOf(ContentType.MANGA, ContentType.NOVELS)
+    }
+}

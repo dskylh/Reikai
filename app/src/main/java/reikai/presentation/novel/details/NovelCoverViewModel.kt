@@ -5,15 +5,17 @@ import dev.zacsweers.metro.AssistedFactory
 import dev.zacsweers.metro.AssistedInject
 import eu.kanade.tachiyomi.data.cache.CoverCache
 import eu.kanade.tachiyomi.data.saver.ImageSaver
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import mihon.core.metro.AppCoroutineScope
 import reikai.domain.entry.ClearCustomCover
 import reikai.domain.entry.EntryId
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.interactor.GetCustomNovelInfo
-import reikai.domain.novel.interactor.UpdateNovel
+import reikai.domain.novel.interactor.SetNovelCustomCover
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.asNovelCover
 import reikai.domain.novel.model.hasCustomCover
@@ -32,11 +34,12 @@ class NovelCoverViewModel(
     @Assisted private val novelSource: String,
     private val novelRepo: NovelRepository,
     private val getCustomNovelInfo: GetCustomNovelInfo,
-    private val updateNovel: UpdateNovel,
     private val coverCache: CoverCache,
     private val clearCustomCover: ClearCustomCover,
+    private val setNovelCustomCover: SetNovelCustomCover,
     imageSaver: ImageSaver,
-) : EntryCoverViewModel<Novel>(imageSaver) {
+    @AppCoroutineScope appScope: CoroutineScope,
+) : EntryCoverViewModel<Novel>(imageSaver, appScope) {
 
     @AssistedFactory
     fun interface Factory {
@@ -54,15 +57,14 @@ class NovelCoverViewModel(
 
     override fun coverName(entry: Novel): String = entry.title
 
-    // Novels have no local source, so only the library keeps a custom cover.
-    override fun canEditCover(entry: Novel): Boolean = entry.favorite
+    override fun canEditCover(entry: Novel): Boolean = SetNovelCustomCover.canSet(entry)
 
     override fun hasCustomCover(): Boolean = entry.value?.hasCustomCover(coverCache) ?: false
 
-    override suspend fun persistCustomCover(entry: Novel, stream: InputStream) {
-        coverCache.setCustomCoverToCache(EntryId.Novel(entry.id), stream)
-        updateNovel.awaitUpdateCoverLastModified(entry.id)
-    }
+    override suspend fun persistCustomCover(entry: Novel, stream: InputStream) = setNovelCustomCover.await(
+        entry,
+        stream,
+    )
 
     override suspend fun removeCustomCover(entry: Novel) {
         clearCustomCover.await(EntryId.Novel(entry.id))

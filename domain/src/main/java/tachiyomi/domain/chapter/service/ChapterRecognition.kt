@@ -47,7 +47,8 @@ object ChapterRecognition {
      * A volume or season, the short forms only right before the number since "s" also ends words.
      * Example: Mokushiroku Alice Vol.1 Ch. 4: Misrepresentation -R> 1, The Gamer S3 - Chapter 20 -R> 3
      */
-    private val volume = Regex("""\b(?:(?:vol(?:ume)?|season)[^a-z0-9]? *|[vs]\.?)([0-9]+(?:\.[0-9]+)?)\b""")
+    // RK: internal, read by reikai.domain.chapter.chapterCopySets
+    internal val volume = Regex("""\b(?:(?:vol(?:ume)?|season)[^a-z0-9]? *|[vs]\.?)([0-9]+(?:\.[0-9]+)?)\b""")
 
     /**
      * Example: Chapter 1.5 Part II -R> b
@@ -65,7 +66,8 @@ object ChapterRecognition {
      * A number after this is the chapter number, even when every similar name has the same one.
      * Example: Oshi no Ko Chapter 5 Part 1 -R> 5a
      */
-    private val chapterPrefix = Regex("""(?:\b(?:ch|chap|chapter|ep|episode)\.? *|#)$""")
+    // RK: internal, read by reikai.domain.chapter.chapterCopySets
+    internal val chapterPrefix = Regex("""(?:\b(?:ch|chap|chapter|ep|episode)\.? *|#)$""")
 
     /**
      * Example: Bonus Chapter: Beach Episode
@@ -165,8 +167,11 @@ object ChapterRecognition {
         val sharedNumbers = MutableList(names.size) { emptyList<IntRange>() }
         names.indices
             .filterNot { chapters[it].chapterNumber.isKnown() }
-            // Grouped by all but their numbers, so that the nth number of each name means the same thing
-            .groupBy { names[it].replace(anyNumber, "#") }
+            // RK --> mihonapp/mihon#4107 (open upstream)
+            // Grouped by the text around their numbers, so that the nth number of each name means the same thing.
+            // Split rather than replaced, as a name holding the replacement would join names with more numbers
+            .groupBy { anyNumber.split(names[it]) }
+            // RK <--
             .values
             // Fewer names could share a number by chance
             .filter { it.size >= 3 }

@@ -12,25 +12,45 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.test.runTest
 import mihon.domain.migration.models.MigrationFlag
 import mihon.domain.migration.usecases.MigrateMangaUseCase
 import mihon.domain.source.interactor.UpdateMangaFromRemote
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.MethodSource
+import reikai.data.novel.NovelChapterSyncRules
+import reikai.domain.category.GetNovelCategories
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstones
 import reikai.domain.db.Transactions
+import reikai.domain.entry.CarryCustomInfo
+import reikai.domain.entry.CoverColors
+import reikai.domain.entry.EntryCustomInfo
 import reikai.domain.entry.EntryId
+import reikai.domain.entry.GetEntryCustomInfo
+import reikai.domain.entry.signedKey
 import reikai.domain.library.ContentType
+import reikai.domain.library.FakeLibraryHiddenRepository
+import reikai.domain.library.HideSeries
+import reikai.domain.manga.MangaGroupCategories
 import reikai.domain.manga.MangaMergeManager
 import reikai.domain.novel.NovelChapterRepository
+import reikai.domain.novel.NovelGroupCategories
 import reikai.domain.novel.NovelHistoryRepository
 import reikai.domain.novel.NovelMergeManager
 import reikai.domain.novel.NovelRepository
+import reikai.domain.novel.interactor.GetCustomNovelInfo
 import reikai.domain.novel.interactor.GetNovelTracks
 import reikai.domain.novel.interactor.MigrateNovelUseCase
+import reikai.domain.novel.interactor.SetCustomNovelInfo
 import reikai.domain.novel.interactor.UpdateNovel
 import reikai.domain.novel.interactor.UpsertNovelTrack
+import reikai.domain.novel.model.CustomNovelInfo
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.novel.model.NovelHistory
@@ -38,29 +58,36 @@ import reikai.domain.novel.model.NovelHistoryUpdate
 import reikai.domain.novel.model.NovelMigrationFlag
 import reikai.domain.novel.model.NovelTrack
 import reikai.domain.novel.model.NovelUpdate
+import reikai.domain.novel.repository.CustomNovelInfoRepository
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import reikai.domain.readinglog.ReadingLogRepository
 import reikai.domain.track.source.SourceTrackerDispatcher
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
+import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.chapter.interactor.GetChaptersByMangaId
 import tachiyomi.domain.chapter.model.Chapter
 import tachiyomi.domain.chapter.model.ChapterUpdate
 import tachiyomi.domain.chapter.repository.ChapterRepository
 import tachiyomi.domain.history.interactor.GetHistory
-import tachiyomi.domain.history.interactor.UpsertHistory
 import tachiyomi.domain.history.model.History
 import tachiyomi.domain.history.model.HistoryUpdate
+import tachiyomi.domain.history.repository.HistoryRepository
 import tachiyomi.domain.library.service.LibraryPreferences
+import tachiyomi.domain.manga.interactor.GetCustomMangaInfo
+import tachiyomi.domain.manga.interactor.SetCustomMangaInfo
+import tachiyomi.domain.manga.model.CustomMangaInfo
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.manga.model.MangaUpdate
+import tachiyomi.domain.manga.repository.CustomMangaInfoRepository
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.track.interactor.GetTracks
-import tachiyomi.domain.track.interactor.UpsertTrack
 import tachiyomi.domain.track.model.Track
+import tachiyomi.domain.track.repository.TrackRepository
 import java.io.File
 import java.io.InputStream
 import java.nio.file.Files
@@ -234,6 +261,14 @@ class MigrateEngineConformanceTest {
 
         (outcome.writeOrder to outcome.transactionsCompleted) shouldBe
             (listOf("replace $SOURCE->$TARGET in tx", "swap in tx") to 1)
+    }
+
+    // A write that catches its own failure still rolls the transaction back, which plain run() does in silence.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("engines")
+    fun `a migration whose transaction rolled back in silence fails the row`(engine: MigrateEngine) = runTest {
+        engine.migrate(Setup(group = longArrayOf(SOURCE, 7L), rollsBackSilently = true), replace = true).error
+            .shouldBeInstanceOf<IllegalStateException>()
     }
 
     @ParameterizedTest(name = "{0}")
@@ -466,6 +501,29 @@ class MigrateEngineConformanceTest {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("engines")
+    fun `a failed tracker carry fails the row before the library changes`(engine: MigrateEngine) = runTest {
+        val outcome = engine.migrate(Setup(sourceTrackId = 5L, trackWriteFails = true), replace = true)
+
+        ((outcome.error != null) to outcome.swap) shouldBe (true to null)
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("engines")
+    fun `a failed history carry fails the row before the library changes`(engine: MigrateEngine) = runTest {
+        val setup = Setup(
+            sourceChapters = listOf(Ch(1, 1.0, read = true)),
+            targetChapters = listOf(Ch(10, 1.0)),
+            history = listOf(Hist(1, readAt = 500, duration = 60)),
+            historyWriteFails = true,
+        )
+
+        val outcome = engine.migrate(setup, replace = true, flags = setOf(Flag.CHAPTER))
+
+        ((outcome.error != null) to outcome.swap) shouldBe (true to null)
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("engines")
     fun `a committed migration is passed to the source tracker`(engine: MigrateEngine) = runTest {
         engine.migrate(Setup(), replace = true, flags = setOf(Flag.CHAPTER)).sourceTrackerCalls shouldBe
             listOf("$SOURCE->$TARGET replace=true chapters=true")
@@ -477,10 +535,72 @@ class MigrateEngineConformanceTest {
         engine.migrate(Setup(swapFails = true), replace = true).sourceTrackerCalls shouldBe emptyList()
     }
 
+    // Cover colours
+
+    /** No cover load follows a replace for the old entry, so the swap's own follow-up moves its colour. */
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("engines")
+    fun `a replace leaves the old entry's cover colour evictable`(engine: MigrateEngine) = runTest {
+        val key = engine.entryId(SOURCE).signedKey()
+        CoverColors.put(key, COLOR, inLibrary = true)
+
+        engine.migrate(Setup(), replace = true)
+        (1L..CoverColors.CAP).forEach { CoverColors.put(BROWSE_BASE + it, COLOR, inLibrary = false) }
+
+        CoverColors[key] shouldBe null
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("engines")
+    fun `a migration target keeps its cover colour past the browse cap`(engine: MigrateEngine) = runTest {
+        val key = engine.entryId(TARGET).signedKey()
+        CoverColors.put(key, COLOR, inLibrary = false)
+
+        engine.migrate(Setup(), replace = true)
+        (1L..CoverColors.CAP).forEach { CoverColors.put(BROWSE_BASE + it, COLOR, inLibrary = false) }
+
+        CoverColors[key] shouldBe COLOR
+    }
+
+    @AfterEach
+    fun clearColors() {
+        CoverColors.clear()
+    }
+
+    // Custom info
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("engines")
+    fun `the custom info option carries the Edit info title and alternative titles`(engine: MigrateEngine) = runTest {
+        val setup = Setup(sourceCustomInfo = "Mine" to listOf("Alt A", "Alt, B"))
+        val target = engine.migrate(setup, replace = true, flags = setOf(Flag.CUSTOM_INFO)).targetCustomInfo
+
+        (target?.title to target?.altTitles) shouldBe ("Mine" to listOf("Alt A", "Alt, B"))
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("engines")
+    fun `without the custom info option the target gets no row`(engine: MigrateEngine) = runTest {
+        val setup = Setup(sourceCustomInfo = "Mine" to listOf("Alt A"))
+
+        engine.migrate(setup, replace = true).targetCustomInfo shouldBe null
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("engines")
+    fun `a source with no custom info leaves the target's own row`(engine: MigrateEngine) = runTest {
+        val setup = Setup(targetCustomTitle = "Target's")
+        val target = engine.migrate(setup, replace = false, flags = setOf(Flag.CUSTOM_INFO)).targetCustomInfo
+
+        target?.title shouldBe "Target's"
+    }
+
     companion object {
         const val SOURCE = 1L
         const val TARGET = 2L
         const val SOURCE_ADDED = 1234L
+        const val COLOR = 0x123456
+        const val BROWSE_BASE = 10_000L
 
         @JvmStatic
         fun engines() = listOf(MangaEngine(), NovelEngine())
@@ -488,7 +608,7 @@ class MigrateEngineConformanceTest {
 }
 
 /** The migration flags both engines take, named once; each engine maps them onto its own enum. */
-enum class Flag { CHAPTER, CATEGORY, COVER, NOTES, REMOVE_DOWNLOAD }
+enum class Flag { CHAPTER, CATEGORY, COVER, NOTES, REMOVE_DOWNLOAD, CUSTOM_INFO }
 
 /** A chapter in neither type's model: [position] is manga's page or a novel's text offset. */
 data class Ch(
@@ -515,6 +635,10 @@ data class Setup(
     /** Each entry's stored categories. */
     val categories: Map<Long, List<Long>> = emptyMap(),
     val customCover: String? = null,
+    /** The source's Edit info row: its title and alternative titles; null for no row. */
+    val sourceCustomInfo: Pair<String, List<String>>? = null,
+    /** The target's own row before the migration. */
+    val targetCustomTitle: String? = null,
     val notes: String = "",
     val chapterFlags: Long = 0,
     val viewerFlags: Long = 0,
@@ -523,7 +647,11 @@ data class Setup(
     /** The source entry's extension is uninstalled; the novel engine asks only for the target's plugin. */
     val sourceUninstalled: Boolean = false,
     val carryWriteFails: Boolean = false,
+    val trackWriteFails: Boolean = false,
+    val historyWriteFails: Boolean = false,
     val swapFails: Boolean = false,
+    /** A write inside the migration's transaction swallows its own failure, which rolls the whole of it back. */
+    val rollsBackSilently: Boolean = false,
 )
 
 /** The manga source id no installed extension answers for, used by [Setup.sourceUninstalled]. */
@@ -583,6 +711,8 @@ class Outcome(
     val categoryWrites: Map<Long, List<Long>>,
     /** The reading-log moves asked for, source chapter id to target chapter id. */
     val sessionMoves: Map<Long, Long>,
+    /** The target's Edit info row after the migration. */
+    val targetCustomInfo: EntryCustomInfo?,
 ) {
     val targetSwap: Swap? get() = swap?.singleOrNull { it.favorite == true }
 
@@ -615,6 +745,7 @@ private class Recorder : Transactions {
         }
     }
     private val history = mutableMapOf<Long, Hist>()
+    val customInfo = CustomInfoStore()
     val coverDir: File = Files.createTempDirectory("migrate-covers").toFile().apply { deleteOnExit() }
 
     override suspend fun <T> run(block: suspend () -> T): T {
@@ -626,6 +757,12 @@ private class Recorder : Transactions {
             inside = false
         }
     }
+
+    // The real store throws here when the transaction rolled back though its block returned; run() does not.
+    var rollsBackSilently = false
+
+    override suspend fun <T> runThrowingOnRollback(block: suspend () -> T): T =
+        run(block).also { if (rollsBackSilently) throw IllegalStateException("rolled back") }
 
     fun group(write: String) {
         groupWrites += write
@@ -672,6 +809,7 @@ private class Recorder : Transactions {
         targetHistory = historyOf(targetChapters.map { it.id }).sortedBy { it.chapterId },
         categoryWrites = categoryWrites,
         sessionMoves = sessionMoves,
+        targetCustomInfo = customInfo.of(MigrateEngineConformanceTest.TARGET),
     )
 }
 
@@ -683,10 +821,14 @@ interface MigrateEngine {
         skipTargetRefresh: Boolean = true,
         targetId: Long = MigrateEngineConformanceTest.TARGET,
     ): Outcome
+
+    fun entryId(id: Long): EntryId
 }
 
 class MangaEngine : MigrateEngine {
     override fun toString() = "manga"
+
+    override fun entryId(id: Long) = EntryId.Manga(id)
 
     override suspend fun migrate(
         setup: Setup,
@@ -697,7 +839,9 @@ class MangaEngine : MigrateEngine {
     ): Outcome {
         val rec = Recorder().apply {
             seedCover(setup)
+            customInfo.seed(setup, manga = true)
             seedHistory(setup)
+            rollsBackSilently = setup.rollsBackSilently
         }
         val chapters = (
             setup.sourceChapters.map { it.toChapter(MigrateEngineConformanceTest.SOURCE) } +
@@ -765,9 +909,11 @@ class MangaEngine : MigrateEngine {
         }
         val track = setup.sourceTrackId?.let { mangaTrack(it) }
         val getTracks = mockk<GetTracks> { coEvery { await(any<Long>()) } answers { listOfNotNull(track) } }
-        val upsertTrack = mockk<UpsertTrack> {
-            coEvery { awaitAll(any()) } answers
-                { firstArg<List<Track>>().forEach { rec.tracksWritten += it.id to it.mangaId } }
+        val trackRepository = mockk<TrackRepository> {
+            coEvery { upsertAll(any()) } answers {
+                if (setup.trackWriteFails) throw Injected()
+                firstArg<List<Track>>().forEach { rec.tracksWritten += it.id to it.mangaId }
+            }
         }
         // Reached only when a case lets the refresh run, which is the case that breaks it. Stubbed
         // outside a mockk block, where a bare invoke binds to the matcher scope.
@@ -786,11 +932,16 @@ class MangaEngine : MigrateEngine {
                 }
             }
         }
-        val upsertHistory = mockk<UpsertHistory> {
-            coEvery { await(any()) } answers {
-                val u = firstArg<HistoryUpdate>()
-                rec.upsertHistory(u.chapterId, u.readAt.toEpochMilliseconds(), u.sessionReadDuration)
+        val historyRepository = mockk<HistoryRepository> {
+            coEvery { upsertAllHistory(any()) } answers {
+                if (setup.historyWriteFails) throw Injected()
+                firstArg<List<HistoryUpdate>>().forEach { u ->
+                    rec.upsertHistory(u.chapterId, u.readAt.toEpochMilliseconds(), u.sessionReadDuration)
+                }
             }
+        }
+        val getCategories = mockk<GetCategories> {
+            coEvery { await(any<Long>()) } answers { setup.categories[firstArg()].orEmpty().map(::category) }
         }
         val useCase = MigrateMangaUseCase(
             // Unconfined runs the detached download delete inline, so the outcome already shows it
@@ -802,23 +953,31 @@ class MangaEngine : MigrateEngine {
             updateManga = updateManga,
             getChaptersByMangaId = getChapters,
             updateChapter = mockk(relaxed = true),
-            getCategories = mockk {
-                coEvery { await(any<Long>()) } answers { setup.categories[firstArg()].orEmpty().map(::category) }
-            },
-            setMangaCategories = mockk {
-                coEvery { await(any(), any()) } answers { rec.categoryWrites[firstArg()] = secondArg() }
-            },
+            getCategories = getCategories,
             getTracks = getTracks,
-            upsertTrack = upsertTrack,
+            trackRepository = trackRepository,
             coverCache = coverCache,
             updateMangaFromRemote = updateFromRemote,
             mangaMergeManager = merge,
             chapterRepository = chapterRepository,
             transactions = rec,
-            sourceTracker = sourceTracker,
+            swapEffects = MigrationSwapEffects(
+                mangaCategories = MangaGroupCategories(
+                    getCategories,
+                    mockk {
+                        coEvery { await(any(), any()) } answers { rec.categoryWrites[firstArg()] = secondArg() }
+                    },
+                ),
+                novelCategories = mockk(),
+                mangaMerge = merge,
+                novelMerge = mockk(),
+                sourceTracker = sourceTracker,
+            ),
             getHistory = getHistory,
-            upsertHistory = upsertHistory,
+            historyRepository = historyRepository,
             readingLog = rec.readingLog,
+            hideSeries = HideSeries(FakeLibraryHiddenRepository(), mockk(relaxed = true), mockk(relaxed = true)),
+            carryCustomInfo = rec.customInfo.carry,
         )
         val current = Manga.create().copy(
             id = MigrateEngineConformanceTest.SOURCE,
@@ -837,6 +996,7 @@ class MangaEngine : MigrateEngine {
                 Flag.COVER -> MigrationFlag.CUSTOM_COVER
                 Flag.NOTES -> MigrationFlag.NOTES
                 Flag.REMOVE_DOWNLOAD -> MigrationFlag.REMOVE_DOWNLOAD
+                Flag.CUSTOM_INFO -> MigrationFlag.CUSTOM_INFO
             }
         }.toSet()
         val error = runCatching { useCase(current, target, replace, mangaFlags, skipTargetRefresh) }.exceptionOrNull()
@@ -880,6 +1040,8 @@ class MangaEngine : MigrateEngine {
 class NovelEngine : MigrateEngine {
     override fun toString() = "novel"
 
+    override fun entryId(id: Long) = EntryId.Novel(id)
+
     override suspend fun migrate(
         setup: Setup,
         replace: Boolean,
@@ -889,7 +1051,9 @@ class NovelEngine : MigrateEngine {
     ): Outcome {
         val rec = Recorder().apply {
             seedCover(setup)
+            customInfo.seed(setup, manga = false)
             seedHistory(setup)
+            rollsBackSilently = setup.rollsBackSilently
         }
         val chapters = (
             setup.sourceChapters.map { it.toChapter(MigrateEngineConformanceTest.SOURCE) } +
@@ -958,6 +1122,7 @@ class NovelEngine : MigrateEngine {
         val upsertTrack = mockk<UpsertNovelTrack> {
             coEvery { awaitAll(any()) } answers {
                 firstArg<List<NovelTrack>>().forEach { rec.tracksWritten += it.id to it.novelId }
+                !setup.trackWriteFails
             }
         }
         val sourceTracker = mockk<SourceTrackerDispatcher> {
@@ -972,19 +1137,23 @@ class NovelEngine : MigrateEngine {
                     NovelHistory(it.chapterId, Instant.fromEpochMilliseconds(it.readAt), it.duration)
                 }
             }
-            coEvery { upsertNovelHistory(any()) } answers {
-                val u = firstArg<NovelHistoryUpdate>()
-                rec.upsertHistory(u.chapterId, u.readAt.toEpochMilliseconds(), u.sessionReadDuration)
+            coEvery { upsertAllNovelHistory(any()) } answers {
+                if (setup.historyWriteFails) {
+                    false
+                } else {
+                    firstArg<List<NovelHistoryUpdate>>().forEach { u ->
+                        rec.upsertHistory(u.chapterId, u.readAt.toEpochMilliseconds(), u.sessionReadDuration)
+                    }
+                    true
+                }
             }
+        }
+        val getCategories = mockk<GetNovelCategories> {
+            coEvery { awaitByNovelId(any()) } answers { setup.categories[firstArg()].orEmpty().map(::category) }
         }
         val useCase = MigrateNovelUseCase(
             novelChapterRepository = chapterRepository,
-            getNovelCategories = mockk {
-                coEvery { awaitByNovelId(any()) } answers { setup.categories[firstArg()].orEmpty().map(::category) }
-            },
-            setNovelCategories = mockk {
-                coEvery { await(any(), any()) } answers { rec.categoryWrites[firstArg()!!] = secondArg() }
-            },
+            getNovelCategories = getCategories,
             novelMergeManager = merge,
             novelDownloadManagerProvider = { downloadManager },
             updateNovel = updateNovel,
@@ -995,10 +1164,28 @@ class NovelEngine : MigrateEngine {
             novelRepository = novelRepository,
             libraryPreferences = LibraryPreferences(InMemoryPreferenceStore()),
             transactions = rec,
-            sourceTracker = sourceTracker,
+            swapEffects = MigrationSwapEffects(
+                mangaCategories = mockk(),
+                novelCategories = NovelGroupCategories(
+                    getCategories,
+                    mockk {
+                        coEvery { await(any(), any()) } answers { rec.categoryWrites[firstArg()!!] = secondArg() }
+                    },
+                ),
+                mangaMerge = mockk(),
+                novelMerge = merge,
+                sourceTracker = sourceTracker,
+            ),
             novelHistoryRepository = history,
-            chapterNumberOverrides = NoChapterNumberOverrides,
+            syncRules = NovelChapterSyncRules(
+                NoChapterNumberOverrides,
+                InMemoryChapterCopyMarks(),
+                NoChapterTombstones,
+            ),
             readingLog = rec.readingLog,
+            readingPace = NoReadingPace,
+            hideSeries = HideSeries(FakeLibraryHiddenRepository(), mockk(relaxed = true), mockk(relaxed = true)),
+            carryCustomInfo = rec.customInfo.carry,
         )
         val current = Novel.create().copy(
             id = MigrateEngineConformanceTest.SOURCE,
@@ -1015,6 +1202,7 @@ class NovelEngine : MigrateEngine {
                 Flag.COVER -> NovelMigrationFlag.COVER
                 Flag.NOTES -> NovelMigrationFlag.NOTES
                 Flag.REMOVE_DOWNLOAD -> NovelMigrationFlag.REMOVE_DOWNLOAD
+                Flag.CUSTOM_INFO -> NovelMigrationFlag.CUSTOM_INFO
             }
         }.toSet()
         val error = runCatching { useCase(current, target, novelFlags, replace, skipTargetRefresh) }.exceptionOrNull()
@@ -1053,4 +1241,52 @@ class NovelEngine : MigrateEngine {
         title = "t", lastChapterRead = 0.0, totalChapters = 0, status = 0, score = 0.0, remoteUrl = "",
         startDate = null, finishDate = null, private = false,
     )
+}
+
+/** Both types' Edit info rows in memory, behind the real interactors the carry calls. */
+class CustomInfoStore {
+    private val manga = MutableStateFlow<Map<Long, CustomMangaInfo>>(emptyMap())
+    private val novels = MutableStateFlow<Map<Long, CustomNovelInfo>>(emptyMap())
+
+    private val mangaRepo = object : CustomMangaInfoRepository {
+        override fun getByMangaIdAsFlow(mangaId: Long) = manga.map { it[mangaId] }
+        override fun getAllAsFlow() = manga.map { it.values.toList() }
+        override suspend fun getByMangaId(mangaId: Long) = manga.value[mangaId]
+        override suspend fun set(info: CustomMangaInfo) = manga.update { it + (info.mangaId to info) }
+        override suspend fun delete(mangaId: Long) = manga.update { it - mangaId }
+    }
+    private val novelRepo = object : CustomNovelInfoRepository {
+        override fun getByNovelIdAsFlow(novelId: Long) = novels.map { it[novelId] }
+        override fun getAllAsFlow() = novels.map { it.values.toList() }
+        override suspend fun getByNovelId(novelId: Long) = novels.value[novelId]
+        override suspend fun set(info: CustomNovelInfo) = novels.update { it + (info.novelId to info) }
+        override suspend fun delete(novelId: Long) = novels.update { it - novelId }
+    }
+
+    val carry = CarryCustomInfo(
+        GetEntryCustomInfo(GetCustomMangaInfo(mangaRepo), GetCustomNovelInfo(novelRepo)),
+        SetCustomMangaInfo(mangaRepo),
+        SetCustomNovelInfo(novelRepo),
+    )
+
+    fun seed(setup: Setup, manga: Boolean) {
+        val source = MigrateEngineConformanceTest.SOURCE
+        val target = MigrateEngineConformanceTest.TARGET
+        setup.sourceCustomInfo?.let { (title, alts) ->
+            if (manga) {
+                this.manga.update { it + (source to CustomMangaInfo(source, title = title, altTitles = alts)) }
+            } else {
+                novels.update { it + (source to CustomNovelInfo(source, title = title, altTitles = alts)) }
+            }
+        }
+        setup.targetCustomTitle?.let { title ->
+            if (manga) {
+                this.manga.update { it + (target to CustomMangaInfo(target, title = title)) }
+            } else {
+                novels.update { it + (target to CustomNovelInfo(target, title = title)) }
+            }
+        }
+    }
+
+    fun of(id: Long): EntryCustomInfo? = manga.value[id] ?: novels.value[id]
 }

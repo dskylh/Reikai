@@ -30,6 +30,7 @@ import dev.zacsweers.metro.createGraphFactory
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.domain.ui.model.setAppCompatDelegateThemeMode
+import eu.kanade.domain.ui.model.shownWith
 import eu.kanade.tachiyomi.core.security.PrivacyPreferences
 import eu.kanade.tachiyomi.crash.CrashActivity
 import eu.kanade.tachiyomi.crash.GlobalExceptionHandler
@@ -81,6 +82,7 @@ import reikai.data.coil.NovelImageKeyer
 import reikai.data.work.RenamedWorkers
 import reikai.data.work.WorkerStartFailures
 import reikai.presentation.widget.UnifiedUpdatesWidgetManager
+import reikai.util.dumpHeapOnFatalOom
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.util.lang.launchIO
@@ -172,6 +174,7 @@ class App :
         TelemetryConfig.init(applicationContext)
 
         GlobalExceptionHandler.initialize(applicationContext, CrashActivity::class.java)
+        if (BuildConfig.DEBUG) dumpHeapOnFatalOom() // RK: a dev build keeps a heap dump of an out-of-memory death
 
         // RK --> registrar and graph.inject moved below the crash handler
         // Assigned before the graph is built, which is safe because every binding is a lambda and
@@ -204,7 +207,7 @@ class App :
             LogcatLogger.loggers += AndroidLogcatLogger(minLogPriority)
         }
 
-        setAppCompatDelegateThemeMode(uiPreferences.themeMode.get())
+        setAppCompatDelegateThemeMode(uiPreferences.themeMode.get().shownWith(uiPreferences.appTheme.get())) // RK
 
         // RK --> everything below belongs to the main process. CrashActivity runs in :error_handler,
         // so this method runs a second time there: the migrator would stamp a version for migrations
@@ -218,6 +221,7 @@ class App :
             graph.networkHelper
             graph.sourceManager
             graph.downloadManager
+            graph.launcherIconState // reads the shown app icon, so a notification posted early wears its logo
         }
         // RK <--
 
@@ -277,6 +281,7 @@ class App :
         // RK: the upgrade's dedupe leaves download folders to merge by copy, done after migrations, off the main thread
         scope.launchIO {
             Migrator.await()
+            graph.localFileJournalReplay.replay() // RK: every local listing waits for it, so it runs first
             graph.mergedDuplicateCarryMigration.carryFolders()
         }
     }
@@ -354,7 +359,7 @@ class App :
                 )
                 // Keyer
                 add(MangaCoverKeyer(coverCache))
-                add(MangaKeyer())
+                add(MangaKeyer(coverCache))
                 add(InstalledExtensionIconKeyer())
                 add(InstalledSourceIconKeyer())
                 add(NovelCoverKeyer(coverCache)) // RK

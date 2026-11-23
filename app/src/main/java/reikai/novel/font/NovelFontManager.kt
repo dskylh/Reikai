@@ -10,15 +10,26 @@ import dev.zacsweers.metro.SingleIn
 import eu.kanade.tachiyomi.BuildConfig
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.network.awaitSuccess
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import logcat.LogPriority
 import okhttp3.Request
+import reikai.domain.novel.NovelPreferences
+import reikai.storage.deleteFile
+import reikai.storage.replace
+import reikai.storage.validFileName
 import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.storage.service.StorageManager
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -35,6 +46,7 @@ class NovelFontManager(
     private val context: Context,
     private val storageManager: StorageManager,
     private val networkHelper: NetworkHelper,
+    private val novelPreferences: NovelPreferences,
 ) {
 
     private val mirrorDir: File by lazy { File(context.filesDir, "fonts").apply { mkdirs() } }
@@ -62,11 +74,14 @@ class NovelFontManager(
             .sortedBy { it.displayName.lowercase() }
         // A font removed with a file manager leaves its copy behind, and nothing else would ever go
         // looking for it. Swept here because this is the one place that knows the full list, and only
-        // when the folder answered: an unreachable one lists nothing, and the copies are then what
-        // mirror() falls back to.
-        if (files != null) {
+        // when the folder answered with fonts: a picked folder whose provider failed its query lists as
+        // empty, not unreachable, and the copies are then what mirror() falls back to. A working file is
+        // another thread's copy in progress, which its move into place would then fail on.
+        if (!files.isNullOrEmpty()) {
             val kept = fonts.mapTo(HashSet()) { it.fileName }
-            mirrorDir.listFiles()?.forEach { if (it.name !in kept) it.delete() }
+            mirrorDir.listFiles()?.forEach {
+                if (it.name !in kept && !it.name.endsWith(PARTIAL_SUFFIX)) it.delete()
+            }
         }
         fonts
     }
@@ -134,10 +149,44 @@ class NovelFontManager(
         parsed.familyMetadataList.also { catalogue = it }
     }
 
+    /**
+     * The fonts the user added, file name and bytes, for a backup, each read only as it is collected, so a backup
+     * holds one font at a time. A file over [BACKUP_FONT_CAP] is left out, so a stray huge file in the fonts folder
+     * cannot swell every backup.
+     */
+    fun backedUp(): Flow<Pair<String, ByteArray>> = flow {
+        val dir = storageManager.getFontsDirectory() ?: return@flow
+        installed().forEach { font ->
+            val file = dir.findFile(font.fileName)?.takeIf { it.length() in 1..BACKUP_FONT_CAP } ?: return@forEach
+            runCatching { file.openInputStream().use { it.readBytes() } }.getOrNull()?.let { emit(font.fileName to it) }
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * Puts back a font a backup carried, through the same checked write an import uses, so a failed write keeps the
+     * one already there. One already here at the same size is left alone. It keeps the name the restored reader
+     * setting names unless the folder refuses it; a cleaned name then takes the setting with it, so the two match.
+     */
+    suspend fun restore(fileName: String, bytes: ByteArray): Boolean = withIOContext {
+        if (!isSupportedFontFile(fileName) || !isSfntHeader(bytes)) return@withIOContext false
+        val dir = storageManager.getFontsDirectory() ?: return@withIOContext false
+        // The extension check already rules out "." and "..".
+        val names = listOfNotNull(
+            fileName.takeIf { '/' !in it && '\\' !in it },
+            validFileName(fileName),
+        ).distinct()
+        val stored = names.firstOrNull { dir.findFile(it)?.length() == bytes.size.toLong() }
+            ?: names.firstNotNullOfOrNull { store(dir, it, bytes).getOrNull()?.fileName }
+            ?: return@withIOContext false
+        val family = novelPreferences.readerFontFamily()
+        if (stored != fileName && family.get() == fileName) family.set(stored)
+        true
+    }
+
     suspend fun delete(font: NovelFont): Boolean = withIOContext {
         typefaces.remove(font.fileName)
         File(mirrorDir, font.fileName).delete()
-        storageManager.getFontsDirectory()?.findFile(font.fileName)?.delete() == true
+        storageManager.getFontsDirectory()?.findFile(font.fileName)?.deleteFile() == true
     }
 
     /**
@@ -148,20 +197,28 @@ class NovelFontManager(
      * the copy on whatever thread is drawing, which for a first render is the main one.
      */
     fun typeface(fileName: String): Typeface? =
-        typefaces.computeIfAbsent(fileName) { CachedFace(resolveTypeface(it)) }.typeface
+        typefaces.computeIfAbsent(fileName) { faceOf(it, mirror(it)) }.typeface
 
-    /** Resolves [family] off the caller's thread when it is a user's file, so the render that needs it
-     *  finds it cached. */
+    /**
+     * Resolves [family] off the caller's thread when it is a user's file, so the render that needs it finds
+     * it cached. Checked against the file's [fontVersion] every time, which the WebView mode's font address
+     * carries too, so a font replaced behind the reader is drawn in its new face by both renderers.
+     */
     suspend fun warm(family: String) {
-        if (readerFontSource(family) !is ReaderFontSource.UserFile || typefaces.containsKey(family)) return
-        withIOContext { typeface(family) }
+        if (readerFontSource(family) !is ReaderFontSource.UserFile) return
+        withIOContext {
+            val mirror = mirror(family)
+            if (typefaces[family]?.version != mirror?.fontVersion()) typefaces[family] = faceOf(family, mirror)
+        }
     }
 
-    private fun resolveTypeface(fileName: String): Typeface? {
-        val mirror = mirror(fileName) ?: return null
-        return runCatching { Typeface.createFromFile(mirror) }
-            .onFailure { logcat(LogPriority.WARN, it) { "Unreadable reader font: $fileName" } }
-            .getOrNull()
+    private fun faceOf(fileName: String, mirror: File?): CachedFace {
+        val face = mirror?.let { file ->
+            runCatching { Typeface.createFromFile(file) }
+                .onFailure { logcat(LogPriority.WARN, it) { "Unreadable reader font: $fileName" } }
+                .getOrNull()
+        }
+        return CachedFace(face, mirror?.fontVersion())
     }
 
     /** The readable copy, for a caller that needs the file itself. Touches the disk, so off the main
@@ -179,35 +236,57 @@ class NovelFontManager(
         // Size rather than timestamp, which a SAF provider need not report: replacing the file behind
         // the reader with a different face otherwise kept drawing the old one forever.
         if (local.exists() && local.length() > 0 && local.length() == source.length()) return local
+        // Copied beside the copy and renamed into place once whole: the picker's preview and the renderer
+        // can copy the same font at once, and a face read from a half-written file is a miss cached for good.
+        // A fixed prefix, since Android adds the number to it unshortened and a font's name can fill the limit.
+        var partial: File? = null
         return runCatching {
-            source.openInputStream().use { input -> local.outputStream().use(input::copyTo) }
+            val copy = File.createTempFile("font", PARTIAL_SUFFIX, mirrorDir).also { partial = it }
+            source.openInputStream().use { input -> copy.outputStream().use(input::copyTo) }
+            Files.move(copy.toPath(), local.toPath(), REPLACE_EXISTING, ATOMIC_MOVE)
             local
         }
-            .onFailure { logcat(LogPriority.WARN, it) { "Could not copy reader font: $fileName" } }
+            .onFailure {
+                partial?.delete()
+                logcat(LogPriority.WARN, it) { "Could not copy reader font: $fileName" }
+            }
             .getOrNull()
     }
 
+    /**
+     * Writes the font through [replace], beside a font already of this name and in its place once whole, so a
+     * failed write keeps the one the reader had. The name is made valid first, since the reader stores it and a
+     * name the provider changed is one it could never resolve again.
+     */
     private fun write(fileName: String, bytes: ByteArray): Result<NovelFont> {
         val dir = storageManager.getFontsDirectory() ?: return Result.failure(FontError.NoStorage)
-        val target = dir.createFile(fileName) ?: return Result.failure(FontError.NoStorage)
-        return runCatching {
-            target.openOutputStream().use { it.write(bytes) }
-            // What the provider actually called it, not what we asked for: it derives the extension
-            // from the MIME type, and a name that differs is one the reader could never resolve again.
-            val stored = target.name ?: fileName
+        return store(dir, validFileName(fileName), bytes)
+    }
+
+    /** [fileName] made a valid file name with its extension kept, which shortening a long name would cut off. */
+    private fun validFileName(fileName: String): String =
+        validFileName(fileName.substringBeforeLast('.'), "." + fileName.substringAfterLast('.'))
+
+    private fun store(dir: UniFile, name: String, bytes: ByteArray): Result<NovelFont> =
+        runCatching {
+            val stored = dir.replace(context, name) { it.write(bytes) }.name ?: name
             // The mirror and the cached face are stale the moment the file behind them changes.
             File(mirrorDir, stored).delete()
             typefaces.remove(stored)
             NovelFont(stored, fontDisplayName(stored))
         }.onFailure {
-            target.delete()
-            logcat(LogPriority.WARN, it) { "Could not save reader font: $fileName" }
+            logcat(LogPriority.WARN, it) { "Could not save reader font: $name" }
         }
-    }
 
-    private companion object {
-        const val CSS_URL = "https://fonts.googleapis.com/css2?family=%s:wght@400&display=swap"
-        const val CATALOGUE_URL = "https://fonts.google.com/metadata/fonts"
+    internal companion object {
+        private const val CSS_URL = "https://fonts.googleapis.com/css2?family=%s:wght@400&display=swap"
+        private const val CATALOGUE_URL = "https://fonts.google.com/metadata/fonts"
+
+        // Larger than any text face; a CJK font runs to about 20 MB.
+        private const val BACKUP_FONT_CAP = 32L * 1024 * 1024
+
+        /** A copy still being written, which no font's name ends in, since a font is a TTF or an OTF. */
+        const val PARTIAL_SUFFIX = ".part"
     }
 }
 
@@ -226,6 +305,10 @@ sealed class FontError : Exception() {
     data object NoStorage : FontError()
 }
 
-/** A resolved face, or the fact that there is none. Wrapped so a miss can live in a map that refuses
- *  null values and so it is not looked up again on every view a chapter builds. */
-private class CachedFace(val typeface: Typeface?)
+/** A resolved face, or the fact that there is none, with the [version] of the copy it was read from. Wrapped
+ *  so a miss can live in a map that refuses null values and so it is not looked up again on every view a
+ *  chapter builds. */
+private class CachedFace(val typeface: Typeface?, val version: String?)
+
+/** When a font's copy counts as replaced, for both renderers: the native face cache and the WebView's address. */
+fun File.fontVersion(): String = "${length()}-${lastModified()}"

@@ -1,12 +1,13 @@
 package reikai.presentation.reader
 
-import eu.kanade.tachiyomi.data.cache.ChapterCache
 import eu.kanade.tachiyomi.ui.reader.loader.PageLoader
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import io.kotest.matchers.shouldBe
+import io.mockk.coVerify
 import io.mockk.mockk
-import io.mockk.verify
+import kotlinx.coroutines.test.runTest
+import mihon.data.cache.ChapterCache
 import org.junit.jupiter.api.Test
 import tachiyomi.domain.chapter.model.Chapter
 
@@ -24,7 +25,7 @@ class ReaderChapterReloadTest {
      * off-thread, so a reload from the source that recycled first was served the list it had dropped.
      */
     @Test
-    fun `a recycled loader finds no page list left to cache again`() {
+    fun `a recycled loader finds no page list left to cache again`() = runTest {
         val chapter = loadedChapter()
         val loader = PageListRecordingLoader(chapter)
         chapter.pageLoader = loader
@@ -34,31 +35,61 @@ class ReaderChapterReloadTest {
         loader.pagesOnRecycle shouldBe null
     }
 
+    /** A plain reload keeps the cached list, and the images it resolved, so the loader may cache it as usual. */
     @Test
-    fun `a reload from the source drops the old pages' images`() {
+    fun `a plain reload leaves the page list for the loader to cache`() = runTest {
         val chapter = loadedChapter()
+        val loader = PageListRecordingLoader(chapter)
+        chapter.pageLoader = loader
 
-        chapter.unloadForReload(fromSource = true, cache)
+        chapter.unloadForReload(fromSource = false, cache)
 
-        verify { cache.removeImage("https://img/0") }
+        loader.pagesOnRecycle?.size shouldBe 1
     }
 
     @Test
-    fun `a reload from the source drops the cached page list`() {
-        val chapter = loadedChapter()
-
-        chapter.unloadForReload(fromSource = true, cache)
-
-        verify { cache.removePageList(match { it.url == "/1" }) }
-    }
-
-    @Test
-    fun `a reload from a downloaded copy leaves the cached images alone`() {
+    fun `a plain reload leaves the chapter ready to load again`() = runTest {
         val chapter = loadedChapter()
 
         chapter.unloadForReload(fromSource = false, cache)
 
-        verify(exactly = 0) { cache.removeImage(any()) }
+        chapter.state shouldBe ReaderChapter.State.Wait
+    }
+
+    @Test
+    fun `a reload from the source drops the old pages' images`() = runTest {
+        val chapter = loadedChapter()
+
+        chapter.unloadForReload(fromSource = true, cache)
+
+        coVerify { cache.removeImage("https://img/0") }
+    }
+
+    @Test
+    fun `a reload from the source drops the cached page list`() = runTest {
+        val chapter = loadedChapter()
+
+        chapter.unloadForReload(fromSource = true, cache)
+
+        coVerify { cache.removePageList(match { it.url == "/1" }) }
+    }
+
+    @Test
+    fun `a reload from a downloaded copy leaves the cached images alone`() = runTest {
+        val chapter = loadedChapter()
+
+        chapter.unloadForReload(fromSource = false, cache)
+
+        coVerify(exactly = 0) { cache.removeImage(any()) }
+    }
+
+    @Test
+    fun `a plain reload keeps the cached page list`() = runTest {
+        val chapter = loadedChapter()
+
+        chapter.unloadForReload(fromSource = false, cache)
+
+        coVerify(exactly = 0) { cache.removePageList(any()) }
     }
 }
 

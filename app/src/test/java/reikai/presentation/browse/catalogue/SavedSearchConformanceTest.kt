@@ -1,5 +1,6 @@
 package reikai.presentation.browse.catalogue
 
+import androidx.lifecycle.viewModelScope
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.model.Filter
@@ -30,7 +31,6 @@ import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.presentation.browse.BulkFavoriteViewModel
 import reikai.presentation.browse.EntryBulkFavoriteViewModel
-import reikai.presentation.migrate.flow.MigrationPickHandoff
 import reikai.presentation.novel.browse.NovelBrowseViewModel
 import reikai.presentation.novel.browse.NovelBulkFavoriteViewModel
 import reikai.presentation.recents.EmittingPreferenceStore
@@ -64,6 +64,20 @@ class SavedSearchConformanceTest {
         behavior.applySearch(null, saved)
 
         behavior.captureSearch().filtersJson shouldBe saved
+    }
+
+    // A filters-only search must not run against whatever the reader had typed before applying it.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("probes")
+    fun `a saved search with no query clears the typed one`(probe: SavedSearchProbe) = runTest {
+        val behavior = probe.open()
+        probe.applyFromSheet("saved")
+        val saved = behavior.captureSearch().filtersJson
+        behavior.search("shadow")
+
+        behavior.applySearch(null, saved)
+
+        behavior.captureSearch().query shouldBe null
     }
 
     companion object {
@@ -115,7 +129,7 @@ private class MangaSavedSearchProbe : SavedSearchProbe {
         val bulk = mockk<BulkFavoriteViewModel> {
             every { state } returns MutableStateFlow(EntryBulkFavoriteViewModel.State())
         }
-        return MangaBrowseAdapter(model, bulk)
+        return MangaBrowseAdapter(model, bulk, model.viewModelScope)
     }
 
     override fun applyFromSheet(author: String) {
@@ -152,7 +166,6 @@ private class NovelSavedSearchProbe : SavedSearchProbe {
                 every { getFavoritedKeysAsFlow() } returns flowOf(FavoritedNovels.None)
             },
             libraryAdder = mockk(relaxed = true),
-            pickHandoff = MigrationPickHandoff(),
             reikaiSourcePreferences = ReikaiSourcePreferences(store),
             sourcePreferences = SourcePreferences(store),
             getIncognitoState = mockk(relaxed = true),
@@ -163,7 +176,7 @@ private class NovelSavedSearchProbe : SavedSearchProbe {
         val bulk = mockk<NovelBulkFavoriteViewModel> {
             every { state } returns MutableStateFlow(EntryBulkFavoriteViewModel.State())
         }
-        return NovelBrowseAdapter(model, bulk, SOURCE_ID)
+        return NovelBrowseAdapter(model, bulk, SOURCE_ID, model.viewModelScope)
     }
 
     override fun applyFromSheet(author: String) {

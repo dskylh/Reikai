@@ -20,8 +20,13 @@ import reikai.domain.backup.foldChapterCopies
 import reikai.domain.backup.foldHistoryCopies
 import reikai.domain.backup.mergedHistory
 import reikai.domain.backup.restoredFavoriteAt
+import reikai.domain.chapter.ChapterCopyMark
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.ChapterTombstoneRepository
 import reikai.domain.library.ContentType
+import reikai.domain.library.LibraryManualOrderRepository
+import reikai.domain.library.ManualOrderPosition
 import reikai.domain.readinglog.ReadingLogRepository
 import tachiyomi.data.Database
 import tachiyomi.domain.backup.model.RestoredHistory
@@ -51,6 +56,9 @@ class RestoreRepositoryImpl(
     private val setCustomMangaInfo: SetCustomMangaInfo,
     private val chapterNumberOverrides: ChapterNumberOverrideRepository,
     private val readingLog: ReadingLogRepository,
+    private val manualOrder: LibraryManualOrderRepository,
+    private val copyMarks: ChapterCopyMarkRepository,
+    private val tombstones: ChapterTombstoneRepository,
     // RK <--
 ) : RestoreRepository {
 
@@ -75,15 +83,25 @@ class RestoreRepositoryImpl(
         if (entry.categoryIds.isNotEmpty()) {
             mangaRepository.setMangaCategories(manga.id, entry.categoryIds)
         }
+        // RK: Manual order places land with the categories they belong to
+        manualOrder.upsert(
+            entry.manualOrder.map { (categoryId, position) ->
+                ManualOrderPosition(ContentType.MANGA, manga.id, categoryId, position)
+            },
+        )
         restoreChapters(manga, entry.chapters)
         chapterNumberOverrides.restore(ContentType.MANGA, manga.id, entry.chapterNumberOverrides) // RK
+        val marks = entry.copyMarks.map { (url, mark) -> ChapterCopyMark(manga.id, url, mark) } // RK
+        copyMarks.set(ContentType.MANGA, marks) // RK
         restoreTracking(manga, entry.tracks)
         restoreHistory(manga, entry.history)
         readingLog.restore(ContentType.MANGA, manga.id, entry.readingSessions) // RK
+        // RK: after the chapters and their history, so a tombstone meets the row it belongs to
+        tombstones.restore(ContentType.MANGA, manga.id, entry.chapterTombstones, entry.chapters.map { it.url })
         restoreExcludedScanlators(manga, entry.excludedScanlators)
         // RK --> an entry without either leaves the device's own alone, as the forks do
         entry.searchMetadata?.let { mangaMetadataRepository.insertFlatMetadata(it.forManga(manga.id)) }
-        entry.customInfo?.let { setCustomMangaInfo.set(it.copy(mangaId = manga.id)) }
+        entry.customInfo?.let { setCustomMangaInfo.restore(it.copy(mangaId = manga.id)) }
         // RK <--
         return manga
     }
@@ -184,7 +202,8 @@ class RestoreRepositoryImpl(
                     ?: // New chapter
                     return@mapNotNull chapter
 
-                if (chapter.forComparison() == dbChapter.forComparison()) {
+                // RK: a larger page count in the backup still writes, since the comparison leaves it out
+                if (chapter.forComparison() == dbChapter.forComparison() && chapter.pageCount <= dbChapter.pageCount) {
                     // Same state; skip
                     return@mapNotNull null
                 }

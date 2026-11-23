@@ -21,13 +21,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import eu.kanade.presentation.components.AdaptiveSheet
 import eu.kanade.presentation.components.AppBar
-import eu.kanade.presentation.util.Screen
+import eu.kanade.presentation.more.settings.widget.SwitchPreferenceWidget
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
+import kotlinx.serialization.Serializable
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.DragHandle
 import reikai.presentation.components.rememberSettledReorder
@@ -44,22 +45,22 @@ import eu.kanade.presentation.more.settings.Preference as SettingsPreference
  * Which buttons one reader's bottom bar shows, and in what order. One screen serves both readers, each
  * editing its own buttons. The Settings gear is listed to be moved, never switched off.
  */
-data class ReaderBottomButtonsScreen(private val scope: ReaderBottomButton.Scope) : Screen() {
+@Serializable
+data class ReaderBottomButtonsRoute(val scope: ReaderBottomButton.Scope) : NavKey
 
-    @Composable
-    override fun Content() {
-        val navigator = LocalNavigator.currentOrThrow
-        Scaffold(
-            topBar = { scrollBehavior ->
-                AppBar(
-                    title = stringResource(MR.strings.pref_reader_bottom_buttons),
-                    navigateUp = navigator::pop,
-                    scrollBehavior = scrollBehavior,
-                )
-            },
-        ) { paddingValues ->
-            ReaderBottomButtonsList(scope, contentPadding = paddingValues)
-        }
+@Composable
+fun ReaderBottomButtonsScreen(scope: ReaderBottomButton.Scope) {
+    val navigator = LocalNavigator.current
+    Scaffold(
+        topBar = { scrollBehavior ->
+            AppBar(
+                title = stringResource(MR.strings.pref_reader_bottom_buttons),
+                navigateUp = navigator::pop,
+                scrollBehavior = scrollBehavior,
+            )
+        },
+    ) { paddingValues ->
+        ReaderBottomButtonsList(scope, contentPadding = paddingValues)
     }
 }
 
@@ -95,6 +96,7 @@ private fun ReaderBottomButtonsList(
         create(scope)
     }
     val rows by viewModel.state.collectAsStateWithLifecycle()
+    val filled by viewModel.filled.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     // Held here while a drag runs, so the list moves under the finger without a write per step.
     val items = remember(rows) { rows.toMutableStateList() }
@@ -103,6 +105,14 @@ private fun ReaderBottomButtonsList(
     }
 
     LazyColumn(state = listState, contentPadding = contentPadding, modifier = modifier) {
+        item(key = FILLED_KEY) {
+            SwitchPreferenceWidget(
+                title = stringResource(MR.strings.pref_reader_bottom_buttons_filled),
+                subtitle = stringResource(MR.strings.pref_reader_bottom_buttons_filled_summary),
+                checked = filled,
+                onCheckedChanged = viewModel::setFilled,
+            )
+        }
         items(items.size, key = { items[it].button }) { index ->
             val row = items[index]
             ReorderableItem(reorderState, row.button) {
@@ -117,7 +127,7 @@ private fun ReaderBottomButtonsList(
 fun readerBottomButtonsPreference(
     preferences: ReaderBottomButton.BarPreferences,
 ): SettingsPreference.PreferenceItem.TextPreference {
-    val navigator = LocalNavigator.currentOrThrow
+    val navigator = LocalNavigator.current
     val scope = preferences.scope
     val selected by preferences.selection.collectAsState()
     val arranged by preferences.order.collectAsState()
@@ -127,7 +137,7 @@ fun readerBottomButtonsPreference(
     return SettingsPreference.PreferenceItem.TextPreference(
         title = stringResource(MR.strings.pref_reader_bottom_buttons),
         subtitle = names.joinToString().ifEmpty { stringResource(MR.strings.none) },
-        onClick = { navigator.push(ReaderBottomButtonsScreen(scope)) },
+        onClick = { navigator.push(ReaderBottomButtonsRoute(scope)) },
     )
 }
 
@@ -160,3 +170,6 @@ private fun ReorderableCollectionItemScope.ButtonRow(
         )
     }
 }
+
+/** The switch's list key, apart from every button's so a drag can never land on it. */
+private const val FILLED_KEY = "filled"

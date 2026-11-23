@@ -1,6 +1,7 @@
 package eu.kanade.presentation.more.settings.screen
 
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.ManagedActivityResultLauncher
@@ -37,12 +38,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.core.net.toUri
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import com.hippo.unifile.UniFile
 import eu.kanade.presentation.more.settings.Preference
-import eu.kanade.presentation.more.settings.screen.data.CreateBackupScreen
-import eu.kanade.presentation.more.settings.screen.data.RestoreBackupScreen
 import eu.kanade.presentation.more.settings.screen.data.StorageInfo
 import eu.kanade.presentation.more.settings.widget.BasePreferenceWidget
 import eu.kanade.presentation.more.settings.widget.PrefsHorizontalPadding
@@ -55,9 +52,14 @@ import eu.kanade.tachiyomi.util.system.DeviceUtil
 import eu.kanade.tachiyomi.util.system.toast
 import eu.kanade.tachiyomi.util.system.workManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import logcat.LogPriority
 import mihon.app.di.appGraph
+import mihon.core.navigation.CreateBackupRoute
+import mihon.core.navigation.LocalNavigator
+import mihon.core.navigation.RestoreBackupRoute
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.automirroredrounded.Help
 import reikai.domain.library.LibraryExportRow
@@ -66,7 +68,6 @@ import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.storage.displayablePath
 import tachiyomi.core.common.util.lang.launchUI
 import tachiyomi.core.common.util.lang.withIOContext
-import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.backup.service.BackupPreferences
 import tachiyomi.domain.storage.service.StoragePreferences
@@ -75,7 +76,8 @@ import tachiyomi.presentation.core.components.material.TextButton
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
 
-object SettingsDataScreen : SearchableSettings {
+@Serializable
+data object SettingsDataScreen : SearchableSettings {
 
     val restorePreferenceKeyString = MR.strings.label_backup
     const val HELP_URL = "${Constants.URL_DOCS}/faq/storage" // RK: Reikai's docs
@@ -116,32 +118,69 @@ object SettingsDataScreen : SearchableSettings {
         storageDirPref: tachiyomi.core.common.preference.Preference<String>,
     ): ManagedActivityResultLauncher<Uri?, Uri?> {
         val context = LocalContext.current
+        // RK --> mihonapp/mihon#3510 (open upstream): check the folder takes a download's writes before saving it
+        val scope = rememberCoroutineScope()
+        val storageManager = remember { context.appGraph.storageManager }
+        var storageCheckJob by remember { mutableStateOf<Job?>(null) }
+        var showStorageUnavailableDialog by remember { mutableStateOf(false) }
+
+        if (showStorageUnavailableDialog) {
+            AlertDialog(
+                onDismissRequest = { showStorageUnavailableDialog = false },
+                title = { Text(text = stringResource(MR.strings.storage_location_unavailable)) },
+                text = { Text(text = stringResource(MR.strings.storage_location_unavailable_message)) },
+                confirmButton = {
+                    TextButton(onClick = { showStorageUnavailableDialog = false }) {
+                        Text(text = stringResource(MR.strings.action_ok))
+                    }
+                },
+            )
+        }
 
         return rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenDocumentTree(),
         ) { uri ->
-            if (uri != null) {
-                val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            storageCheckJob?.cancel()
+            showStorageUnavailableDialog = false
+            storageCheckJob = uri?.let { selectedUri ->
+                scope.launch {
+                    try {
+                        val canWrite = withIOContext { storageManager.canWriteTo(selectedUri) }
 
-                // For some reason InkBook devices do not implement the SAF properly. Persistable URI grants do not
-                // work. However, simply retrieving the URI and using it works fine for these devices. Access is not
-                // revoked after the app is closed or the device is restarted.
-                // This also holds for some Samsung devices. Thus, we simply execute inside of a try-catch block and
-                // ignore the exception if it is thrown.
-                try {
-                    context.contentResolver.takePersistableUriPermission(uri, flags)
-                } catch (e: SecurityException) {
-                    logcat(LogPriority.ERROR, e)
-                    context.toast(MR.strings.file_picker_uri_permission_unsupported)
-                }
-
-                UniFile.fromUri(context, uri)?.let {
-                    storageDirPref.set(it.uri.toString())
+                        if (!canWrite || !persistStorageLocation(context, storageDirPref, selectedUri)) {
+                            showStorageUnavailableDialog = true
+                        }
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        logcat(LogPriority.ERROR, e)
+                        showStorageUnavailableDialog = true
+                    }
                 }
             }
         }
     }
+
+    private fun persistStorageLocation(
+        context: Context,
+        storageDirPref: tachiyomi.core.common.preference.Preference<String>,
+        uri: Uri,
+    ): Boolean {
+        val directory = UniFile.fromUri(context, uri) ?: return false
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+
+        // InkBook and some Samsung devices can access the selected URI even when persistable grants are unsupported.
+        try {
+            context.contentResolver.takePersistableUriPermission(uri, flags)
+        } catch (e: SecurityException) {
+            logcat(LogPriority.ERROR, e)
+            context.toast(MR.strings.file_picker_uri_permission_unsupported)
+        }
+
+        storageDirPref.set(directory.uri.toString())
+        return true
+    }
+    // RK <--
 
     @Composable
     fun storageLocationText(
@@ -183,20 +222,21 @@ object SettingsDataScreen : SearchableSettings {
     @Composable
     private fun getBackupAndRestoreGroup(backupPreferences: BackupPreferences): Preference.PreferenceGroup {
         val context = LocalContext.current
-        val navigator = LocalNavigator.currentOrThrow
+        val navigator = LocalNavigator.current
         val scope = rememberCoroutineScope()
 
         val lastAutoBackup by backupPreferences.lastAutoBackupTimestamp.collectAsState()
+        val taskBannerPreferences = remember { context.appGraph.taskBannerPreferences } // RK
 
         // RK: push the restore-options screen from a LaunchedEffect, not directly inside the
         // activity-result callback. That callback fires as the activity resumes from the file picker,
-        // and a Voyager push there can land before the next recomposition, so the options screen
+        // and a push there can land before the next recomposition, so the options screen
         // sometimes did not render until the user tapped. Capturing the uri in state defers the push to
         // a normal composition pass.
         var pickedBackupUri by remember { mutableStateOf<String?>(null) }
         LaunchedEffect(pickedBackupUri) {
             pickedBackupUri?.let {
-                navigator.push(RestoreBackupScreen(it))
+                navigator.push(RestoreBackupRoute(it))
                 pickedBackupUri = null
             }
         }
@@ -239,7 +279,7 @@ object SettingsDataScreen : SearchableSettings {
                                 SegmentedButton(
                                     modifier = Modifier.fillMaxHeight(),
                                     checked = false,
-                                    onCheckedChange = { navigator.push(CreateBackupScreen()) },
+                                    onCheckedChange = { navigator.push(CreateBackupRoute) },
                                     shape = SegmentedButtonDefaults.itemShape(0, 2),
                                 ) {
                                     Text(stringResource(MR.strings.pref_create_backup))
@@ -289,6 +329,12 @@ object SettingsDataScreen : SearchableSettings {
                     stringResource(MR.strings.backup_info) + "\n\n" +
                         stringResource(MR.strings.last_auto_backup_info, relativeTimeSpanString(lastAutoBackup)),
                 ),
+                // RK -->
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = taskBannerPreferences.showRestoring,
+                    title = stringResource(MR.strings.pref_show_restoring_banner),
+                ),
+                // RK <--
             ),
         )
     }
@@ -302,7 +348,7 @@ object SettingsDataScreen : SearchableSettings {
         val chapterCache = remember { context.appGraph.chapterCache }
         var cacheReadableSizeSema by remember { mutableIntStateOf(0) }
         val cacheReadableSize by produceState("", cacheReadableSizeSema) {
-            value = withIOContext { chapterCache.readableSize }
+            value = chapterCache.readableSize()
         }
         // RK: adult-source page-preview thumbnail cache
         val pagePreviewCache = remember { context.appGraph.pagePreviewCache }
@@ -332,7 +378,7 @@ object SettingsDataScreen : SearchableSettings {
                     onClick = {
                         scope.launch {
                             try {
-                                val deletedFiles = withIOContext { chapterCache.clear() }
+                                val deletedFiles = chapterCache.clear()
                                 context.toast(context.stringResource(MR.strings.cache_deleted, deletedFiles))
                                 cacheReadableSizeSema++
                             } catch (e: Exception) {

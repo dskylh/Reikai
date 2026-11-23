@@ -13,6 +13,8 @@ import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
+import kotlinx.coroutines.CoroutineScope
+import mihon.core.metro.AppCoroutineScope
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import reikai.novel.host.LnPluginHost
 import reikai.novel.host.WEB_STORAGE_SCRIPT
@@ -26,19 +28,22 @@ import tachiyomi.core.common.util.lang.launchIO
 
 /**
  * What the in-app browser runs after each page load so a light-novel plugin can read the site's storage,
- * as LNReader's WebView does: the latest page's storage is kept for [pluginId], or for [novelSourceId]
- * when that is a plugin, once the browser closes, if the plugin asks for it. A no-op for any other page.
+ * as LNReader's WebView does: the latest page's storage is kept for [novelSourceId] when that is a plugin,
+ * once the browser closes, if the plugin asks for it. A no-op for any other page.
  */
 @Composable
-fun rememberPluginStorageCapture(pluginId: String?, novelSourceId: String?): (WebView) -> Unit {
-    if (pluginId == null && novelSourceId == null) return {}
+fun rememberPluginStorageCapture(novelSourceId: String?): (WebView) -> Unit {
+    if (novelSourceId == null) return {}
     val model = assistedMetroViewModel<PluginWebStorageViewModel, PluginWebStorageViewModel.Factory> {
-        create(pluginId, novelSourceId)
+        create(novelSourceId)
     }
     return remember(model) {
         { webView: WebView ->
-            val pageUrl = webView.url
-            webView.evaluateJavascript(WEB_STORAGE_SCRIPT) { model.onPageStorage(pageUrl, parseWebStorage(it)) }
+            // Read on Main, as the WebView answers, so skipped for a plugin that never uses the storage.
+            if (model.capturesStorage) {
+                val pageUrl = webView.url
+                webView.evaluateJavascript(WEB_STORAGE_SCRIPT) { model.onPageStorage(pageUrl, parseWebStorage(it)) }
+            }
         }
     }
 }
@@ -46,30 +51,37 @@ fun rememberPluginStorageCapture(pluginId: String?, novelSourceId: String?): (We
 /** Holds the latest page's storage and hands it to the plugin host when the browser screen goes away. */
 @AssistedInject
 class PluginWebStorageViewModel(
-    @Assisted pluginId: String?,
-    @Assisted novelSourceId: String?,
-    sourceManager: NovelSourceManager,
+    @Assisted private val novelSourceId: String,
+    private val sourceManager: NovelSourceManager,
     private val host: LnPluginHost,
+    @AppCoroutineScope private val appScope: CoroutineScope,
 ) : ViewModel() {
 
     @AssistedFactory
     @ManualViewModelAssistedFactoryKey
     @ContributesIntoMap(AppScope::class)
     interface Factory : ManualViewModelAssistedFactory {
-        fun create(pluginId: String?, novelSourceId: String?): PluginWebStorageViewModel
+        fun create(novelSourceId: String): PluginWebStorageViewModel
     }
 
     @Volatile
     private var target: LnPluginSource? = null
+
+    @Volatile
+    private var resolved = false
+
+    /** False once the source is known to be no plugin that uses the site's storage. */
+    val capturesStorage: Boolean get() = !resolved || target != null
 
     // Each host's newest storage with the page it came from, newest host last. Which host is the
     // plugin's site is known only once its source resolves, so the choice waits for the close.
     private val storageByHost = LinkedHashMap<String, Pair<String, WebStorageSnapshot>>()
 
     init {
-        // A plugin's source id is its plugin id, so both entries resolve the same way.
-        val id = pluginId ?: novelSourceId
-        if (id != null) viewModelScope.launchIO { target = webStoragePlugin(sourceManager.get(id)) }
+        viewModelScope.launchIO {
+            target = webStoragePlugin(sourceManager.get(novelSourceId))
+            resolved = true
+        }
     }
 
     fun onPageStorage(pageUrl: String?, snapshot: WebStorageSnapshot?) {
@@ -79,10 +91,16 @@ class PluginWebStorageViewModel(
         storageByHost[pageHost] = pageUrl to snapshot
     }
 
-    // On clear rather than on dispose: a rotation disposes the browser but keeps this model.
+    // On clear rather than on dispose: a rotation disposes the browser but keeps this model. On the app
+    // scope, since the plugin may still be resolving (the browser restored before the first plugin load),
+    // and this model's own scope is cancelled by now.
     override fun onCleared() {
-        val plugin = target ?: return
-        pluginSiteStorage(plugin.site, storageByHost.values)?.let { host.storeWebStorage(plugin.id, it) }
+        val pages = storageByHost.values.toList()
+        if (pages.isEmpty()) return
+        appScope.launchIO {
+            val plugin = target ?: webStoragePlugin(sourceManager.get(novelSourceId)) ?: return@launchIO
+            pluginSiteStorage(plugin.site, pages)?.let { host.storeWebStorage(plugin.id, it) }
+        }
     }
 }
 

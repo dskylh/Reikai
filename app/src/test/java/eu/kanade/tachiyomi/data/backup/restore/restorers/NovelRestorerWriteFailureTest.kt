@@ -10,13 +10,21 @@ import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
+import reikai.domain.library.FakeLibraryManualOrderRepository
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.NovelTrackRepository
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
+import reikai.domain.novel.model.NovelUpdate
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import kotlin.time.Instant
 
 /**
@@ -31,6 +39,7 @@ class NovelRestorerWriteFailureTest {
             coEvery { getByUrlAndSource(any(), any()) } returns null
             coEvery { insert(any()) } returns NOVEL_ID
             coEvery { update(any<Novel>()) } returns true
+            coEvery { update(any<NovelUpdate>()) } returns true
         }
         val chapters = mockk<NovelChapterRepository>(relaxed = true) {
             coEvery { getByNovelId(any()) } returns emptyList()
@@ -72,6 +81,12 @@ class NovelRestorerWriteFailureTest {
             coEvery { chapters.update(any()) } returns false
         }),
         TRACK_UPSERT({ coEvery { tracks.upsert(any()) } returns false }),
+
+        // The new novel's predicted next update, written once its chapters are in.
+        UPDATE_INTERVAL({
+            coEvery { novels.getById(any()) } returns Novel.create().copy(id = NOVEL_ID, url = URL, source = SOURCE)
+            coEvery { novels.update(any<NovelUpdate>()) } returns false
+        }),
     }
 
     @Test
@@ -88,6 +103,9 @@ class NovelRestorerWriteFailureTest {
     }
 
     private fun restorer(repos: Repos) = NovelRestorer(
+
+        tombstones = NoChapterTombstoneRepository,
+        manualOrder = FakeLibraryManualOrderRepository(),
         novelRepository = repos.novels,
         novelChapterRepository = repos.chapters,
         categoryRepository = mockk(relaxed = true),
@@ -96,7 +114,12 @@ class NovelRestorerWriteFailureTest {
         setCustomNovelInfo = mockk(relaxed = true),
         novelHistoryRepository = mockk(relaxed = true),
         chapterNumberOverrides = NoChapterNumberOverrides,
+        copyMarks = InMemoryChapterCopyMarks(),
+        localVolumes = NoLocalVolumes,
+        volumePicks = NoVolumePicks,
         readingLog = NoReadingLog,
+        readingPace = NoReadingPace,
+        localNovelLanguages = NoLocalNovelLanguages,
     )
 
     private val backup = BackupNovel(

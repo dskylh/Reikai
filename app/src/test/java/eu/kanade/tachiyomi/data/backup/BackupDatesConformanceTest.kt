@@ -10,15 +10,27 @@ import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.protobuf.ProtoBuf
-import mihon.core.common.extensions.toInstantOrNull
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 import reikai.domain.backup.RestoredChapterHistory
+import reikai.domain.chapter.ChapterCopyMark
+import reikai.domain.chapter.ChapterCopyMarkRepository
+import reikai.domain.chapter.CopyMark
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
+import reikai.domain.chapter.backedUpCopyMarks
+import reikai.domain.library.ContentType
+import reikai.domain.library.FakeLibraryHiddenRepository
+import reikai.domain.library.FakeLibraryManualOrderRepository
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.novel.model.NovelTrack
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import tachiyomi.domain.chapter.model.Chapter
 import tachiyomi.domain.history.model.History
 import tachiyomi.domain.manga.model.Manga
@@ -45,6 +57,16 @@ class BackupDatesConformanceTest {
         type.restore(type.backUp(UNKNOWN)) shouldBe UNKNOWN.copy(readAtOnWire = 0L)
     }
 
+    @ParameterizedTest
+    @EnumSource(Type::class)
+    fun `a chapter's duplicate mark survives a backup and a restore`(type: Type) = runTest {
+        val marks = InMemoryChapterCopyMarks().apply {
+            set(type.contentType, listOf(ChapterCopyMark(ID, CHAPTER_URL, CopyMark.NeverSkip)))
+        }
+
+        type.restoredMarks(type.backUp(KNOWN, marks)) shouldBe mapOf(CHAPTER_URL to CopyMark.NeverSkip)
+    }
+
     /** The dates a backup carries; [readAtOnWire] is the history time as written, which a restore merges. */
     data class Dates(
         val favoriteAt: Instant?,
@@ -57,9 +79,9 @@ class BackupDatesConformanceTest {
         val readAtOnWire: Long? = null,
     )
 
-    enum class Type {
-        MANGA {
-            override suspend fun backUp(dates: Dates): ByteArray {
+    enum class Type(val contentType: ContentType) {
+        MANGA(ContentType.MANGA) {
+            override suspend fun backUp(dates: Dates, marks: ChapterCopyMarkRepository): ByteArray {
                 val manga = Manga.create().copy(
                     id = ID,
                     source = 1L,
@@ -80,6 +102,9 @@ class BackupDatesConformanceTest {
                     startDate = dates.startDate, finishDate = dates.finishDate, private = false,
                 )
                 val creator = MangaBackupCreator(
+                    libraryHides = FakeLibraryHiddenRepository(),
+                    tombstones = NoChapterTombstoneRepository,
+                    manualOrder = FakeLibraryManualOrderRepository(),
                     mangaRepository = mockk {
                         coEvery { getExcludedScanlatorsByMangaIds(any()) } returns emptyMap()
                     },
@@ -100,6 +125,9 @@ class BackupDatesConformanceTest {
                     getManga = mockk(relaxed = true),
                     mergeGroupRepository = mockk(relaxed = true),
                     chapterNumberOverrides = NoChapterNumberOverrides,
+                    copyMarks = marks,
+                    localVolumes = NoLocalVolumes,
+                    volumePicks = NoVolumePicks,
                     readingLog = NoReadingLog,
                 )
                 val batch = listOf(manga to creator.base(listOf(manga)).single())
@@ -124,9 +152,12 @@ class BackupDatesConformanceTest {
                     readAtOnWire = backup.history.single().lastRead,
                 )
             }
+
+            override fun restoredMarks(wire: ByteArray) = ProtoBuf.decodeFromByteArray(BackupManga.serializer(), wire)
+                .let { backedUpCopyMarks(it.chapters, { chapter -> chapter.url }, { chapter -> chapter.copyMark }) }
         },
-        NOVEL {
-            override suspend fun backUp(dates: Dates): ByteArray {
+        NOVEL(ContentType.NOVELS) {
+            override suspend fun backUp(dates: Dates, marks: ChapterCopyMarkRepository): ByteArray {
                 val novel = Novel.create().copy(
                     id = ID,
                     source = "s",
@@ -145,6 +176,9 @@ class BackupDatesConformanceTest {
                     startDate = dates.startDate, finishDate = dates.finishDate, private = false,
                 )
                 val creator = NovelBackupCreator(
+                    libraryHides = FakeLibraryHiddenRepository(),
+                    tombstones = NoChapterTombstoneRepository,
+                    manualOrder = FakeLibraryManualOrderRepository(),
                     novelRepository = mockk(relaxed = true),
                     novelChapterRepository = mockk {
                         coEvery { getByNovelIds(any()) } returns
@@ -162,7 +196,12 @@ class BackupDatesConformanceTest {
                     },
                     novelSourceManager = mockk(),
                     chapterNumberOverrides = NoChapterNumberOverrides,
+                    copyMarks = marks,
+                    localVolumes = NoLocalVolumes,
+                    volumePicks = NoVolumePicks,
                     readingLog = NoReadingLog,
+                    readingPace = NoReadingPace,
+                    localNovelLanguages = NoLocalNovelLanguages,
                 )
                 val batch = listOf(novel to creator.base(listOf(novel)).single())
                 creator.chapters(batch)
@@ -181,18 +220,26 @@ class BackupDatesConformanceTest {
                     dateUpload = chapter.dateUpload,
                     startDate = track.startDate,
                     finishDate = track.finishDate,
-                    // NovelRestorer reads history's time inside its merge, by this same call
-                    readAt = backup.history.single().lastRead.toInstantOrNull(),
+                    readAt = backup.history.single().toRestoredHistory().readAt,
                     nextUpdate = backup.toNovelImpl().nextUpdate,
                     readAtOnWire = backup.history.single().lastRead,
                 )
             }
+
+            override fun restoredMarks(wire: ByteArray) = ProtoBuf.decodeFromByteArray(BackupNovel.serializer(), wire)
+                .let { backedUpCopyMarks(it.chapters, { chapter -> chapter.url }, { chapter -> chapter.copyMark }) }
         },
         ;
 
-        abstract suspend fun backUp(dates: Dates): ByteArray
+        abstract suspend fun backUp(
+            dates: Dates,
+            marks: ChapterCopyMarkRepository = InMemoryChapterCopyMarks(),
+        ): ByteArray
 
         abstract fun restore(wire: ByteArray): Dates
+
+        /** The duplicate marks the restorer reads off the wire, through the kernel both restorers call. */
+        abstract fun restoredMarks(wire: ByteArray): Map<String, CopyMark>
     }
 
     private companion object {

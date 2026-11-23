@@ -56,31 +56,47 @@
     <string name="action_settings">Settings</string>
     <string name="action_menu">Menu</string>
     <string name="action_filter">Filter</string>
-    <string name="action_set_interval">Set interval</string>
     <string name="action_filter_bookmarked">Bookmarked</string>
     <string name="action_filter_tracked">Tracked</string>
     <string name="action_filter_unread">Unread</string>
     <string name="action_filter_interval_custom">Customized update frequency</string>
     <!-- reserved for #4048 -->
-    <string name="action_filter_empty">Remove filter</string>
     <string name="action_sort_alpha">Alphabetically</string>
     <string name="action_sort_count">Total entries</string>
     <string name="action_sort_total">Total chapters</string>
     <string name="action_sort_last_read">Last read</string>
     <string name="action_sort_last_manga_update">Last update check</string>
     <string name="action_sort_unread_count">Unread count</string>
-    <string name="action_sort_next_updated">Next expected update</string>
     <string name="action_sort_latest_chapter">Latest chapter</string>
     <string name="action_sort_chapter_fetch_date">Chapter fetch date</string>
     <string name="action_sort_date_added">Date added</string>
     <string name="action_sort_tracker_score">Tracker score</string>
-    <string name="action_sort_downloaded">Downloaded</string>
     <string name="action_sort_random">Random</string>
+    <!-- RK: per-category sort, manual order, and the duplicate chapters the reader skips -->
     <string name="action_sort_reset_to_global">Reset to global sort</string>
+    <string name="action_sort_manual">Manual</string>
+    <string name="pref_show_skipped_duplicates">Show duplicate chapters the reader skips</string>
+    <string name="pref_export_copy_marks">Export duplicate marks</string>
+    <string name="pref_export_copy_marks_summary">Saves your Never skip and copy marks to attach to a report</string>
+    <string name="copy_marks_exported">Exported %1$d marked chapters</string>
+    <string name="copy_marks_export_failed">Couldn't export the duplicate marks</string>
+    <string name="pref_show_skipped_duplicates_summary">Marks them on a series' chapter list while Skip duplicate chapters is on</string>
+    <string name="chapter_duplicate_copies">%1$d copies</string>
+    <string name="chapter_duplicate_copies_count">%1$d chapters have copies the reader skips</string>
+    <string name="chapter_duplicate_show_only">Show only these</string>
+    <string name="chapter_duplicate_show_all">Show all</string>
+    <string name="chapter_never_skip">Never skipped</string>
+    <string name="chapter_marked_copy">Marked as a copy</string>
+    <string name="action_never_skip">Never skip</string>
+    <string name="action_mark_as_copies">Mark as copies</string>
+    <string name="action_clear_copy_mark">Clear duplicate mark</string>
+    <string name="action_sort_reset_manual">Reset manual order</string>
+    <string name="library_manual_order_moved">Moved %1$s</string>
     <string name="action_search">Search</string>
     <string name="action_search_hint">Search…</string>
     <string name="action_search_settings">Search settings</string>
     <string name="action_global_search">Global search</string>
+    <!-- RK: library search -->
     <string name="action_library_search">Library search</string>
     <string name="action_select_all">Select all</string>
     <string name="action_select_inverse">Select inverse</string>
@@ -95,6 +111,7 @@
     <string name="action_enable_all">Enable all</string>
     <string name="action_disable_all">Disable all</string>
     <string name="action_edit">Edit</string>
+    <!-- RK: the edit-info dialog -->
     <string name="action_edit_info">Edit info</string>
     <string name="action_add">Add</string>
     <string name="action_update_category">Update category</string>
@@ -116,6 +133,8 @@
     <string name="action_start">Start</string>
     <string name="action_resume">Resume</string>
     <string name="action_open_in_browser">Open in browser</string>
+    <!-- RK: details web search -->
+    <string name="action_web_search">Web search</string>
     <string name="action_show_manga">Show entry</string>
     <string name="action_copy_to_clipboard">Copy to clipboard</string>
     <string name="action_copy_link">Copy link</string>
@@ -127,6 +146,7 @@
     <string name="action_display">Display</string>
     <string name="action_display_grid">Compact grid</string>
     <string name="action_display_comfortable_grid">Comfortable grid</string>
+    <!-- RK: panorama grid display mode -->
     <string name="action_display_comfortable_grid_panorama">Panorama comfortable grid</string>
     <string name="action_display_list">List</string>
     <string name="action_display_cover_only_grid">Cover-only grid</string>
@@ -134,11 +154,13 @@
     <string name="action_display_unread_badge">Unread chapters</string>
     <string name="action_display_local_badge">Local source</string>
     <string name="action_display_language_badge">Language</string>
+    <!-- RK: library source icon badge -->
     <string name="action_display_source_badge">Source icon</string>
     <string name="action_display_show_tabs">Show category tabs</string>
     <string name="action_display_show_number_of_items">Show number of items</string>
     <string name="action_display_show_continue_reading_button">Continue reading button</string>
     <string name="action_disable">Disable</string>
+    <!-- RK: enable action -->
     <string name="action_enable">Enable</string>
     <string name="action_pin">Pin</string>
     <string name="action_unpin">Unpin</string>
@@ -166,6 +188,12 @@
     <string name="action_correct_chapter_number">Correct chapter number</string>
     <string name="chapter_number_source">The source says %1$s</string>
     <string name="chapter_number_hint">Chapter number may be wrong</string>
+    <!-- RK: details chapter list jumps and the Start/Resume button's side -->
+    <string name="action_scroll_to_bottom">Scroll to bottom</string>
+    <string name="action_scroll_to_next_unread">Scroll to next unread</string>
+    <string name="no_unread_chapter_in_list">No unread chapter in the list</string>
+    <string name="pref_details_scroll_actions_in_menu">Chapter list scroll actions in menu</string>
+    <string name="pref_read_button_side">Resume button position</string>
     <!-- RK: pref-based merge (manage grouped sources) -->
     <string name="action_manage_sources">Manage sources</string>
     <string name="action_metadata_viewer">Gallery info</string>
@@ -176,33 +204,31 @@
     <string name="merge_sources_reset_order_action">Reset order</string>
     <string name="merge_sources_split_action">Split</string>
     <string name="merge_sources_split_confirm">Split %s out of this merged group?</string>
-    <string name="merge_sources_remove_action">Remove from library</string>
     <string name="merge_sources_remove_all_action">Remove all from library</string>
     <string name="merge_sources_split">Split from the merged group</string>
     <string name="merge_sources_removed">Removed from library</string>
-    <string name="merge_sources_all">All</string>
     <string name="merge_unified">Unified</string>
     <string name="action_merge_source_icons">Show source icons on merged covers</string>
-    <!-- RK: master merging switch (Phase 5) -->
-    <string name="action_series_merging">Group series across sources</string>
+    <!-- RK: master merging switch -->
+    <string name="action_series_merging">Merge series across sources</string>
     <string name="pref_series_merging_summary">Collapse the same series from different sources into one entry</string>
-    <!-- RK: add-time grouping prompt (Phase 5) -->
+    <!-- RK: add-time grouping prompt -->
     <string name="action_add_to_group">Add to existing group</string>
     <string name="action_add_to_group_hint">Pick the entries it belongs with</string>
     <string name="action_add_to_group_selected">%1$d picked</string>
-    <string name="pref_suggest_group_same_title">Suggest grouping same-titled series</string>
-    <string name="pref_suggest_group_same_title_summary">Offer to group a new series with a matching library entry</string>
-    <!-- RK: novel merge (P5 S8) -->
+    <string name="pref_suggest_group_same_title">Suggest merging same-titled series</string>
+    <string name="pref_suggest_group_same_title_summary">Offer to merge a new series with a matching library entry</string>
+    <!-- RK: novel merge -->
     <string name="pref_clear_merges">Clear all merges</string>
     <string name="pref_clear_merges_summary">Split every merged series back into separate per-source entries</string>
     <string name="merges_cleared">Merged series cleared</string>
     <string name="pref_repair_novel_details">Repair novel details</string>
-    <string name="pref_repair_novel_details_summary">Find novels showing another novel\'s title or cover and re-fetch them from their own source.</string>
+    <string name="pref_repair_novel_details_summary">Re-fetch novels showing another novel's title or cover</string>
     <string name="novel_details_repair_none">No affected novels found</string>
     <string name="novel_details_repair_done">Refreshed %1$d of %2$d affected novels</string>
     <string name="related_mangas">Related</string>
     <string name="pref_preferred_sources">Preferred sources</string>
-    <string name="pref_preferred_sources_summary">Rank sources to pick which one leads a merged chapter list</string>
+    <string name="pref_preferred_sources_summary">Rank which source a merged series takes its chapters from first</string>
     <string name="pref_preferred_sources_guide">Higher-ranked sources lead a merged series\' combined chapter list. Unranked sources fall back to the one with the most chapters.</string>
     <string name="pref_preferred_sources_empty">No sources ranked yet</string>
     <string name="pref_preferred_sources_add">Add a source</string>
@@ -211,7 +237,6 @@
     <!-- RK: recommendations settings -->
     <string name="pref_recommendations">Recommendations</string>
     <string name="pref_recommendations_summary">Related-manga suggestions and taste profile</string>
-    <string name="pref_recommendation_sources">Sources</string>
     <string name="pref_enable_related_mangas">Show related manga</string>
     <string name="pref_enable_related_mangas_summary">Suggest similar manga on the details page</string>
     <string name="pref_related_placement">Related manga placement</string>
@@ -220,7 +245,7 @@
     <string name="pref_include_tracker_recommendations">Tracker recommendations</string>
     <string name="pref_include_tracker_recommendations_summary">Suggest similar manga from your trackers</string>
     <string name="pref_taste_profile">Taste profile</string>
-    <string name="pref_tracker_library_auto_refresh">Auto-refresh library</string>
+    <string name="pref_tracker_library_auto_refresh">Refresh tracker lists automatically</string>
     <string name="pref_update_monthly">Monthly</string>
     <string name="pref_refresh_now">Refresh now</string>
     <string name="pref_refresh_now_summary">Pull your tracker libraries now</string>
@@ -229,22 +254,20 @@
     <string name="pref_inject_cross_recommendation">Because you\'re reading…</string>
     <string name="pref_inject_cross_recommendation_summary">Also suggest what your highly rated titles are similar to</string>
     <string name="pref_inject_tag_search">Matching your taste</string>
-    <string name="pref_inject_tag_search_summary">For a tracked manga, search this source for the genres you enjoy</string>
-    <string name="pref_recommendation_reranking">Reranking</string>
+    <string name="pref_inject_tag_search_summary">Adds this source's titles in genres you like, for tracked manga</string>
+    <string name="pref_recommendation_reranking">Taste ranking</string>
     <string name="pref_enable_recommendation_rerank">Rerank by taste</string>
     <string name="pref_enable_recommendation_rerank_summary">Reorder suggestions toward your taste profile</string>
-    <string name="pref_recommendation_style">Recommendation style</string>
-    <string name="pref_serendipity">Serendipity</string>
-    <string name="pref_recommendation_filters">Filters</string>
+    <string name="pref_recommendation_style">Personal over popular</string>
+    <string name="pref_recommendation_style_summary">Higher favors your taste over what is popular</string>
+    <string name="pref_serendipity">Picks outside your taste</string>
+    <string name="pref_serendipity_summary">Share of suggestions kept outside your taste</string>
     <string name="pref_hide_in_library_recommendations">Hide manga already in my library</string>
-    <string name="pref_hide_in_library_recommendations_summary">Hide suggestions already in your library</string>
-    <string name="pref_recommendation_filters_summary">Hide already-tracked manga from suggestions by their status</string>
     <string name="pref_hide_tracked_reading_completed">Hide reading &amp; completed</string>
     <string name="pref_hide_tracked_dropped">Hide dropped</string>
     <string name="pref_hide_tracked_on_hold">Hide on-hold</string>
     <string name="pref_hide_tracked_plan_to_read">Hide plan-to-read</string>
     <!-- RK: recommendations - last-refresh state -->
-    <string name="pref_last_refresh_never">never</string>
     <string name="pref_refresh_now_cooldown">Please wait before refreshing again</string>
     <!-- RK: recommendations - "See all" browse grid -->
     <string name="recs_see_all">See all (%d)</string>
@@ -262,6 +285,7 @@
     <string name="action_install">Install</string>
     <string name="action_share">Share</string>
     <string name="action_save">Save</string>
+    <string name="action_rotate">Rotate</string>
     <string name="action_reset">Reset</string>
     <string name="action_revert_to_default">Revert to default</string>
     <!-- RK: edit-info editor "Fill from tracker" autofill -->
@@ -269,24 +293,121 @@
     <string name="action_reset_info">Reset info</string>
     <string name="action_reset_all">Reset all</string>
     <string name="action_fill_from_tracker">Fill from tracker</string>
+    <string name="action_collate_tags">Collate tags</string>
+    <string name="edit_info_cover_url">Cover URL</string>
+    <string name="edit_info_description">Description</string>
+    <string name="edit_info_add_tags">Add tags</string>
+    <string name="edit_info_add_tags_hint">Separate tags with commas</string>
+    <string name="edit_info_alt_titles_hint">One title per line</string>
     <string name="select_tracker">Select tracker</string>
     <string name="entry_not_tracked">Entry not tracked</string>
     <!-- RK: a background job that could not start -->
     <string name="worker_start_failed">A background job couldn\'t start</string>
     <string name="track_autofill_not_found">No entry found on %1$s</string>
     <!-- RK: content-type filter chip (Browse + Library) -->
-    <string name="content_type_all">All</string>
     <string name="content_type_manga">Manga</string>
     <string name="content_type_novels">Novels</string>
     <!-- How a novel extension is packaged, shown once more than one kind is listed -->
     <string name="extension_format_js">JS</string>
     <string name="extension_format_apk">APK</string>
     <string name="extension_format_ireader">IReader</string>
+    <!-- RK: the local novel source, its volumes, and importing books into it -->
+    <string name="volume_label">Vol. %1$s</string>
+    <string name="all_volumes">All volumes</string>
+    <string name="local_volume_extras">Extras</string>
+    <string name="action_reorder_volumes">Reorder volumes</string>
+    <string name="action_add_to_series">Add to series</string>
+    <string name="action_add_volumes">Add volumes</string>
+    <string name="add_volumes_summary">The series you tick move into %1$s as its volumes, with their read progress, and leave the library</string>
+    <string name="action_split_out_volume">Split out volumes</string>
+    <string name="action_split_out">Split out</string>
+    <string name="split_out_volume_summary">The volumes you tick become one series of their own in the library, with their read progress</string>
+    <string name="action_combine_volumes">Combine as volumes</string>
+    <string name="combine_volumes_keep">Keep as the series</string>
+    <string name="combine_volumes_summary">The others become its volumes, with their read progress, and leave the library, their files where they are</string>
+    <string name="local_volumes_move_failed">Couldn't group the volumes; nothing changed</string>
+    <string name="local_volumes_combined">Combined into %1$s</string>
+    <string name="local_volume_split_out">Split out as %1$s</string>
+    <string name="action_rename_files">Organize files</string>
+    <string name="action_delete_volumes">Delete volumes</string>
+    <string name="local_folder_unreadable">Couldn\'t read %1$s in the local folder</string>
+    <string name="delete_volumes_failed">Couldn\'t delete every volume; the rest are still there</string>
+    <string name="volume_duplicates">%1$d volumes show %2$s</string>
+    <string name="volume_duplicates_keep">Keep all</string>
+    <string name="volume_duplicates_delete">Delete some</string>
+    <string name="rename_files_summary">Every volume moves into the series' folder under the names shown here</string>
+    <string name="rename_files_none">The files already have these names</string>
+    <string name="edit_info_also_rename_files">Also organize files</string>
+    <string name="rename_files_taken">%1$s is already taken, so the name below is used. A name you choose also becomes the title</string>
+    <string name="rename_files_choose_name">Choose another name</string>
+    <string name="local_files_renamed">Files organized</string>
+    <string name="local_series_missing_title">Folder not found</string>
+    <string name="local_series_missing_message">Pick the folder that now holds the files of %1$s</string>
+    <string name="action_link_folder">Link</string>
+    <string name="local_volume_missing">%1$s\'s folder is missing</string>
+    <string name="local_series_waits_for_repair">An unfinished organize holds this series</string>
+    <string name="local_series_forget_unfinished">Forget the unfinished organize?</string>
+    <string name="local_series_forget_unfinished_message">Files are left as they are, and the next refresh lists what is there</string>
+    <string name="action_forget">Forget</string>
+    <string name="local_volume_missing_file">%1$s\'s file is missing</string>
+    <string name="action_choose_folder">Choose folder</string>
+    <string name="action_remove_from_series">Remove from series</string>
+    <string name="local_volume_member_failed">Couldn\'t change the volume; nothing changed</string>
+    <string name="local_series_link_failed">Couldn\'t link the folder</string>
+    <string name="action_rename">Rename</string>
+    <string name="undo_volumes_failed">Couldn't undo the move; the volumes stay where they are</string>
+    <string name="action_combine">Combine</string>
+    <string name="volume_rename">Rename volume</string>
+    <string name="loose_files">Loose files</string>
+    <string name="loose_files_one_volume">One volume</string>
+    <string name="loose_files_each">Each its own volume</string>
+    <string name="loose_files_none">No volume</string>
+    <string name="volume_order_hint">Chapters sorted by source are read in this order</string>
+    <string name="volume_read_count">%1$d/%2$d read</string>
+    <string name="local_novel_volume_chapter">Vol. %1$s - %2$s</string>
+    <string name="local_import_title">Import files</string>
+    <string name="local_import_choose">Choose files</string>
+    <string name="local_import_formats">EPUB books, or CBZ, ZIP, RAR, 7Z and TAR comics</string>
+    <string name="local_import_add_more">Add files</string>
+    <string name="local_import_start">Import</string>
+    <string name="local_import_reading">Reading files…</string>
+    <string name="local_import_importing">Copying files…</string>
+    <string name="local_import_series_name">Series name</string>
+    <string name="local_import_skipped">Skipped</string>
+    <string name="local_import_reason_unreadable">Could not be read</string>
+    <string name="local_import_reason_protected">Protected with DRM</string>
+    <string name="local_import_reason_unsupported">Not a supported file type</string>
+    <string name="local_import_reason_no_storage">The storage folder is not set or cannot be written to</string>
+    <string name="local_import_reason_copy_failed">Could not be copied</string>
+    <string name="local_import_reason_add_failed">Copied, but could not be added to the library</string>
+    <string name="local_import_reason_store_failed">Copied, but could not be opened</string>
+    <string name="local_import_open">Open</string>
+    <string name="local_import_joins">Adds to %1$s</string>
+    <string name="local_import_beside">A new series, beside %1$s</string>
+    <string name="local_import_keep_separate">Keep separate</string>
+    <string name="local_import_add_to_it">Add to it</string>
+    <string name="local_import_replace">Replace</string>
+    <string name="local_import_keep_both">Keep both</string>
+    <string name="local_import_skip">Skip</string>
+    <string name="local_import_this_import">In this import</string>
+    <!-- RK: exporting novels as EPUB -->
+    <string name="action_export_epub">Export as EPUB</string>
+    <string name="export_epub_available">%1$d of %2$d chapters are on this device</string>
+    <string name="export_epub_none">No chapters are on this device yet</string>
+    <string name="export_epub_download_missing">Download the rest</string>
+    <string name="export_epub_pictures">Include pictures</string>
+    <string name="export_epub_range_all">All on this device</string>
+    <string name="export_epub_from">From</string>
+    <string name="export_epub_to">To</string>
+    <string name="export_epub_progress">Exporting %1$s</string>
+    <string name="export_epub_failed">Could not export %1$s</string>
+    <string name="export_epub_running">Exporting as EPUB</string>
     <string name="novel_page_use_for_details">Use page for details</string>
     <string name="novel_page_use_for_chapters">Use page for chapters</string>
     <string name="novel_page_use_for_chapter">Use page for this chapter</string>
     <string name="novel_page_details_updated">Details updated from this page</string>
     <string name="novel_chapter_empty">The source returned no text for this chapter</string>
+    <string name="novel_filter_unsupported">Not supported in this app version</string>
     <string name="novel_page_no_chapters">No chapters on this page. Open the page that lists them.</string>
     <string name="novel_page_chapter_saved">Chapter saved from this page</string>
     <string name="novel_page_no_chapter_text">No chapter text on this page</string>
@@ -317,12 +438,15 @@
     <string name="recents_row_read">Read %1$s</string>
     <string name="recents_row_last_read">Last read %1$s</string>
     <string name="recents_mode_grouped">Grouped</string>
-    <string name="recents_mode_feed">Feed</string>
     <string name="pref_combined_recents_tab">Combine Updates and History</string>
     <string name="pref_combined_recents_tab_summary">Replaces the two tabs with a single Recents tab</string>
+    <!-- RK: optional ways into Statistics besides More -->
+    <string name="pref_stats_shortcut">Statistics shortcut</string>
+    <string name="pref_stats_shortcut_menus">In the Library, Updates and History menus</string>
+    <string name="pref_stats_shortcut_tab">As its own tab</string>
     <!-- RK: refresh feedback on the combined All chip (both libraries update at once) -->
     <string name="updating_both_libraries">Updating both libraries</string>
-    <!-- RK: light-novel browse (P5 S3a) -->
+    <!-- RK: light-novel browse -->
     <string name="repos">Repos</string>
     <string name="bulk_selected_types">%1$s, %2$s</string>
     <string name="categories_for_type">Categories for %1$s</string>
@@ -334,19 +458,23 @@
     <string name="repo_kind_plugins">Plugin repo</string>
     <string name="repo_checking">Checking…</string>
     <string name="repo_unreachable">Couldn\'t reach this repo</string>
+    <string name="repo_key_changed">Now serves another repo</string>
+    <string name="repo_key_changed_detail">%1$s, signed by a different key. Remove this repo and add it again to use it</string>
+    <string name="repo_key_changed_toast">%1$s now serves another repo. Remove it and add it again</string>
     <string name="action_add_repo">Add repo</string>
     <string name="repo_address">Address</string>
     <string name="repo_signing_key">Signing key</string>
+    <string name="repo_open_discord">Open Discord</string>
     <string name="repo_add_input">Repo address</string>
     <string name="repo_add_failed">Couldn\'t read a repo at this address</string>
     <string name="repo_add_unreachable">Couldn\'t reach this address</string>
+    <string name="repo_add_cleartext">Anyone on your network can change what an http:// address serves</string>
     <string name="repo_already_added">This repo is already added</string>
     <string name="repo_add_deeplink">Add the repo below?</string>
     <string name="repo_remove_title">Remove repo</string>
     <string name="repo_remove_body">Remove %1$s (%2$s)?</string>
     <string name="ln_no_sources">No light novel sources installed. Install one from the Extensions tab.</string>
     <string name="channel_ln_plugin_updates">Light novel plugin updates</string>
-    <string name="channel_novel_tts">Novel read aloud</string>
     <string name="channel_novel_update_progress">Novel update progress</string>
     <string name="channel_novel_update_errors">Novel update errors</string>
     <string name="channel_novel_new_chapters">New novel chapters</string>
@@ -364,12 +492,11 @@
     <string name="tts_sleep_timer">Sleep timer</string>
     <string name="tts_sleep_timer_end_of_chapter">End of chapter</string>
     <string name="tts_sleep_timer_ends_with_chapter">Stops at the end of this chapter</string>
-    <!-- RK: light-novel chapter updates (P5 S7) -->
+    <!-- RK: light-novel chapter updates -->
     <string name="novel_library_update">Light novel updates</string>
     <!-- missing undo feature after Compose rewrite #7454 -->
     <string name="action_undo">Undo</string>
     <string name="action_close">Close</string>
-    <string name="action_open_log">Open log</string>
     <string name="action_show_errors">Tap to see details</string>
     <string name="action_restore">Restore</string>
     <string name="action_webview_back">Back</string>
@@ -393,10 +520,8 @@
     <string name="onboarding_description">Let\'s set some things up first. You can always change these in the settings later too.</string>
     <string name="onboarding_action_next">Next</string>
     <string name="onboarding_action_finish">Get started</string>
-    <string name="onboarding_action_skip">Skip</string>
     <string name="onboarding_storage_info">Select a folder where %1$s will store chapter downloads, backups, and more.\n\nA dedicated folder is recommended.\n\nSelected folder: %2$s</string>
     <string name="onboarding_storage_action_select">Select a folder</string>
-    <string name="onboarding_storage_selection_required">A folder must be selected</string>
     <string name="onboarding_storage_help_info">Updating from an older version and not sure what to select? Refer to the storage guide for more information.</string>
     <string name="onboarding_storage_help_action">Storage guide</string>
     <string name="app_migrating_title">Finishing the update</string>
@@ -422,7 +547,7 @@
     <string name="pref_category_reader">Reader</string>
     <!-- RK: the two per-content-type reader settings screens, reached from the Reader screen. -->
     <string name="pref_category_manga_reader">Manga reader</string>
-    <string name="pref_category_manga_reader_summary">Viewers, page layout, tap zones and E-Ink</string>
+    <string name="pref_category_manga_reader_summary">Reading modes, page layout, tap zones and E-Ink</string>
     <string name="pref_category_novel_reader">Novel reader</string>
     <string name="pref_category_novel_reader_summary">Text display, scrolling and accessibility</string>
     <string name="pref_category_downloads">Downloads</string>
@@ -463,10 +588,55 @@
     <string name="theme_yinyang">Yin &amp; Yang</string>
     <string name="theme_yotsuba">Yotsuba</string>
     <string name="theme_tidalwave">Tidal Wave</string>
+    <!-- RK --><string name="theme_custom">Custom</string>
+    <string name="theme_cottoncandy">Cotton Candy</string>
+    <string name="theme_mocha">Mocha</string>
+    <string name="theme_cloudflare">Cloudflare</string>
+    <string name="theme_doom">Doom</string>
+    <string name="theme_matrix">Matrix</string>
+    <string name="theme_sapphire">Sapphire</string>
+    <string name="theme_springanddusk">Spring &amp; Dusk</string>
+    <string name="theme_strawberries">Strawberries</string>
+    <string name="theme_tealandsapphire">Teal &amp; Sapphire</string>
+    <string name="theme_lime">Lime</string>
+    <string name="theme_doki">Doki</string>
+    <string name="pref_custom_theme_color">Custom theme color</string>
+    <string name="pref_custom_theme_color_summary">Pick the color the Custom theme is built from</string>
+    <string name="pref_custom_theme_style">Custom theme style</string>
+    <string name="pref_app_icon">App icon</string>
+    <string name="pref_app_icon_summary">Choose the icon your launcher shows</string>
+    <string name="app_icon_original">Original</string>
+    <string name="app_icon_original_re">Original with れ</string>
+    <string name="app_icon_flame_r">Flame with R</string>
+    <string name="app_icon_flame_re">Flame with れ</string>
+    <string name="app_icon_mihon_re">Mihon style</string>
+    <string name="app_icon_stable">Stable</string>
+    <string name="app_icon_nightly">Nightly</string>
+    <string name="app_icon_dev">Dev</string>
+    <string name="app_icon_mihon_light">Mihon</string>
+    <string name="app_icon_mihon_dark">Mihon dark</string>
+    <string name="app_icon_outline">Outline</string>
+    <string name="app_icon_themed_hint">Themed icons show the design without its colors</string>
+    <string name="app_icon_change_title">Change app icon?</string>
+    <string name="app_icon_change_message">The app reopens with the new icon. Your launcher may drop it from the home screen; add it back from the app drawer.</string>
+    <string name="custom_theme_palette_sunset">Sunset</string>
+    <string name="custom_theme_palette_outrun">Outrun</string>
+    <string name="custom_theme_palette_raspberry">Raspberry</string>
+    <string name="custom_theme_palette_cathode">Cathode</string>
+    <string name="custom_theme_palette_bubblegum">Bubblegum</string>
+    <string name="custom_theme_palette_springfield">Springfield</string>
+    <string name="custom_theme_palette_spectral">Spectral</string>
+    <string name="custom_theme_palette_night_at_the_beach">Night at the beach</string>
+    <string name="custom_theme_palette_casual">Casual</string>
+    <string name="custom_theme_palette_patagonia">Patagonia</string>
+    <string name="custom_theme_palette_lcd">LCD</string>
+    <string name="custom_theme_palette_pop">Pop</string>
+    <string name="custom_theme_palette_pico">PICO-8</string><!-- RK -->
     <string name="pref_dark_theme_pure_black">Pure black dark mode</string>
+    <!-- RK --><string name="pref_shown_content">Content shown</string>
     <!-- RK --><string name="pref_theme_cover_based">Theme based on cover</string>
     <string name="pref_theme_cover_based_summary">Tint the reader and details screens with the cover\'s color</string>
-    <string name="pref_theme_cover_based_style">Cover based theme style</string><!-- RK -->
+    <string name="pref_theme_cover_based_style">Cover color style</string><!-- RK -->
     <string name="pref_relative_format">Relative timestamps</string>
     <!-- "Today" instead of "2023-12-31" -->
     <string name="pref_relative_format_summary">\"%1$s\" instead of \"%2$s\"</string>
@@ -481,7 +651,7 @@
     <string name="pref_display_images_description">Render images in manga descriptions</string>
     <!-- RK: adult-source gallery page previews -->
     <string name="pref_previews_row_count">Page preview rows</string>
-    <string name="pref_previews_row_count_summary">Rows of gallery page thumbnails on the details screen for adult sources (0 to hide)</string>
+    <string name="pref_previews_row_count_summary">Thumbnail rows on adult sources' details pages, 0 hides them</string>
     <string name="more_previews">More previews</string>
     <string name="page_previews">Page previews</string>
     <string name="page_preview_page_go_to">Go to page</string>
@@ -515,7 +685,6 @@
       <!-- Library section -->
     <string name="pref_category_display">Display</string>
     <string name="pref_library_columns">Items per row</string>
-    <string name="portrait">Portrait</string>
     <string name="landscape">Landscape</string>
 
     <string name="pref_category_library_update">Global update</string>
@@ -598,13 +767,11 @@
     <string name="ln_plugin_script_missing_message">This plugin\'s script is missing and could not be downloaded again, so none of its sources are available.</string>
     <string name="ext_reinstall">Reinstall</string>
     <string name="ext_uninstall">Uninstall</string>
-    <string name="ext_remove">Remove</string>
-    <string name="ext_confirm_remove">Remove Extension?</string>
+    <string name="ext_confirm_uninstall">Uninstall this extension?</string>
     <string name="ext_app_info">App info</string>
     <string name="untrusted_extension">Untrusted extension</string>
     <string name="untrusted_extension_message">Malicious extensions can read any stored login credentials or execute arbitrary code.\n\nBy trusting this extension, you accept these risks.</string>
     <string name="obsolete_extension_message">This extension is not associated with any store. It will not receive updates, may not function properly, and can cause issues with the app. Uninstalling it is recommended.</string>
-    <string name="remove_private_extension_message">Do you really want to remove \"%s\" extension?</string>
     <string name="extension_api_error">Failed to fetch available extensions</string>
     <string name="ext_info_version">Version</string>
     <string name="ext_info_language">Language</string>
@@ -661,17 +828,31 @@
     <string name="pref_double_tap_anim_speed">Double tap animation speed</string>
     <string name="pref_show_page_number">Show page number</string>
     <!-- RK: novel reader always-on reading percentage (twin of the manga page number) --><string name="pref_show_reading_progress">Show reading progress</string>
+    <!-- RK: the open chapter's time left at the reader's learned pace, for both readers -->
+    <string name="pref_show_time_left">Show time left in chapter</string>
+    <string name="pref_progress_size">Progress size</string>
+    <string name="pref_progress_size_scale">%1$s×</string>
+    <string name="pref_progress_backed">Background behind progress</string>
+    <string name="reader_time_left">%1$s left</string>
+    <string name="reader_time_left_under_minute">Under a minute left</string>
+    <string name="reader_time_left_learning">Learning reading speed</string>
+    <string name="reader_time_left_learning_listening">Learning listening speed</string>
     <string name="pref_vertical_navigator">Use vertical chapter navigator in</string>
     <string name="pref_vertical_navigator_height">Vertical navigator height</string>
     <string name="pref_webtoon_vertical_navigator_on_left">Place vertical navigator on the left side</string>
     <string name="pref_show_reading_mode">Show reading mode</string>
     <string name="pref_show_reading_mode_summary">Briefly show current mode when reader is opened</string>
     <string name="pref_high_quality_renderer">Use high quality renderer</string>
-    <string name="pref_display_profile">Custom display profile</string>
+    <string name="pref_category_high_quality_renderer">High quality renderer</string>
     <string name="pref_crop_borders">Crop borders</string>
+    <string name="pref_crop_instead_of_zoom">Crop instead of zoom</string>
+    <string name="pref_fast_rendering_only">Disable tiles</string>
+    <string name="pref_hold_until_final">Show all tiles together</string>
     <string name="pref_custom_brightness">Custom brightness</string>
     <string name="pref_grayscale">Grayscale</string>
     <string name="pref_inverted_colors">Inverted</string>
+    <string name="pref_contrast">Contrast</string>
+    <string name="pref_contrast_value">%1$d%%</string>
     <string name="pref_custom_color_filter">Custom color filter</string>
     <string name="pref_color_filter_mode">Color filter blend mode</string>
     <string name="filter_mode_overlay">Overlay</string>
@@ -688,12 +869,15 @@
     <string name="pref_auto_webtoon_mode_summary">Read manhwa, manhua and webtoons in webtoon mode, unless you change the reading mode</string>
     <string name="auto_webtoon_snack">Reading webtoon style</string>
     <string name="pref_reader_bottom_buttons">Bottom bar buttons</string>
+    <string name="pref_reader_bottom_buttons_filled">Fill buttons that are on</string>
+    <string name="pref_reader_bottom_buttons_filled_summary">Easier to see on black-and-white screens</string>
     <string name="pref_auto_scroll">Auto-scroll</string>
-    <string name="pref_auto_scroll_speed">Scroll speed</string>
+    <string name="pref_auto_scroll_speed">Auto-scroll speed</string>
     <string name="pref_auto_scroll_on_open">Start auto-scroll when opening a chapter</string>
-    <string name="pref_auto_scroll_interval">Page turn interval</string>
+    <string name="pref_auto_scroll_interval">Auto-scroll page interval</string>
     <string name="pref_auto_scroll_paged_only">Paged modes only</string>
     <string name="pref_bionic_reading">Bionic reading</string>
+    <string name="pref_bionic_reading_summary">Bolds the start of each word</string>
     <string name="pref_reader_text_size">Text size</string>
     <!-- RK: the in-reader settings sheet's +/- steppers -->
     <string name="action_decrease">Decrease</string>
@@ -702,8 +886,6 @@
     <!-- RK: the in-reader settings sheet's tab labels, read out for its icon tabs -->
     <string name="reader_settings_controls">Controls</string>
     <string name="reader_settings_filters">Filters</string>
-    <string name="pref_novel_theme_follow_system">Follow system</string>
-    <string name="pref_novel_background_color">Background color</string>
     <string name="pref_novel_text_color">Text color</string>
     <!-- RK: the colour picker the reader's page colours and the read-aloud highlight share -->
     <string name="color_custom">Custom</string>
@@ -714,16 +896,13 @@
     <!-- RK: shown when a chapter fails to load while the reader is already open -->
     <string name="chapter_load_failed">Couldn\'t load this chapter</string>
     <!-- RK: novel text display, applied by whichever renderer draws the chapter -->
-    <string name="pref_category_text_display">Text display</string>
     <string name="pref_novel_font">Font</string>
-    <string name="pref_novel_font_default">Default</string>
     <string name="pref_novel_font_default_summary">Your device's font, or the source's own</string>
     <string name="novel_font_section_built_in">Built in</string>
     <string name="novel_font_section_yours">Your fonts</string>
     <string name="novel_font_add">Add font</string>
     <string name="novel_font_import">Import from device</string>
     <string name="novel_font_import_summary">Pick a TTF or OTF file</string>
-    <string name="novel_font_download">Download</string>
     <string name="novel_font_download_summary">Search the whole Google Fonts library</string>
     <string name="novel_font_google">Google Fonts</string>
     <string name="novel_font_family_name">Font name</string>
@@ -737,8 +916,8 @@
     <string name="pref_novel_text_align">Alignment</string>
     <string name="pref_novel_regex_rules">Find and replace</string>
     <string name="pref_novel_regex_rules_summary">Rewrite chapter text before it is shown</string>
-    <string name="novel_regex_rule_name">Name</string>
     <string name="novel_regex_find">Find</string>
+    <string name="novel_regex_too_slow">This pattern takes too long to search</string>
     <string name="novel_regex_replace_with">Replace with</string>
     <string name="novel_regex_use_pattern">Find with a pattern</string>
     <string name="novel_regex_whole_words">Whole words only</string>
@@ -757,10 +936,7 @@
     <string name="novel_snippet_code">Code</string>
     <string name="novel_snippet_run_on_append">Run again for each chapter added to the page</string>
     <string name="novel_snippet_delete_confirmation">Do you wish to delete the snippet \"%1$s\"?</string>
-    <string name="pref_novel_text_align_left">Left</string>
-    <string name="pref_novel_text_align_center">Center</string>
     <string name="pref_novel_text_align_justify">Justify</string>
-    <string name="pref_novel_text_align_right">Right</string>
     <string name="pref_margin_top">Top margin</string>
     <string name="pref_margin_bottom">Bottom margin</string>
     <string name="pref_margin_left">Left margin</string>
@@ -771,30 +947,30 @@
     <string name="pref_paragraph_spacing_summary">The gap between paragraphs, as a multiple of your text size</string>
     <!-- RK: the chapter-text pipeline, which processes a chapter's markup before it is rendered -->
     <string name="pref_category_chapter_text">Chapter text</string>
+    <!-- Do not translate "WebView" -->
+    <string name="pref_category_webview_mode">WebView mode</string>
     <string name="pref_hide_chapter_title">Hide repeated chapter title</string>
     <string name="pref_hide_chapter_title_summary">Drop a heading at the top of a chapter that just repeats its name</string>
     <string name="pref_force_lowercase">Force lowercase</string>
     <string name="pref_block_media">Block images and video</string>
     <string name="pref_block_media_summary">Skip media a chapter embeds, for text-only reading or to save data</string>
     <string name="pref_keep_embedded_css">Use the chapter\'s own styling</string>
-    <string name="pref_keep_embedded_css_summary">Keeps a chapter\'s CSS instead of stripping it</string>
+    <string name="pref_keep_embedded_css_summary">Keeps the source's own fonts, colors and layout</string>
     <string name="pref_keep_embedded_js">Run scripts a chapter embeds</string>
-    <string name="pref_keep_embedded_js_summary">Usually leftover code from the source page rather than part of the chapter</string>
-    <string name="pref_source_css_priority">Chapter styling wins</string>
-    <string name="pref_source_css_priority_summary">Its size, colour and spacing override yours</string>
+    <string name="pref_keep_embedded_js_summary">Rarely needed, most are leftovers from the source page</string>
+    <string name="pref_source_css_priority">Chapter styling overrides yours</string>
+    <string name="pref_source_css_priority_summary">Its text size, color and spacing replace your settings</string>
     <string name="pref_use_original_fonts">Use the chapter\'s own fonts</string>
     <string name="pref_use_original_fonts_summary">Keeps the typeface a chapter asks for</string>
     <string name="pref_auto_split_text">Split walls of text</string>
     <string name="pref_auto_split_text_summary">Add paragraph breaks to chapters that arrive as one unbroken block</string>
     <string name="pref_auto_split_word_count">Words before a split</string>
-    <string name="pref_novel_rendering_mode">Rendering mode</string>
+    <string name="pref_novel_rendering_mode">Chapter display</string>
     <!-- Do not translate "WebView" -->
-    <string name="pref_novel_rendering_mode_webview">WebView</string>
     <string name="pref_novel_rendering_mode_native">Native text</string>
     <string name="pref_novel_text_selectable">Select text by long press</string>
-    <string name="pref_novel_text_selectable_summary">In Native text, links stop responding to taps</string>
-    <string name="pref_novel_auto_load_next_at">Add the next chapter at</string>
-    <string name="novel_page_layout_scroll">Scrolling</string>
+    <string name="pref_novel_text_selectable_summary">Links stop responding to taps</string>
+    <string name="pref_novel_auto_load_next_at">Load the next chapter after reading</string>
     <string name="pref_novel_seamless_chapters">Continuous chapters</string>
     <string name="pref_novel_seamless_chapters_summary">Scroll straight on into the next chapter</string>
     <!-- RK: novel read-aloud settings -->
@@ -859,7 +1035,7 @@
     <string name="tts_render_speed_result">%1$s× real time: %2$s s of audio in %3$s s, plus %4$s s encoding</string>
     <string name="tts_render_speed_failed">The speech engine could not render the sample</string>
     <string name="pref_tts_auto_page_advance">Continue to the next chapter</string>
-    <string name="pref_tts_scroll_to_top">Scroll to top</string>
+    <string name="pref_tts_scroll_to_top">Keep the paragraph at the top</string>
     <string name="pref_tts_scroll_to_top_summary">Puts the paragraph being read at the top, not the middle</string>
     <string name="pref_tts_keep_in_view">Keep paragraph in view</string>
     <string name="pref_tts_highlight">Highlight paragraph</string>
@@ -867,40 +1043,32 @@
     <string name="pref_tts_highlight_sentence_summary">Marks the sentence being read instead of its paragraph</string>
     <string name="pref_tts_highlight_style">Highlight style</string>
     <string name="pref_tts_highlight_color">Highlight color</string>
-    <string name="pref_tts_highlight_text_color">Text color</string>
     <string name="tts_highlight_background">Background</string>
     <string name="tts_highlight_underline">Underline</string>
     <string name="tts_highlight_outline">Outline</string>
     <string name="tts_color_amber">Amber</string>
-    <string name="tts_color_green">Green</string>
-    <string name="tts_color_blue">Blue</string>
     <string name="tts_color_pink">Pink</string>
     <string name="tts_color_purple">Purple</string>
-    <string name="tts_color_gray">Gray</string>
-    <string name="tts_color_dark">Dark</string>
-    <string name="tts_color_light">Light</string>
-    <string name="pref_category_accessibility">Accessibility</string>
     <!-- RK: the novel reader's tap layouts beside Mihon's -->
     <string name="nav_thirds">Top and bottom</string>
-    <string name="nav_center">Center</string>
     <string name="nav_center_large">Large center</string>
     <string name="nav_bottom">Bottom</string>
     <string name="pref_tap_bottom_zone_height">Bottom zone height</string>
     <!-- RK: what the reader's bar calls the open chapter -->
     <string name="pref_chapter_title_format">Chapter title</string>
-    <string name="pref_novel_use_rail">Vertical chapter navigator</string>
+    <string name="pref_novel_use_rail">Use vertical chapter navigator</string>
     <string name="action_scroll_to_top">Scroll to top</string>
     <string name="action_edit_bottom_buttons">Edit bottom bar</string>
     <string name="pref_novel_mark_read_percent">Mark chapter read at</string>
     <string name="pref_novel_show_raw_html">Show raw HTML</string>
     <string name="pref_novel_show_raw_html_summary">Shows a chapter's markup as text</string>
     <string name="pref_novel_webview_dev_tools">Novel web page developer tools</string>
-    <string name="pref_novel_webview_dev_tools_summary">Shows script errors and lets a connected computer inspect every web page in the app. Takes effect on the next chapter opened</string>
+    <string name="pref_novel_webview_dev_tools_summary">Shows script errors and lets a connected computer inspect every web page in the app</string>
     <string name="chapter_title_number">Number</string>
     <string name="chapter_title_number_and_name">Number and name</string>
     <string name="chapter_title_numbered">Ch. %1$s: %2$s</string>
     <string name="pref_swipe_between_chapters">Swipe between chapters</string>
-    <string name="pref_remove_extra_spacing">Remove extra spacing</string>
+    <string name="pref_remove_extra_spacing">Remove blank lines between paragraphs</string>
     <string name="pref_preserve_reading_position">Resume reading position</string>
     <string name="pref_preserve_reading_position_summary">Reopen chapters at your last position, even ones already marked read</string>
     <string name="pref_reader_preload_size">Pages to load ahead off Wi-Fi</string><!-- RK -->
@@ -922,6 +1090,8 @@
     <string name="white_background">White</string>
     <string name="gray_background">Gray</string>
     <string name="black_background">Black</string>
+    <string name="sepia_background">Sepia</string>
+    <string name="mint_background">Mint</string>
     <string name="automatic_background">Auto</string>
     <string name="pref_viewer_type">Default reading mode</string>
     <string name="l_nav">L shaped</string>
@@ -1007,11 +1177,19 @@
     <string name="dual_page_view_wide">When wide</string>
     <string name="pref_continuous_minwidth">Min width</string>
     <string name="pref_continuous_gap">Gap</string>
+    <!-- RK: the space between the two pages of a spread, manga and novels -->
+    <string name="pref_spread_gap">Space between pages</string>
     <string name="pref_image_filters">Image filters</string>
     <string name="pref_tile_filters">Tile filters</string>
+    <string name="pref_upscaler">Upscaler</string>
+    <string name="pref_downscaler">Downscaler</string>
+    <string name="action_choose_shader">Choose shader</string>
     <string name="pref_disable_double_tap_gestures">Disable double tap gestures</string>
     <string name="action_add_shader">Add shader</string>
     <string name="image_filter_invalid">Couldn\'t add shader</string>
+    <string name="shader_parameters">Parameters</string>
+    <string name="shader_param_range">%1$s to %2$s, default %3$s</string>
+    <string name="shader_param_default">Default %1$s</string>
 
       <!-- Downloads section -->
     <string name="pref_category_delete_chapters">Delete chapters</string>
@@ -1036,15 +1214,24 @@
     <string name="download_ahead">Download ahead</string>
     <string name="auto_download_while_reading">Auto download while reading</string>
     <string name="download_ahead_info">Only works if the current chapter + the next one are already downloaded.</string>
-    <string name="pref_category_download_pacing">Pacing</string>
-    <string name="pref_novel_chapter_delay">Delay between chapters</string>
-    <string name="pref_novel_source_delay">Delay per source</string>
-    <string name="pref_novel_source_delay_none">No source has its own delay</string>
-    <string name="pref_novel_source_delay_default">Default (%1$s)</string>
-    <string name="pref_novel_source_delay_empty">No novel sources installed</string>
-    <string name="pref_novel_source_delay_minimum">Needs at least %1$s</string>
+    <string name="pref_category_download_speed">Download speed</string>
+    <string name="pref_manga_chapter_delay">Delay between manga chapters</string>
+    <string name="pref_novel_chapter_delay">Delay between novel chapters</string>
+    <string name="pref_download_delay_back_to_back">Chapters download back to back</string>
+    <string name="pref_source_delay">Delay per source</string>
+    <string name="pref_source_delay_none">No source has its own delay</string>
+    <string name="pref_source_delay_default">Default (%1$s)</string>
+    <string name="pref_source_delay_set">Own delay</string>
+    <string name="pref_source_delay_empty">No sources installed</string>
+    <string name="pref_source_delay_minimum">Needs at least %1$s</string>
+    <string name="pref_source_delay_search">Search sources</string>
     <string name="download_delay_seconds">%1$s s</string>
     <string name="save_chapter_as_cbz">Save as CBZ archive</string>
+    <!-- RK: how often both download indexes recheck the downloads folder for changes made outside the app -->
+    <string name="pref_download_index_renew">Recheck downloads folder</string>
+    <string name="pref_download_index_renew_1hour">Every hour</string>
+    <string name="pref_download_index_renew_2hour">Every 2 hours</string>
+    <string name="pref_download_index_renew_manual_summary">Manual: only on Reindex downloads in Advanced</string>
     <string name="pref_download_concurrent_sources">Concurrent source downloads</string>
     <string name="pref_download_concurrent_pages">Concurrent page downloads</string>
     <string name="pref_download_concurrent_pages_summary">Pages downloaded simultaneously per source</string>
@@ -1054,7 +1241,7 @@
     <string name="pref_auto_update_manga_sync">Update progress after reading</string>
     <string name="pref_auto_update_manga_on_mark_read">Update progress when marked as read</string>
     <!-- RK: extensions that sync reading to their own site -->
-    <string name="pref_source_tracker_on_migration">Tell source sites about migrations</string>
+    <string name="pref_source_tracker_on_migration">Update source sites after migrating</string>
     <string name="pref_source_tracker_on_migration_summary">For extensions that sync reading to their own site</string>
     <string name="source_tracker_failed">%1$s couldn&apos;t sync to its site: %2$s</string>
     <string name="services">Trackers</string>
@@ -1064,7 +1251,7 @@
     <string name="pref_novelupdates_custom_lists">Use my own NovelUpdates lists</string>
     <string name="pref_novelupdates_custom_lists_summary">Pick which list each status moves a novel to</string>
     <string name="pref_novelupdates_configure_lists">Match statuses to lists</string>
-    <string name="pref_novelupdates_configure_lists_summary">Tap a status to move it to your next list</string>
+    <string name="pref_novelupdates_configure_lists_summary">Choose which list each reading status goes to</string>
     <string name="pref_novelupdates_never_backwards">Never move progress back</string>
     <string name="pref_novelupdates_never_backwards_summary">Reading an earlier chapter leaves NovelUpdates where it is</string>
     <string name="pref_novelupdates_unread_push">Move back on unread</string>
@@ -1089,16 +1276,15 @@
       <!-- Data and storage section -->
     <string name="pref_storage_location">Storage location</string>
     <string name="pref_storage_location_info">Used for automatic backups, chapter downloads, and local source.</string>
+    <string name="storage_location_unavailable">Storage location unavailable</string>
+    <string name="storage_location_unavailable_message">The selected folder can't be used. Choose a different storage location.</string>
     <string name="pref_create_backup">Create backup</string>
-    <string name="pref_create_backup_summ">Can be used to restore current library</string>
     <string name="pref_restore_backup">Restore backup</string>
-    <string name="pref_restore_backup_summ">Restore library from backup file</string>
     <string name="pref_backup_interval">Automatic backup frequency</string>
     <string name="action_create">Create</string>
     <string name="backup_created">Backup created</string>
     <string name="invalid_backup_file">Invalid backup file:</string>
     <string name="invalid_backup_file_error">Full error:</string>
-    <string name="invalid_backup_file_missing_manga">Backup does not contain any library entries.</string>
     <string name="invalid_backup_file_json">JSON backup not supported</string>
     <string name="invalid_backup_file_unknown">Backup file is corrupted</string>
     <!-- RK: the backup's extension apps and plugins that no repo here or trusted at restore lists -->
@@ -1113,18 +1299,18 @@
     <string name="restore_repos_unread">Repos that couldn\'t be read, or now sign with another key:</string>
     <string name="backup_restore_missing_sources">Missing sources:</string>
     <string name="backup_restore_missing_trackers">Trackers not logged into:</string>
+    <string name="restore_lnreader_local_skipped">Local novels not imported:</string>
+    <string name="restore_lnreader_format_unsupported">Made by a newer version of LNReader than this app can read</string>
     <string name="backup_restore_content_full">You may need to install any missing extensions and log in to tracking services afterwards to use them.</string>
     <string name="restore_completed">Restore completed</string>
     <string name="restore_duration">%1$02d min, %2$02d sec</string>
     <string name="backup_in_progress">Backup is already in progress</string>
-    <string name="backup_choice">What do you want to backup?</string>
     <string name="app_settings">App settings</string>
     <string name="source_settings">Source settings</string>
     <string name="private_settings">Include sensitive settings (e.g., tracker login tokens)</string>
     <string name="non_library_settings">All read entries</string>
     <string name="creating_backup">Creating backup</string>
     <string name="creating_backup_error">Backup failed</string>
-    <string name="missing_storage_permission">Storage permissions not granted</string>
     <string name="empty_backup_error">No library entries to back up</string>
     <string name="create_backup_file_error">Couldn\'t create a backup file</string>
     <string name="restore_miui_warning">Backup/restore may not function properly if MIUI Optimization is disabled.</string>
@@ -1132,6 +1318,10 @@
     <string name="restoring_backup">Restoring backup</string>
     <string name="restoring_backup_error">Restoring backup failed</string>
     <string name="restoring_backup_canceled">Canceled restore</string>
+    <!-- RK: the app-state banner during a restore, and the switches hiding the restore and library update banners -->
+    <string name="restoring_backup_progress">Restoring backup… (%s)</string>
+    <string name="pref_show_restoring_banner">Show restore progress banner</string>
+    <string name="pref_show_updating_banner">Show library update progress banner</string>
     <string name="backup_info">You should keep copies of backups in other places as well. Backups may contain sensitive data including any stored passwords; be careful if sharing.</string>
     <string name="last_auto_backup_info">Last automatically backed up: %s</string>
     <string name="label_data">Data</string>
@@ -1157,7 +1347,6 @@
     <string name="pref_clear_cookies">Clear cookies</string>
     <string name="pref_dns_over_https">DNS over HTTPS (DoH)</string>
     <string name="pref_user_agent_string">Default user agent string</string>
-    <string name="error_user_agent_string_blank">User agent string can not be blank</string>
     <string name="error_user_agent_string_invalid">Invalid user agent string</string>
     <string name="pref_reset_user_agent_string">Reset default user agent string</string>
     <!-- RK: FlareSolverr Cloudflare bypass -->
@@ -1224,10 +1413,13 @@
     <string name="pref_verbose_logging_summary">Print verbose logs to system log (reduces app performance)</string>
     <string name="pref_redact_sensitive_headers">Redact sensitive headers</string>
     <string name="pref_redact_sensitive_headers_summary">Redacts certain sensitive values in the logs. Keep enabled for your security when sharing logs with other people.</string>
-    <string name="pref_track_update_errors">Track update errors</string>
-    <string name="pref_track_update_errors_summary">Keep a list of entries that fail to update, opened from the notification</string>
+    <string name="pref_track_update_errors">Keep a list of failed updates</string>
+    <string name="pref_track_update_errors_summary">Opened from the update notification</string>
     <string name="label_update_errors">Update errors</string>
     <string name="info_empty_update_errors">No update errors</string>
+    <string name="label_hidden_entries">Hidden entries</string>
+    <string name="info_empty_hidden_entries">No hidden entries</string>
+    <string name="information_library_all_hidden">Every entry here is hidden</string>
     <string name="action_clear">Clear</string>
     <string name="action_clear_all">Clear all</string>
     <string name="pref_debug_info">Debug info</string>
@@ -1241,21 +1433,18 @@
     <string name="website">Website</string>
     <string name="version">Version</string>
     <string name="whats_new">What\'s new</string>
-    <string name="help_translate">Help translate</string>
     <string name="licenses">Open source licenses</string>
     <string name="privacy_policy">Privacy policy</string>
     <string name="check_for_updates">Check for updates</string>
+    <string name="based_on_mihon">Based on Mihon</string>
     <!-- RK: group headers on the About screen, now built on the preference DSL so its rows reach settings search. -->
     <string name="pref_category_legal">Legal</string>
     <string name="pref_category_links">Links</string>
 
     <!-- ACRA -->
-    <string name="pref_enable_acra">Send crash reports</string>
-    <string name="pref_acra_summary">Helps fix any bugs. No sensitive data will be sent</string>
 
 
     <!-- More -->
-    <string name="fdroid_warning">F-Droid builds are not officially supported.\nTap to learn more.</string>
     <string name="label_downloaded_only">Downloaded only</string>
     <string name="pref_incognito_mode">Incognito mode</string>
     <string name="pref_incognito_mode_summary">Pauses reading history</string>
@@ -1290,14 +1479,12 @@
     <string name="updating_category">Updating category</string>
     <string name="manga_from_library">From library</string>
     <string name="downloaded_chapters">Downloaded chapters</string>
-    <string name="intervals_header">Intervals</string>
     <!-- For badges/buttons on library covers. -->
     <string name="overlay_header">Overlay</string>
     <string name="tabs_header">Tabs</string>
 
     <!-- Browse source -->
     <!-- missing prompt after Compose rewrite #7901 -->
-    <string name="no_more_results">No more results</string>
     <string name="no_results_found">No results found</string>
     <string name="local_source">Local source</string>
     <string name="other_source">Other</string>
@@ -1323,30 +1510,27 @@
     <string name="author">Author</string>
     <string name="artist">Artist</string>
     <!-- reserved for #6163 -->
-    <string name="unknown_status">Unknown status</string>
     <string name="licensed">Licensed</string>
     <string name="publishing_finished">Publishing finished</string>
     <string name="cancelled">Cancelled</string>
     <string name="on_hiatus">On hiatus</string>
-    <!-- RK: dynamic grouping by tracking status (Y3) -->
+    <!-- RK: dynamic grouping by tracking status -->
     <string name="not_tracked">Not tracked</string>
-    <!-- RK: single-list library view toggle (Y1) -->
+    <!-- RK: single-list library view toggle -->
     <string name="action_display_show_all_categories">Show all categories in one list</string>
-    <!-- RK: category hopper jump-to-category picker (Y2) -->
+    <!-- RK: category hopper jump-to-category picker -->
     <string name="jump_to_category">Jump to category</string>
-    <!-- RK: library settings sheet, Stage 4 (group tab, lewd filter, dynamic-grouping labels) -->
+    <!-- RK: library settings sheet (group tab, lewd filter, dynamic-grouping labels) -->
     <string name="group">Group</string>
     <string name="lewd">Lewd</string>
     <string name="group_by_default">By default</string>
     <string name="group_by_tag">By tag</string>
-    <string name="group_by_source">By source</string>
     <string name="group_by_status">By status</string>
     <string name="group_by_tracking_status">By tracking status</string>
     <string name="group_ungrouped">Ungrouped</string>
     <string name="group_by_author">By author</string>
     <string name="group_by_language">By language</string>
     <string name="pref_category_sort_order">Category sort order</string>
-    <string name="category_sort_off">Off</string>
     <string name="category_sort_a_to_z">A to Z</string>
     <string name="category_sort_z_to_a">Z to A</string>
     <string name="move_dynamic_to_bottom">Move dynamic groups to the bottom</string>
@@ -1357,26 +1541,22 @@
     <string name="action_hide_category">Hide category</string>
     <string name="action_show_category">Show category</string>
     <string name="hopper_long_press">Hopper long-press</string>
-    <string name="hopper_action_search">Search</string>
     <string name="hopper_action_expand_collapse">Expand/collapse</string>
-    <string name="hopper_action_display">Display</string>
-    <string name="hopper_action_group">Group</string>
-    <string name="hopper_action_random">Random</string>
     <string name="hopper_action_random_global">Random (global)</string>
     <string name="add_to_library">Add to library</string>
     <string name="add_to_library_failed">Couldn\'t add to library</string>
+    <!-- RK: a details page is opened by its row id -->
+    <string name="details_open_failed">Couldn\'t open this entry</string>
+    <string name="details_not_found">This entry no longer exists</string>
     <string name="in_library">In library</string>
     <!-- missing confirm menu after Compose rewrite #7901 -->
     <string name="remove_from_library">Remove from library</string>
     <string name="unknown_title">Unknown title</string>
     <string name="possible_duplicates_title">Possible duplicates</string>
     <string name="possible_duplicates_summary">You have entries in your library with a similar name.\n\nSelect an entry to migrate or add anyway.</string>
-    <string name="manga_added_library">Added to library</string>
-    <string name="manga_removed_library">Removed from library</string>
     <string name="manga_info_expand">More</string>
     <string name="manga_info_collapse">Less</string>
     <string name="delete_downloads_for_manga">Delete downloaded chapters?</string>
-    <string name="copied_to_clipboard_plain">Copied to clipboard</string>
     <string name="copied_to_clipboard">Copied to clipboard:\n%1$s</string>
     <string name="clipboard_copy_error">Failed to copy to clipboard</string>
     <string name="source_not_installed">Source not installed: %1$s</string>
@@ -1385,8 +1565,6 @@
 
     <!-- Manga chapters -->
     <string name="display_mode_chapter">Chapter %1$s</string>
-    <string name="manga_display_interval_title">Estimate every</string>
-    <string name="manga_display_modified_interval_title">Set to update every</string>
     <!-- "... around 2 days" -->
     <string name="manga_interval_expected_update">New chapters predicted to be released in around %1$s, checking around every %2$s.</string>
     <string name="manga_interval_expected_update_null">This manga is either completed, or there is no predicted release date.</string>
@@ -1455,8 +1633,6 @@
     <string name="action_toggle_private_on">Track privately</string>
     <string name="action_toggle_private_off">Track publicly</string>
     <string name="track_type">Type</string>
-    <string name="myanimelist_relogin">Please login to MAL again</string>
-    <string name="source_unsupported">Source is not supported</string>
     <string name="error_no_match">No match found</string>
     <string name="tracker_error_signed_out">Log in to %1$s again</string>
     <string name="tracker_error_http">%1$s returned HTTP %2$d</string>
@@ -1478,7 +1654,6 @@
     <string name="category_content_type_manga">Manga only</string>
     <string name="category_content_type_novels">Novels only</string>
     <!-- missing undo feature after Compose rewrite #7454 -->
-    <string name="snack_categories_deleted">Categories deleted</string>
 
     <!-- Dialog option with checkbox view -->
     <string name="dialog_with_checkbox_remove_description">This will remove the read date of this chapter. Are you sure?</string>
@@ -1494,6 +1669,7 @@
     <string name="share_page_info">%1$s: %2$s, page %3$d</string>
     <string name="chapter_progress">Page: %1$d</string>
     <!-- RK --><string name="chapter_progress_of_total">Page: %1$d/%2$d</string>
+    <!-- RK --><string name="chapter_progress_percent">%1$d%%</string>
     <string name="no_next_chapter">Next chapter not found</string>
     <string name="decode_image_error">The image couldn\'t be loaded</string>
     <string name="confirm_set_image_as_cover">Use this image as cover art?</string>
@@ -1519,7 +1695,6 @@
     <string name="tracker_refresh_failed">%1$d could not be refreshed</string>
     <string name="tracker_refresh_none">Nothing in your library is tracked</string>
     <string name="tracker_refresh_already_running">A tracker refresh is already running</string>
-    <string name="cant_open_last_read_chapter">Unable to open last read chapter</string>
     <string name="updates_last_update_info">Library last updated: %s</string>
     <string name="updates_last_update_info_just_now">Just now</string>
     <string name="relative_time_span_never">Never</string>
@@ -1581,14 +1756,11 @@
     <string name="seconds_short">%ds</string>
 
     <!-- Downloads activity and service -->
-    <string name="download_queue_error">Couldn\'t download chapters. You can try again in the downloads section</string>
     <string name="download_insufficient_space">Couldn\'t download chapters due to low storage space</string>
     <string name="download_queue_size_warning">Warning: large bulk downloads may lead to sources becoming slower and/or blocking %s. Tap to learn more.</string>
     <!-- RK: unified download-queue series cards (chapter count + status chip) -->
     <string name="download_card_chapters">%1$d/%2$d chapters</string>
     <string name="download_card_status_queued">Queued</string>
-    <string name="download_card_status_downloading">Downloading</string>
-    <string name="download_card_status_error">Error</string>
 
     <!-- Library update service notifications -->
     <string name="notification_updating_progress">Updating library… (%s)</string>
@@ -1597,7 +1769,6 @@
     <string name="notification_chapters_single">Chapter %1$s</string>
     <string name="notification_chapters_single_and_more">Chapter %1$s and %2$d more</string>
     <string name="notification_chapters_multiple">Chapters %1$s</string>
-    <string name="learn_more">Tap to learn more</string>
     <string name="notification_cover_update_failed">Failed to update cover</string>
     <string name="notification_first_add_to_library">Please add the entry to your library before doing this</string>
     <string name="library_errors_help">For help on how to fix library update errors, see %1$s</string>
@@ -1608,8 +1779,6 @@
     <string name="skipped_reason_not_in_release_period">Skipped because no release was expected today</string>
 
     <!-- File Picker Titles -->
-    <string name="file_select_cover">Select cover image</string>
-    <string name="file_select_backup">Select backup file</string>
     <string name="file_picker_error">No file picker app found</string>
     <string name="file_picker_uri_permission_unsupported">Failed to acquire persistent folder access. The app may behave unexpectedly.</string>
     <string name="file_null_uri_error">No file selected</string>
@@ -1661,7 +1830,6 @@
     <string name="download_notifier_text_only_wifi">No Wi-Fi connection available</string>
     <string name="download_notifier_no_network">No network connection available</string>
     <string name="download_notifier_download_paused">Downloads paused</string>
-    <string name="download_notifier_split_page_path_not_found">Couldn\'t find file path of page %d</string>
     <string name="download_notifier_cache_renewal">Checking downloads</string>
 
     <!-- Notification channels -->
@@ -1745,7 +1913,7 @@
 
 
 
-    <!-- RK: adult/EXH subsystem - gallery metadata field labels (Phase 1) -->
+    <!-- RK: adult/EXH subsystem - gallery metadata field labels -->
     <string name="id">Id</string>
     <string name="thumbnail_url">Thumbnail url</string>
     <string name="uploader">Uploader</string>
@@ -1769,7 +1937,7 @@
     <string name="gallery_size">Gallery size</string>
     <string name="total_ratings">Total ratings</string>
     <string name="average_rating">Average rating</string>
-    <!-- RK: E-Hentai gallery metadata field labels (Phase 2) -->
+    <!-- RK: E-Hentai gallery metadata field labels -->
     <string name="genre">Genre</string>
     <string name="token">Token</string>
     <string name="is_exhentai_gallery">is Exhentai gallery</string>
@@ -1779,7 +1947,7 @@
     <string name="translated">Translated</string>
     <string name="aged">Aged</string>
     <string name="last_update_check">Last update check</string>
-    <!-- RK: MangaDex enhanced-source gallery metadata field labels (Phase 2) -->
+    <!-- RK: MangaDex enhanced-source gallery metadata field labels -->
     <string name="last_chapter_number">Last chapter number</string>
     <string name="follow_status">Follow status</string>
     <string name="anilist_id">Anilist id</string>
@@ -1787,15 +1955,15 @@
     <string name="mal_id">Mal id</string>
     <string name="manga_updates_id">Manga updates id</string>
     <string name="anime_planet_id">Anime planet id</string>
-    <!-- RK: MangaDex follows sync (Phase 4) -->
+    <!-- RK: MangaDex follows sync -->
     <string name="mangadex_follows">MangaDex follows</string>
-    <!-- RK: MangaDex browse Random button (Phase 6) -->
+    <!-- RK: MangaDex browse Random button -->
     <string name="mangadex_random">Random</string>
-    <!-- RK: browse bulk multi-select (Phase 4): action to enter selection mode -->
+    <!-- RK: browse bulk multi-select: action to enter selection mode -->
     <string name="action_bulk_select">Select</string>
     <!-- RK: gallery-info card (metadata details) -->
     <string name="more_info">More info</string>
-    <!-- RK: MangaDex rating descriptors (Phase 2 details card) -->
+    <!-- RK: MangaDex rating descriptors (details card) -->
     <string name="rating10">Masterpiece</string>
     <string name="rating9">Amazing</string>
     <string name="rating8">Great</string>
@@ -1810,14 +1978,14 @@
     <string name="no_rating">No rating</string>
     <string name="pref_enable_adult_sources">Enable adult sources (E-Hentai)</string>
     <string name="pref_enable_adult_sources_summary">Adds the built-in E-Hentai sources to Browse. ExHentai also needs a sign-in.</string>
-    <string name="toggle_delegated_sources">Enable delegated sources</string>
+    <string name="toggle_delegated_sources">Use enhanced sources</string>
     <string name="toggle_delegated_sources_summary">Apply %1$s enhancements to the following sources if they are installed: %2$s</string>
     <string name="recheck_login_status">Recheck login status</string>
     <string name="alternative_login_page">Alternative login page</string>
     <string name="skip_page_restyling">Skip page restyling</string>
     <string name="custom_igneous_cookie">Custom igneous cookie</string>
     <string name="custom_igneous_cookie_message">Some users cannot access ExHentai the normal way, and have to pass in a specific igneous cookie value, this option is for those users.</string>
-    <!-- RK: MangaDex enhanced-source settings screen (Phase 5) -->
+    <!-- RK: MangaDex enhanced-source settings screen -->
     <string name="pref_category_mangadex">MangaDex</string>
     <string name="pref_mangadex_summary">Language, follow sync, library sync</string>
     <string name="pref_mangadex_account">Account</string>
@@ -1841,7 +2009,7 @@
     <string name="pref_mangadex_skipped_header">Skipped:</string>
     <string name="pref_mangadex_failed_header">Failed:</string>
 
-    <!-- RK: E-Hentai settings screen + server profile config (Phase B2) -->
+    <!-- RK: E-Hentai settings screen + server profile config -->
     <string name="pref_category_eh">E-Hentai</string>
     <string name="pref_ehentai_summary">Login, image quality, gallery updates, favorites backup</string>
     <string name="gallery_update_checker">Gallery update checker</string>
@@ -1855,7 +2023,7 @@
     <string name="eh_back_up_favorites_now">Back up all favorites now</string>
     <string name="eh_favorites_backup_progress">Backing up favorites… (%s)</string>
     <string name="ehentai_prefs_account_settings">E-Hentai Website Account Settings</string>
-    <!-- RK: E-Hentai gallery category badges in enhanced browse rows (Phase B2). "Manga" reuses content_type_manga. -->
+    <!-- RK: E-Hentai gallery category badges in enhanced browse rows. "Manga" reuses content_type_manga. -->
     <string name="doujinshi">Doujinshi</string>
     <string name="artist_cg">Artist CG</string>
     <string name="game_cg">Game CG</string>
@@ -1884,8 +2052,8 @@
     <string name="use_hentai_at_home_option_1">Any client (Recommended)</string>
     <string name="use_hentai_at_home_option_2">Default port clients only</string>
     <string name="show_japanese_titles">Show Japanese titles in search results</string>
-    <string name="show_japanese_titles_option_1">Currently showing Japanese titles in search results. Clear the chapter cache after changing this (in the Advanced section)</string>
-    <string name="show_japanese_titles_option_2">Currently showing English/Romanized titles in search results. Clear the chapter cache after changing this (in the Advanced section)</string>
+    <string name="show_japanese_titles_option_1">Currently showing Japanese titles in search results. Clear the chapter cache after changing this (in Data and storage)</string>
+    <string name="show_japanese_titles_option_2">Currently showing English/Romanized titles in search results. Clear the chapter cache after changing this (in Data and storage)</string>
     <string name="use_original_images">Use original images</string>
     <string name="use_original_images_on">Currently using original images</string>
     <string name="use_original_images_off">Currently using resampled images</string>
@@ -1969,11 +2137,10 @@
     <string name="markdown_alert_note">Note</string>
     <string name="markdown_alert_tip">Tip</string>
     <string name="markdown_alert_important">Important</string>
-    <string name="markdown_alert_warning">Warning</string>
     <string name="markdown_alert_caution">Caution</string>
 
     <!-- RK: search and word count over a novel's downloaded chapters (from Tsundoku) -->
-    <string name="action_search_downloaded_text">Search downloaded chapters</string>
+    <string name="action_search_chapter_text">Search chapter text</string>
     <string name="novel_text_search_hint">Find in downloaded chapters</string>
     <string name="novel_text_search_progress">Searched %1$d of %2$d chapters</string>
     <string name="novel_text_search_no_chapters">No downloaded chapters to search</string>
@@ -2002,28 +2169,26 @@
     <string name="stats_most_read">Most read</string>
     <string name="stats_current_streak">Current streak</string>
     <string name="stats_longest_streak">Longest streak</string>
+    <string name="stats_pace_per_page">Time per page</string>
+    <string name="stats_pace_words_per_minute">Words per minute</string>
+    <string name="stats_pace_listening">Listening speed</string>
+    <string name="stats_pace_learning">Learning</string>
     <string name="stats_logged_since">Logged since %1$s</string>
     <string name="stats_reading_not_logged">Reading time per day is logged from now on</string>
     <string name="stats_see_all">See all</string>
-    <string name="stats_open">Open</string>
-    <string name="stats_group_source">Sources</string>
-    <string name="stats_group_category">Categories</string>
     <string name="stats_group_tag">Tags</string>
-    <string name="stats_group_tracker">Trackers</string>
     <string name="stats_group_language">Languages</string>
     <string name="stats_group_length">Series length</string>
     <string name="stats_group_start_year">Started reading</string>
     <string name="stats_group_reading_time">Reading time</string>
     <string name="stats_sort">Sort by</string>
-    <string name="stats_not_tracked">Not tracked</string>
     <string name="stats_not_scored">Not scored</string>
     <string name="stats_sort_count">Most series</string>
     <string name="stats_sort_read">Chapters read</string>
-    <string name="stats_sort_score">Mean score</string>
-    <string name="stats_sort_time">Reading time</string>
     <string name="stats_label_finished">Finished</string>
     <string name="stats_label_not_started">Not started</string>
     <string name="stats_series_count">%1$d series</string>
+    <string name="stats_donut_series">series</string>
     <string name="stats_label_time">Time</string>
     <string name="stats_nothing_read">Nothing read</string>
     <string name="stats_previous_period">Previous period</string>
@@ -2032,4 +2197,27 @@
     <string name="stats_period_month">Month</string>
     <string name="stats_period_year">Year</string>
     <string name="stats_period_custom">Custom</string>
+    <string name="stats_arrange_cards">Arrange cards</string>
+    <string name="stats_arrange_hint">Drag to reorder, untick to hide</string>
+    <string name="stats_cards_shown">%1$d of %2$d shown</string>
+    <string name="stats_figure_trackers_used">Trackers used</string>
+    <string name="stats_figure_read_chapters">Read chapters</string>
+    <string name="tag_filter_summary">%1$d shown, %2$d hidden</string>
+    <string name="tag_filter_require_all">Match all shown</string>
+    <string name="tag_filter_hide_all">Match all hidden</string>
+    <string name="tag_filter_no_tags">No tags</string>
+    <string name="tag_filter_sort_count">Most used</string>
+    <string name="tag_filter_match_count">%1$d of %2$d match</string>
+    <string name="tag_filter_search">Search tags</string>
+    <string name="tag_filter_save">Save filter</string>
+    <string name="tag_filter_remove_saved">Remove the saved filter %1$s?</string>
+    <string name="tag_alias_title">Treat %1$s as</string>
+    <string name="tag_alias_chip">%1$s → %2$s</string>
+    <string name="tag_alias_remove">Stop treating %1$s as %2$s?</string>
+    <string name="tag_filter_empty">No tags found</string>
+    <string name="tag_filter_chip_hidden">Hiding %1$s</string>
+    <string name="tag_filter_chip_untagged">Untagged only</string>
+    <string name="tag_filter_chip_tagged">Tagged only</string>
+    <string name="action_show_only_tag">Show only this tag</string>
+    <string name="action_hide_tag">Hide this tag</string>
 </resources>

@@ -25,15 +25,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.manga.components.MangaCover
-import eu.kanade.presentation.util.Screen
-import eu.kanade.tachiyomi.ui.manga.MangaScreen
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.Delete
 import mihon.icons.materialsymbols.rounded.Refresh
@@ -44,8 +43,8 @@ import reikai.domain.novel.model.NovelCover
 import reikai.presentation.components.ContentTypeFilterChips
 import reikai.presentation.components.libraryRefreshMessage
 import reikai.presentation.components.rememberChipListState
-import reikai.presentation.migrate.flow.EntryMigrationSourcePickScreen
-import reikai.presentation.novel.details.NovelScreen
+import reikai.presentation.details.detailsRoute
+import reikai.presentation.migrate.flow.EntryMigrationSourcePickRoute
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.Scaffold
@@ -57,148 +56,143 @@ import tachiyomi.presentation.core.util.selectedBackground
 import tachiyomi.domain.manga.model.MangaCover as MangaCoverData
 
 /** Opens on the [initialContentType] chip (e.g. Novels when reached from the novel library). */
-class UpdateErrorsScreen(
-    private val initialContentType: ContentType = ContentType.ALL,
-) : Screen() {
+@Serializable
+data class UpdateErrorsRoute(
+    val initialContentType: ContentType = ContentType.ALL,
+) : NavKey
 
-    @Composable
-    override fun Content() {
-        val context = LocalContext.current
-        val navigator = LocalNavigator.currentOrThrow
-        val viewModel = assistedMetroViewModel<UpdateErrorsViewModel, UpdateErrorsViewModel.Factory> {
-            create(initialContentType = initialContentType)
-        }
-        val state by viewModel.state.collectAsState()
-        val scope = rememberCoroutineScope()
-        val snackbarHostState = remember { SnackbarHostState() }
+@Composable
+fun UpdateErrorsScreen(initialContentType: ContentType) {
+    val context = LocalContext.current
+    val navigator = LocalNavigator.current
+    val viewModel = assistedMetroViewModel<UpdateErrorsViewModel, UpdateErrorsViewModel.Factory> {
+        create(initialContentType = initialContentType)
+    }
+    val state by viewModel.state.collectAsState()
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
 
-        if (state is UpdateErrorsScreenState.Loading) {
-            LoadingScreen()
-            return
-        }
-        val successState = state as UpdateErrorsScreenState.Success
+    if (state is UpdateErrorsScreenState.Loading) {
+        LoadingScreen()
+        return
+    }
+    val successState = state as UpdateErrorsScreenState.Success
 
-        // Back leaves selection mode before it leaves the screen, as Komikku's list and Mihon's lists do
-        BackHandler(enabled = successState.selection.size > 0, onBack = viewModel::clearSelection)
+    // Back leaves selection mode before it leaves the screen, as Komikku's list and Mihon's lists do
+    BackHandler(enabled = successState.selection.size > 0, onBack = viewModel::clearSelection)
 
-        Scaffold(
-            topBar = { scrollBehavior ->
-                AppBar(
-                    title = stringResource(MR.strings.label_update_errors),
-                    navigateUp = navigator::pop,
-                    actionModeCounter = successState.selection.size,
-                    onCancelActionMode = viewModel::clearSelection,
-                    actionModeActions = {
-                        val migration = EntryMigrationSourcePickScreen.forSelection(successState.selection.selection)
+    Scaffold(
+        topBar = { scrollBehavior ->
+            AppBar(
+                title = stringResource(MR.strings.label_update_errors),
+                navigateUp = navigator::pop,
+                actionModeCounter = successState.selection.size,
+                onCancelActionMode = viewModel::clearSelection,
+                actionModeActions = {
+                    val migration = EntryMigrationSourcePickRoute.forSelection(successState.selection.selection)
+                    AppBarActions(
+                        listOfNotNull(
+                            AppBar.Action(
+                                title = stringResource(MR.strings.action_select_all),
+                                icon = MaterialSymbols.Rounded.SelectAll,
+                                onClick = viewModel::selectAll,
+                            ),
+                            migration?.let {
+                                AppBar.Action(
+                                    title = stringResource(MR.strings.action_migrate),
+                                    icon = MaterialSymbols.Rounded.SwapCalls,
+                                    onClick = {
+                                        viewModel.clearSelection()
+                                        navigator.push(it)
+                                    },
+                                )
+                            },
+                            AppBar.Action(
+                                title = stringResource(MR.strings.action_delete),
+                                icon = MaterialSymbols.Rounded.Delete,
+                                onClick = viewModel::dismissSelected,
+                            ),
+                        ),
+                    )
+                },
+                actions = {
+                    if (!successState.isEmpty) {
                         AppBarActions(
-                            listOfNotNull(
+                            listOf(
                                 AppBar.Action(
-                                    title = stringResource(MR.strings.action_select_all),
-                                    icon = MaterialSymbols.Rounded.SelectAll,
-                                    onClick = viewModel::selectAll,
+                                    title = stringResource(MR.strings.action_update_library),
+                                    icon = MaterialSymbols.Rounded.Refresh,
+                                    onClick = {
+                                        scope.launch {
+                                            val started = viewModel.retry(context)
+                                            val message = libraryRefreshMessage(
+                                                started,
+                                                successState.contentType,
+                                                category = false,
+                                            )
+                                            snackbarHostState.showSnackbar(context.stringResource(message))
+                                        }
+                                    },
                                 ),
-                                migration?.let {
-                                    AppBar.Action(
-                                        title = stringResource(MR.strings.action_migrate),
-                                        icon = MaterialSymbols.Rounded.SwapCalls,
-                                        onClick = {
-                                            viewModel.clearSelection()
-                                            navigator.push(it)
-                                        },
-                                    )
-                                },
-                                AppBar.Action(
-                                    title = stringResource(MR.strings.action_delete),
-                                    icon = MaterialSymbols.Rounded.Delete,
-                                    onClick = viewModel::dismissSelected,
+                                AppBar.OverflowAction(
+                                    title = stringResource(MR.strings.action_clear_all),
+                                    onClick = viewModel::dismissAll,
                                 ),
                             ),
                         )
-                    },
-                    actions = {
-                        if (!successState.isEmpty) {
-                            AppBarActions(
-                                listOf(
-                                    AppBar.Action(
-                                        title = stringResource(MR.strings.action_update_library),
-                                        icon = MaterialSymbols.Rounded.Refresh,
-                                        onClick = {
-                                            scope.launch {
-                                                val started = viewModel.retry(context)
-                                                val message = libraryRefreshMessage(
-                                                    started,
-                                                    successState.contentType,
-                                                    category = false,
-                                                )
-                                                snackbarHostState.showSnackbar(context.stringResource(message))
-                                            }
-                                        },
-                                    ),
-                                    AppBar.OverflowAction(
-                                        title = stringResource(MR.strings.action_clear_all),
-                                        onClick = viewModel::dismissAll,
-                                    ),
-                                ),
-                            )
-                        }
-                    },
-                    scrollBehavior = scrollBehavior,
-                )
-            },
-            snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
-        ) { paddingValues ->
-            Column(modifier = Modifier.padding(paddingValues)) {
-                ContentTypeFilterChips(
-                    selected = successState.contentType,
-                    onSelect = viewModel::setContentType,
-                )
+                    }
+                },
+                scrollBehavior = scrollBehavior,
+            )
+        },
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
+    ) { paddingValues ->
+        Column(modifier = Modifier.padding(paddingValues)) {
+            ContentTypeFilterChips(
+                selected = successState.contentType,
+                onSelect = viewModel::setContentType,
+            )
 
-                if (successState.isEmpty) {
-                    EmptyScreen(
-                        stringRes = MR.strings.info_empty_update_errors,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                    return@Column
-                }
-
-                LazyColumn(
-                    state = rememberChipListState(successState.contentType),
+            if (successState.isEmpty) {
+                EmptyScreen(
+                    stringRes = MR.strings.info_empty_update_errors,
                     modifier = Modifier.fillMaxSize(),
-                ) {
-                    successState.groups.forEach { group ->
-                        item(key = "header-${group.message}") {
-                            Text(
-                                text = group.message,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.padding(
-                                    horizontal = MaterialTheme.padding.medium,
-                                    vertical = MaterialTheme.padding.small,
-                                ),
-                            )
-                        }
-                        items(
-                            items = group.errors,
-                            key = { "error-${it.entryId}" },
-                        ) { entry ->
-                            UpdateErrorRow(
-                                entry = entry,
-                                isSelected = entry.entryId in successState.selection,
-                                onClick = {
-                                    if (successState.selectionMode) {
-                                        viewModel.toggleSelection(entry.entryId)
-                                    } else {
-                                        when (entry) {
-                                            is UpdateErrorEntry.Manga ->
-                                                navigator.push(MangaScreen(entry.error.mangaId))
-                                            is UpdateErrorEntry.Novel ->
-                                                navigator.push(NovelScreen(entry.error.source, entry.error.novelUrl))
-                                        }
-                                    }
-                                },
-                                onLongClick = { viewModel.rangeSelection(entry.entryId) },
-                            )
-                        }
+                )
+                return@Column
+            }
+
+            LazyColumn(
+                state = rememberChipListState(successState.contentType),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                successState.groups.forEach { group ->
+                    item(key = "header-${group.message}") {
+                        Text(
+                            text = group.message,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(
+                                horizontal = MaterialTheme.padding.medium,
+                                vertical = MaterialTheme.padding.small,
+                            ),
+                        )
+                    }
+                    items(
+                        items = group.errors,
+                        key = { "error-${it.entryId}" },
+                    ) { entry ->
+                        UpdateErrorRow(
+                            entry = entry,
+                            isSelected = entry.entryId in successState.selection,
+                            onClick = {
+                                if (successState.selectionMode) {
+                                    viewModel.toggleSelection(entry.entryId)
+                                } else {
+                                    navigator.push(entry.entryId.detailsRoute())
+                                }
+                            },
+                            onLongClick = { viewModel.rangeSelection(entry.entryId) },
+                        )
                     }
                 }
             }

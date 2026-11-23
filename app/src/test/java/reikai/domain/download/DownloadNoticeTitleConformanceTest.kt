@@ -35,6 +35,7 @@ import reikai.novel.download.NovelDownloadNotifier
 import reikai.novel.download.NovelDownloadWorker
 import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
+import reikai.util.realTimeSourceContacts
 import reikai.util.testAppScope
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.chapter.model.Chapter
@@ -42,10 +43,12 @@ import tachiyomi.domain.download.service.DownloadPreferences
 import tachiyomi.domain.manga.model.CustomMangaInfo
 import tachiyomi.domain.manga.model.Manga
 import kotlin.time.Instant
+import mihon.icons.materialsymbols.R as MaterialSymbolsR
 
 /**
  * The download progress and error notices name the entry by its Edit info title, over each engine's real
- * notifier. The chapter files are still named by the source title, so only what the user reads changes.
+ * notifier. The chapter files are still named by the source title, so only what the user reads changes. The
+ * progress notice offers both types the same buttons.
  */
 class DownloadNoticeTitleConformanceTest {
 
@@ -61,8 +64,18 @@ class DownloadNoticeTitleConformanceTest {
         half.notices().errorTitle shouldBe "$MINE: $CHAPTER_NAME"
     }
 
-    /** The progress notice's title and text together, since each engine puts the entry in a different one. */
-    data class Notices(val progress: String, val errorTitle: String?)
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("halves")
+    fun `the progress notice offers Pause and Show entry`(half: NoticeTitleHalf) = runTest {
+        half.notices().progressActions shouldBe
+            listOf(MaterialSymbolsR.drawable.rounded_filled_pause, MaterialSymbolsR.drawable.rounded_book)
+    }
+
+    /**
+     * The progress notice's title and text together, since each engine puts the entry in a different one, and the
+     * icons of its buttons.
+     */
+    data class Notices(val progress: String, val errorTitle: String?, val progressActions: List<Int>)
 
     companion object {
         const val ENTRY = 1L
@@ -111,6 +124,7 @@ class MangaNoticeTitleHalf : NoticeTitleHalf {
         DownloadNoticeTitleConformanceTest.Notices(
             progress = shade.wordsOf(Notifications.ID_DOWNLOAD_CHAPTER_PROGRESS),
             errorTitle = shade.titleOf(Notifications.ID_DOWNLOAD_CHAPTER_ERROR)?.toString(),
+            progressActions = shade.actionIconsOf(Notifications.ID_DOWNLOAD_CHAPTER_PROGRESS),
         )
     }
 }
@@ -174,6 +188,7 @@ class NovelNoticeTitleHalf : NoticeTitleHalf {
                     coEvery { await(EntryId.Novel(id)) } returns
                         CustomNovelInfo(novelId = id, title = DownloadNoticeTitleConformanceTest.MINE)
                 },
+                sourceContacts = realTimeSourceContacts(),
             )
             val notifier = NovelDownloadNotifier(context, securityPreferences)
             manager.downloadChapters(listOf(chapter))
@@ -183,6 +198,7 @@ class NovelNoticeTitleHalf : NoticeTitleHalf {
             DownloadNoticeTitleConformanceTest.Notices(
                 progress = shade.wordsOf(Notifications.ID_NOVEL_DOWNLOADER),
                 errorTitle = shade.titleOf(Notifications.ID_NOVEL_DOWNLOADER_ERROR)?.toString(),
+                progressActions = shade.actionIconsOf(Notifications.ID_NOVEL_DOWNLOADER),
             )
         } finally {
             unmockkObject(NovelDownloadWorker.Companion)

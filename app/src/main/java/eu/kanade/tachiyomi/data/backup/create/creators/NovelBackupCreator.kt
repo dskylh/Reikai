@@ -15,27 +15,41 @@ import eu.kanade.tachiyomi.data.backup.models.BackupNovelMergeGroup
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelSource
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelSourceRef
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelTracking
-import eu.kanade.tachiyomi.data.backup.models.customInfo
-import eu.kanade.tachiyomi.data.backup.models.toBackupCustomInfo
 import eu.kanade.tachiyomi.data.backup.models.toBackupReadingSession
 import kotlinx.coroutines.flow.first
 import mihon.core.common.extensions.toEpochMillisOrZero
 import reikai.data.backup.BackupEntryParts
+import reikai.data.backup.ChapterTombstoneBackupParts
+import reikai.data.backup.ChunkRead
 import reikai.data.backup.mergeGroupRefs
+import reikai.data.backup.writeCategories
+import reikai.data.backup.writeCustomInfo
+import reikai.data.backup.writeLocalVolumes
 import reikai.data.backup.writeRows
 import reikai.domain.category.CategoryContentType
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.ChapterTombstoneRepository
+import reikai.domain.chapter.LocalVolumeRepository
+import reikai.domain.chapter.VolumePickRepository
+import reikai.domain.chapter.toBackupValue
 import reikai.domain.library.ContentType
+import reikai.domain.library.LibraryHiddenRepository
+import reikai.domain.library.LibraryManualOrderRepository
 import reikai.domain.merge.MergeGroupRepository
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelHistoryRepository
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.NovelTrackRepository
+import reikai.domain.novel.local.LocalNovelLanguageRepository
+import reikai.domain.novel.model.CustomNovelInfo
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.novel.model.NovelTrack
 import reikai.domain.novel.repository.CustomNovelInfoRepository
 import reikai.domain.readinglog.ReadingLogRepository
+import reikai.domain.readinglog.ReadingPaceRepository
+import reikai.novel.local.LocalNovelSource
 import reikai.novel.source.NovelSourceManager
 import tachiyomi.domain.category.repository.CategoryRepository
 
@@ -50,14 +64,28 @@ class NovelBackupCreator(
     private val novelHistoryRepository: NovelHistoryRepository,
     private val novelSourceManager: NovelSourceManager,
     private val chapterNumberOverrides: ChapterNumberOverrideRepository,
+    private val copyMarks: ChapterCopyMarkRepository,
+    private val localVolumes: LocalVolumeRepository,
+    private val volumePicks: VolumePickRepository,
     private val readingLog: ReadingLogRepository,
+    private val readingPace: ReadingPaceRepository,
+    private val localNovelLanguages: LocalNovelLanguageRepository,
+    private val manualOrder: LibraryManualOrderRepository,
+    private val tombstones: ChapterTombstoneRepository,
+    private val libraryHides: LibraryHiddenRepository,
 ) : BackupEntryParts<Novel, BackupNovel> {
+
+    // The chapters part reads the word counts and history the read-aloud times, from the same chunk-wide row.
+    private val chunkPace = ChunkRead { readingPace.novelChapterPace(it) }
+
+    private val keptStates =
+        ChapterTombstoneBackupParts(ContentType.NOVELS, tombstones, Novel::id, BackupNovel::chapterTombstones)
 
     suspend fun novelCategories(options: BackupOptions): List<BackupNovelCategory> =
         if (options.categories) backupNovelCategories() else emptyList()
 
-    suspend fun novelMerges(options: BackupOptions): List<BackupNovelMergeGroup> =
-        if (options.libraryEntries) serializeGroups() else emptyList()
+    // Written with the novels, as the manga groups are, so the caller gates both on Library entries.
+    suspend fun novelMerges(): List<BackupNovelMergeGroup> = serializeGroups()
 
     /** Each source's name, as manga's source list carries it, so a restore can name one not installed. */
     suspend fun sources(sourceIds: Set<String>): List<BackupNovelSource> =
@@ -68,6 +96,8 @@ class NovelBackupCreator(
     // chunk.
     override suspend fun favorites(): List<Novel> = novelRepository.getFavorites()
 
+    override fun identity(entry: Novel): Any = entry.id
+
     override suspend fun readNotInLibrary(): List<Novel> = novelRepository.getReadNovelsNotInLibrary()
 
     override suspend fun groupMembersOutsideLibrary(): List<Novel> =
@@ -75,22 +105,47 @@ class NovelBackupCreator(
             .mapNotNull { novelRepository.getById(it) }
             .filterNot { it.favorite }
 
-    override suspend fun base(entries: List<Novel>): List<BackupNovel> = entries.map { it.toBackupNovel() }
+    override suspend fun base(entries: List<Novel>): List<BackupNovel> {
+        // Keyed by series path alone, so only a local novel reads it.
+        val languages = localNovelLanguages.getAll()
+        val hiddenIds = libraryHides.subscribe(ContentType.NOVELS).first()
+        val backups = entries.map { novel ->
+            novel.toBackupNovel().apply {
+                if (LocalNovelSource.isLocal(novel.source)) language = languages[novel.url]
+                libraryHidden = novel.id in hiddenIds
+            }
+        }
+        // A local series' grouping describes the series, not its chapters, so it rides with every entry.
+        val isLocal = { novel: Novel -> LocalNovelSource.isLocal(novel.source) }
+        entries.zip(backups)
+            .writeLocalVolumes(ContentType.NOVELS, localVolumes, volumePicks, isLocal, Novel::id, Novel::url)
+        return backups
+    }
 
     override suspend fun chapters(batch: List<Pair<Novel, BackupNovel>>) {
         val novelIds = batch.map { it.first.id }
         val overridesByNovelId = chapterNumberOverrides.getByOwners(ContentType.NOVELS, novelIds)
+        val marksByNovelId = copyMarks.loadedMarks(ContentType.NOVELS)
+        val wordsByChapterId = chunkPace(novelIds).associate { it.chapterId to it.words }
         batch.writeRows(novelChapterRepository.getByNovelIds(novelIds), Novel::id) { entry, backup, chapters ->
             val overrides = overridesByNovelId[entry.id].orEmpty()
-            backup.chapters = chapters.map { it.toBackupNovelChapter(sourceNumber = overrides[it.url]?.sourceNumber) }
+            val marks = marksByNovelId[entry.id].orEmpty()
+            backup.chapters = chapters.map {
+                it.toBackupNovelChapter(
+                    sourceNumber = overrides[it.url]?.sourceNumber,
+                    words = wordsByChapterId[it.id],
+                    copyMark = marks[it.url]?.toBackupValue(),
+                )
+            }
         }
+        keptStates.chapters(batch)
     }
 
     override suspend fun categories(batch: List<Pair<Novel, BackupNovel>>) {
         val categoriesByNovelId = categoryRepository.getCategoriesByNovelIds(batch.map { it.first.id })
-        batch.writeRows(categoriesByNovelId, Novel::id) { _, backup, categories ->
-            backup.categories = categories.map { it.order }
-        }
+        batch.writeCategories(ContentType.NOVELS, Novel::id, categoriesByNovelId, {
+            categories = it
+        }, manualOrder, categoryRepository)
     }
 
     override suspend fun tracking(batch: List<Pair<Novel, BackupNovel>>) {
@@ -104,12 +159,17 @@ class NovelBackupCreator(
         val novelIds = batch.map { it.first.id }
         val historyByNovelId = novelHistoryRepository.getUrlKeyedHistoryByNovelIds(novelIds)
         val sessionsByNovelId = readingLog.sessionsByUrl(ContentType.NOVELS, novelIds)
+        val listenedByNovelId = chunkPace(novelIds)
+            .groupBy({ it.novelId }, { it.url to it.listenedMs })
+            .mapValues { (_, listened) -> listened.toMap() }
         batch.forEach { (entry, backup) ->
+            val listened = listenedByNovelId[entry.id].orEmpty()
             val history = historyByNovelId[entry.id].orEmpty().map {
                 BackupNovelHistory(
                     url = it.chapterUrl,
                     lastRead = it.readAt.toEpochMillisOrZero(),
                     readDuration = it.readDuration,
+                    listenedMs = listened[it.chapterUrl] ?: 0,
                 )
             }
             if (history.isNotEmpty()) {
@@ -118,21 +178,26 @@ class NovelBackupCreator(
             // Sessions ride the history option, keyed by url as history is, as for manga.
             backup.readingSessions = sessionsByNovelId[entry.id].orEmpty().map { it.toBackupReadingSession() }
         }
+        keptStates.history(batch)
     }
 
     override suspend fun customInfo(batch: List<Pair<Novel, BackupNovel>>) {
-        batch.forEach { (entry, backup) ->
-            customNovelInfoRepository.getByNovelIdAsFlow(entry.id).first()
-                ?.let { backup.customInfo = it.toBackupCustomInfo() }
-        }
+        batch.writeCustomInfo(customNovelInfoRepository.getAllAsFlow().first(), CustomNovelInfo::novelId, Novel::id)
     }
 
     private suspend fun backupNovelCategories(): List<BackupNovelCategory> {
+        val manualBases = manualOrder.subscribeBases().first()
         // Skip the shared universal row 0 (the uncategorized sentinel), like the manga category backup.
         return categoryRepository.getAll(CategoryContentType.NOVEL)
             .filterNot { it.isSystemCategory }
             .map {
-                BackupNovelCategory(name = it.name, order = it.order, id = it.id, flags = it.flags)
+                BackupNovelCategory(
+                    name = it.name,
+                    order = it.order,
+                    id = it.id,
+                    flags = it.flags,
+                    manualBase = manualBases[it.id],
+                )
             }
     }
 
@@ -143,7 +208,7 @@ class NovelBackupCreator(
         }.map { BackupNovelMergeGroup(refs = it) }
 }
 
-private fun Novel.toBackupNovel() = BackupNovel(
+internal fun Novel.toBackupNovel() = BackupNovel(
     source = this.source,
     url = this.url,
     title = this.title,
@@ -166,20 +231,23 @@ private fun Novel.toBackupNovel() = BackupNovel(
     nextUpdate = this.nextUpdate.toEpochMillisOrZero(),
 )
 
-private fun NovelChapter.toBackupNovelChapter(sourceNumber: Double?) = BackupNovelChapter(
-    url = this.url,
-    name = this.name,
-    read = this.read,
-    bookmark = this.bookmark,
-    lastTextProgress = this.lastTextProgress,
-    chapterNumber = this.chapterNumber,
-    sourceOrder = this.sourceOrder,
-    dateFetch = this.dateFetch.toEpochMilliseconds(),
-    dateUpload = this.dateUpload.toEpochMillisOrZero(),
-    page = this.page,
-    scanlator = this.scanlator,
-    sourceChapterNumber = sourceNumber,
-)
+internal fun NovelChapter.toBackupNovelChapter(sourceNumber: Double?, words: Long?, copyMark: Long?) =
+    BackupNovelChapter(
+        url = this.url,
+        name = this.name,
+        read = this.read,
+        bookmark = this.bookmark,
+        lastTextProgress = this.lastTextProgress,
+        chapterNumber = this.chapterNumber,
+        sourceOrder = this.sourceOrder,
+        dateFetch = this.dateFetch.toEpochMilliseconds(),
+        dateUpload = this.dateUpload.toEpochMillisOrZero(),
+        page = this.page,
+        scanlator = this.scanlator,
+        sourceChapterNumber = sourceNumber,
+        words = words ?: 0,
+        copyMark = copyMark,
+    )
 
 private fun NovelTrack.toBackupNovelTracking() = BackupNovelTracking(
     trackerId = this.trackerId,

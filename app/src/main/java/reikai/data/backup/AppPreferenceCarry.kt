@@ -4,12 +4,16 @@ import dev.zacsweers.metro.Inject
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.service.TrackPreferences
+import eu.kanade.tachiyomi.core.security.PrivacyPreferences
+import eu.kanade.tachiyomi.core.security.SecurityPreferences
+import eu.kanade.tachiyomi.core.security.SecurityPreferences.SecureScreenMode
 import eu.kanade.tachiyomi.data.backup.models.BackupPreference
 import eu.kanade.tachiyomi.data.backup.models.BooleanPreferenceValue
 import eu.kanade.tachiyomi.data.backup.models.IntPreferenceValue
 import eu.kanade.tachiyomi.data.backup.models.PreferenceValue
 import eu.kanade.tachiyomi.data.backup.models.StringPreferenceValue
 import eu.kanade.tachiyomi.network.NetworkPreferences
+import mihon.core.migration.migrations.MigrationCustomInfoFlagMigration
 import reikai.domain.category.DEAD_LAST_USED_NOVEL_CATEGORY_KEY
 import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.novel.DEAD_PLUGINS_NEED_REVALIDATION_KEY
@@ -18,10 +22,12 @@ import reikai.domain.novel.DEAD_READER_PADDING_KEY
 import reikai.domain.novel.DEAD_READER_TAP_TO_SCROLL_KEY
 import reikai.domain.novel.DEAD_READER_TTS_BUTTON_KEYS
 import reikai.domain.novel.DEAD_READER_TTS_ENABLED_KEY
+import reikai.domain.novel.LnSourceIdentity
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.source.ReikaiSourcePreferences
 import reikai.domain.source.carryShowNsfwSource
 import reikai.novel.content.NovelSnippets
+import reikai.novel.source.NovelSourceManager
 import tachiyomi.core.common.preference.Preference
 
 /**
@@ -37,7 +43,23 @@ class AppPreferenceCarry(
     private val networkPreferences: NetworkPreferences,
     private val trackPreferences: TrackPreferences,
     private val basePreferences: BasePreferences,
+    private val securityPreferences: SecurityPreferences,
+    privacyPreferences: PrivacyPreferences,
+    private val novelSourceManager: NovelSourceManager,
 ) {
+
+    // Restored only when the backup holds the safer value. Verbose logging without header redaction puts
+    // cookies and sign-in headers in the crash log users share; the app lock asks to authenticate before
+    // the settings screen loosens it; telemetry the user opted out of stays off.
+    private val saferValues = mapOf(
+        networkPreferences.redactSensitiveHeaders.key() to true,
+        networkPreferences.verboseLogging.key() to false,
+        privacyPreferences.crashlytics.key() to false,
+        privacyPreferences.analytics.key() to false,
+        securityPreferences.useAuthenticator.key() to true,
+        securityPreferences.hideNotificationContent.key() to true,
+        securityPreferences.hideAdultNotificationContent.key() to true,
+    )
 
     /** Carries the keys it owns, hands the rest to [write], then applies what must follow the write. */
     suspend fun restore(toRestore: List<BackupPreference>, write: suspend (List<BackupPreference>) -> Unit) {
@@ -47,11 +69,35 @@ class AppPreferenceCarry(
             key == DEAD_READER_TTS_ENABLED_KEY && (value as? BooleanPreferenceValue)?.value == true
         }
         if (readAloudWasOn) novelPreferences.addReadAloudButtonToCustomisedBar()
+        if (toRestore.none { it.key == CUSTOM_INFO_OPTION_MARKER_KEY }) {
+            val restored = toRestore.mapTo(HashSet()) { it.key }
+            MigrationCustomInfoFlagMigration.turnOnCustomInfo(
+                extensionSourcePreferences,
+                novelPreferences,
+                manga = extensionSourcePreferences.migrationFlags.key() in restored,
+                novels = novelPreferences.novelMigrationFlags().key() in restored,
+            )
+        }
     }
 
     /** True when [key] is handled here and must not be written as it stands. */
-    private fun carry(key: String, value: PreferenceValue): Boolean {
+    private suspend fun carry(key: String, value: PreferenceValue): Boolean {
         when (key) {
+            in saferValues -> return (value as? BooleanPreferenceValue)?.value != saferValues[key]
+            securityPreferences.lockAppAfter.key() -> (value as? IntPreferenceValue)?.let {
+                val lockAfter = securityPreferences.lockAppAfter
+                if (lockDelayRank(it.value) < lockDelayRank(lockAfter.get())) lockAfter.set(it.value)
+            }
+            securityPreferences.secureScreen.key() -> (value as? StringPreferenceValue)?.let { stored ->
+                val secureScreen = securityPreferences.secureScreen
+                val mode = SecureScreenMode.entries.find { it.name == stored.value }
+                // Declared strictest first.
+                if (mode != null && mode < secureScreen.get()) secureScreen.set(mode)
+            }
+            // The device's records win: a backup only names sources this device has never seen.
+            novelPreferences.seenNovelSources().key() -> (value as? StringPreferenceValue)?.let {
+                novelSourceManager.rememberBackedUp(NovelPreferences.decodeSeenNovelSources(it.value))
+            }
             DEAD_READER_PADDING_KEY ->
                 (value as? IntPreferenceValue)?.let { novelPreferences.carryReaderPaddingToMargins(it.value) }
             // JavaScript runs in the chapter page beside the reader's bridge, so it comes back switched off.
@@ -65,6 +111,8 @@ class AppPreferenceCarry(
                 (value as? BooleanPreferenceValue)?.let { novelPreferences.carryReaderTapToScroll(it.value) }
             DEAD_READER_AUTO_SCROLL_KEY ->
                 (value as? BooleanPreferenceValue)?.let { novelPreferences.carryReaderAutoScroll(it.value) }
+            // A marker about the backup itself, read in restore, never a setting.
+            CUSTOM_INFO_OPTION_MARKER_KEY -> Unit
             // The address decides where the NovelList sign-in token goes, so a backup never moves it.
             trackPreferences.novelListApiUrl.key() -> Unit
             // A backup may be someone else's: it never picks a silent installer for later extension
@@ -76,18 +124,25 @@ class AppPreferenceCarry(
             networkPreferences.flareSolverrUsername.key(),
             networkPreferences.flareSolverrPassword.key(),
             -> Unit
-            // Nor installs a plugin, whose script the QuickJS host would run on the next load: the restore
-            // installs the backup's plugins itself, only from repos the user trusts (RestoreExtensionInstaller).
-            novelPreferences.installedPluginUrls().key(), novelPreferences.installedPluginMetadata().key() -> Unit
-            // Nor adds a plugin repo the user has not trusted there; a trusted one is fetched and added live.
-            novelPreferences.addedRepoUrls().key() -> Unit
+            // Nor installs a plugin, whose script the QuickJS host would run on the next load, or adds a repo:
+            // the restore installs the backup's plugins itself, only from repos the user trusts there, and adds
+            // a trusted repo live (RestoreExtensionInstaller).
+            in novelPreferences.pluginInstallKeys() -> Unit
             // Mihon never backs up app state, extension trust among it, so only a crafted backup carries any.
             else -> return key in SKIPPED_KEYS || Preference.isAppState(key) || SKIPPED_PREFIXES.any(key::startsWith)
         }
         return true
     }
 
-    private companion object {
+    /** How long the app stays unlocked, where -1 is never locking again. */
+    private fun lockDelayRank(minutes: Int) = if (minutes < 0) Int.MAX_VALUE else minutes
+
+    // Internal so PreferenceRestorerTest reads the lists rather than a copy that drifts from them.
+    internal companion object {
+        // Written into every App settings backup (backedUpAppPreferences): a backup without it was made before
+        // the custom info migration option, so its saved migration options gain it on restore.
+        const val CUSTOM_INFO_OPTION_MARKER_KEY = "backup_migration_custom_info_known"
+
         val SKIPPED_KEYS = setOf(
             DEAD_READER_TTS_ENABLED_KEY, // carried after it
             // The retired merge prefs hold ids from the device the backup came from; the restorers rebuild
@@ -109,6 +164,8 @@ class AppPreferenceCarry(
             ReikaiLibraryPreferences.DEAD_LAST_USED_ALL_PAGE_KEY,
             ReikaiSourcePreferences.DEAD_UPDATES_FILTER_CATEGORIES_KEY,
             ReikaiSourcePreferences.DEAD_DOWNLOAD_CONTENT_TYPE_KEY,
+            // Orders a download queue no backup carries, so another device's would only reorder this one's.
+            ReikaiSourcePreferences.DOWNLOAD_QUEUE_ORDER_KEY,
             DEAD_PLUGINS_NEED_REVALIDATION_KEY,
             // The WebView developer tools let any computer with debugging rights inspect the app's
             // WebViews, so a backup never turns them on.
@@ -121,4 +178,20 @@ class AppPreferenceCarry(
             ReikaiSourcePreferences.DEAD_UPDATES_FILTER_NOVEL_CATEGORY_SET_PREFIX,
         )
     }
+}
+
+/**
+ * The novel-source records a backup carries, for a restore of library entries: each name at its field 717,
+ * widened to the whole record its App settings kept for that source (icon, language, site, image headers).
+ * Stored first, a bare name would make the fuller record, which only fills a gap, find no gap to fill.
+ */
+fun backedUpNovelSources(
+    names: Map<String, String>,
+    preferences: List<BackupPreference>,
+): Map<String, LnSourceIdentity> {
+    val records = preferences.firstOrNull { it.key == NovelPreferences.SEEN_NOVEL_SOURCES_KEY }
+        ?.let { (it.value as? StringPreferenceValue)?.value }
+        ?.let(NovelPreferences::decodeSeenNovelSources)
+        .orEmpty()
+    return names.mapValues { (id, name) -> records[id] ?: LnSourceIdentity(name) }
 }

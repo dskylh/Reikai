@@ -17,6 +17,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import eu.kanade.tachiyomi.util.system.setDefaultSettings
 import eu.kanade.tachiyomi.util.system.setUserAgent
+import eu.kanade.tachiyomi.util.system.toWebViewHeaders
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -93,7 +94,7 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
             val redirected = when {
                 first is Answer.Redirect -> true
                 manualOnly || first !is Answer.Error || !first.fromPage -> false
-                current.method !in setOf("GET", "HEAD") -> false
+                !followsRedirect(current, chain.followRedirects) -> false
                 else -> fetchOnce(chain, current, manualRedirect = true) is Answer.Redirect
             }
             if (!redirected) return first.toOutcome(current)
@@ -160,27 +161,36 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
         val userAgent = request.header("User-Agent")
         val page = AtomicReference<Page?>()
         val opened = CountDownLatch(1)
+        val inbox = LinkedBlockingQueue<String>()
         main.post {
             try {
-                page.set(openPage(origin, userAgent))
+                // Registered as the page opens, on the thread that evicts, so it is busy before another fetch
+                // can take it for idle while this one waits for it to be ready.
+                page.set(openPage(origin, userAgent)?.also { it.inboxes[id] = inbox })
             } catch (e: Exception) {
                 logcat(LogPriority.ERROR, e) { "WebView fetch: no WebView for ${request.url.host}" }
             } finally {
                 opened.countDown()
             }
         }
-        if (!opened.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) return Answer.Error("page not created")
+        if (!opened.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            // Posted after the open, so it lets go of an inbox the open registers late.
+            main.post {
+                page.get()?.inboxes?.remove(id) ?: return@post
+                scheduleTeardown(origin)
+            }
+            return Answer.Error("page not created")
+        }
         val open = page.get() ?: return Answer.Error("page not created")
-        val proxy = open.awaitReady() ?: return Answer.Error("page not ready")
-        val inbox = LinkedBlockingQueue<String>()
-        open.inboxes[id] = inbox
-        if (open.dead) inbox.offer(PAGE_CLOSED)
-        main.post { if (!open.dead) proxy.postMessage(message.toString()) }
         try {
-            return collect(chain, request, id, inbox)
-        } catch (e: IOException) {
-            main.post { if (!open.dead) proxy.postMessage(buildJsonObject { put("abort", id) }.toString()) }
-            return Answer.Error(e.message ?: "aborted")
+            val proxy = open.awaitReady() ?: return Answer.Error("page not ready")
+            main.post { if (!open.dead) proxy.postMessage(message.toString()) }
+            try {
+                return collect(chain, request, id, inbox)
+            } catch (e: IOException) {
+                main.post { if (!open.dead) proxy.postMessage(buildJsonObject { put("abort", id) }.toString()) }
+                return Answer.Error(e.message ?: "aborted")
+            }
         } finally {
             open.inboxes.remove(id)
             main.post { scheduleTeardown(origin) }
@@ -250,9 +260,7 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
     private fun openPage(origin: String, userAgent: String?): Page? {
         pages[origin]?.takeUnless { it.dead }?.let { page ->
             main.removeCallbacksAndMessages(page)
-            if (userAgent != null && page.webView.settings.userAgentString != userAgent) {
-                page.webView.setUserAgent(userAgent)
-            }
+            page.webView.useRequestUserAgent(userAgent)
             return page
         }
         pages.remove(origin)?.destroy()
@@ -263,7 +271,7 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
         }
         val webView = WebView(context).apply {
             setDefaultSettings()
-            if (!userAgent.isNullOrBlank()) setUserAgent(userAgent)
+            useRequestUserAgent(userAgent)
         }
         val page = Page(origin, webView)
         return try {
@@ -305,8 +313,8 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
      * may reload its own origin once it passes; any other navigation ends the wait.
      */
     private fun redirectTarget(request: Request): String? {
-        val origin = webViewFetchOrigin(request.url)
-        val path = request.url.encodedPath
+        val asked = request.url
+        val path = asked.encodedPath
         val target = AtomicReference<String?>()
         val done = CountDownLatch(1)
         val view = AtomicReference<WebView?>()
@@ -315,7 +323,7 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
         main.post {
             val webView = WebView(context).apply {
                 setDefaultSettings()
-                request.header("User-Agent")?.takeIf { it.isNotBlank() }?.let { setUserAgent(it) }
+                useRequestUserAgent(request.header("User-Agent"))
                 webViewClient = object : WebViewClient() {
                     var challenged = false
 
@@ -328,7 +336,7 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
                         }
                         // Only the challenge reloading the page asked for, so no other redirect is taken.
                         val reload = request.url.toString().toHttpUrlOrNull()
-                            ?.let { webViewFetchOrigin(it) == origin && it.encodedPath == path } == true
+                            ?.let { isSameOrigin(it, asked) && it.encodedPath == path } == true
                         if (!reload) done.countDown()
                         return !reload
                     }
@@ -362,7 +370,8 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
                 }
             }
             view.set(webView)
-            webView.loadUrl(request.url.toString())
+            // With the request's headers, as the solve loads its page: a credentialed redirect answers only to them.
+            webView.loadUrl(request.url.toString(), request.headers.toWebViewHeaders())
         }
         try {
             done.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -494,4 +503,9 @@ class WebViewFetcher(private val context: Context, private val verboseLogging: (
             </script></head><body></body></html>
         """.trimIndent()
     }
+}
+
+/** Sends what the request would have: its own User-Agent, or the WebView's when it has none or a blank one. */
+internal fun WebView.useRequestUserAgent(userAgent: String?) {
+    if (!userAgent.isNullOrBlank() && settings.userAgentString != userAgent) setUserAgent(userAgent)
 }

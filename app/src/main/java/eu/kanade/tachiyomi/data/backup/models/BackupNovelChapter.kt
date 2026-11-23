@@ -5,6 +5,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.protobuf.ProtoNumber
 import mihon.core.common.extensions.toInstantOrNull
 import reikai.domain.novel.model.NovelChapter
+import reikai.domain.reader.ChapterProgress
 import kotlin.time.Instant
 
 @Serializable
@@ -24,6 +25,11 @@ class BackupNovelChapter(
     @ProtoNumber(11) var scanlator: String? = null,
     // The source's own number when the user corrected it, as BackupChapter carries it. Null when uncorrected.
     @ProtoNumber(12) var sourceChapterNumber: Double? = null,
+    // The word count a reading pace is learned against, as BackupChapter carries manga's page count. 0
+    // when the reader never counted it.
+    @ProtoNumber(13) var words: Long = 0,
+    // The user's correction to the duplicate rule, as BackupChapter carries it. Null when unmarked.
+    @ProtoNumber(14) var copyMark: Long? = null,
     // No download flag is carried: the on-disk text file isn't in the backup, so downloaded state is
     // rederived from disk by NovelDownloadCache after restore.
 ) {
@@ -35,7 +41,8 @@ class BackupNovelChapter(
             name = this@BackupNovelChapter.name,
             read = this@BackupNovelChapter.read,
             bookmark = this@BackupNovelChapter.bookmark,
-            lastTextProgress = this@BackupNovelChapter.lastTextProgress,
+            // From outside the app, so held within a chapter, as BackupChapter holds a page within an Int.
+            lastTextProgress = ChapterProgress.Percent.clamped(this@BackupNovelChapter.lastTextProgress).hundredths,
             chapterNumber = this@BackupNovelChapter.chapterNumber,
             sourceOrder = this@BackupNovelChapter.sourceOrder,
             dateFetch = Instant.fromEpochMilliseconds(this@BackupNovelChapter.dateFetch),

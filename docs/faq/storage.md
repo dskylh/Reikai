@@ -6,7 +6,7 @@ description: Understanding Storage Permissions.
 
 # Storage location
 
-Reikai manages several things within a selected storage location, including automatic backups, chapter downloads, and the Local source.
+Reikai manages several things within a selected storage location, including automatic backups, chapter downloads, the Local source, novel chapter downloads (`novel_downloads`), the reader fonts you add (`fonts`) and your local novels (`localnovels`).
 
 ::: tip Selecting a storage location
 Keep the following in mind when setting up your Storage location:
@@ -102,11 +102,23 @@ The following illustrates the folder structure:
         </li>
       </ul>
     </li>
+    <li>
+      <img src="/docs/img/folder.svg" alt="Folder" class="tree-icon icon-folder">
+      <span class="folder main">novel_downloads</span>
+    </li>
+    <li>
+      <img src="/docs/img/folder.svg" alt="Folder" class="tree-icon icon-folder">
+      <span class="folder main">fonts</span>
+    </li>
+    <li>
+      <img src="/docs/img/folder.svg" alt="Folder" class="tree-icon icon-folder">
+      <span class="folder main">localnovels</span>
+    </li>
   </ul>
 </div>
 :::
 
-Two more folders are created beside these. **`fonts`** holds the fonts you import or download for the novel reader. **`novel_downloads`** follows a similar shape to `downloads`, `novel_downloads/Source id/Novel title/`, with each chapter saved as an `.html` file rather than an archive of images. The source folder is named after the source's id rather than its display name (see [how downloads are organized](/docs/faq/downloads#how-are-downloads-organized-on-the-filesystem)).
+Three more folders are created beside these. **`fonts`** holds the fonts you import or download for the novel reader. **`localnovels`** holds your own light novels (see [Local source](/docs/guides/local-source/)). **`novel_downloads`** follows a similar shape to `downloads`, `novel_downloads/Source/Novel title/`, with each chapter saved as an `.html` file rather than an archive of images. The source folder carries the source's name (see [how downloads are organized](/docs/faq/downloads#how-are-downloads-organized-on-the-filesystem)).
 
 Backup file name prefixes are unique for the app to avoid potential collisions between forks.
 

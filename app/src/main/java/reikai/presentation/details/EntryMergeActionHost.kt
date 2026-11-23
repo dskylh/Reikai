@@ -7,12 +7,17 @@ import androidx.compose.material3.SnackbarResult
 import dev.icerock.moko.resources.StringResource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import reikai.data.local.CombineLocalVolumes
+import reikai.data.local.LocalMoveResult
 import reikai.domain.library.EntryLibraryRemoval
 import reikai.domain.merge.MergeManager
+import reikai.presentation.components.reportVolumeMove
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.launchIO
+import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.i18n.MR
 
 /**
@@ -35,6 +40,7 @@ class EntryMergeActionHost(
     private val dismissDialog: () -> Unit,
     private val removal: EntryLibraryRemoval,
     private val offerToDeleteDownloads: suspend (removedIds: List<Long>) -> Unit,
+    private val volumes: CombineLocalVolumes,
 ) {
 
     /** Persist a manage-sources drag as the group's source order, then re-read the group: a fresh array
@@ -104,7 +110,7 @@ class EntryMergeActionHost(
             try {
                 undone = undoRequested(MR.strings.merge_sources_removed)
             } finally {
-                if (!undone) withContext(NonCancellable) { removal.dropCovers(joined.keys.toList()) }
+                if (!undone) withContext(NonCancellable) { removal.finish(joined.keys.toList()) }
             }
             if (undone) {
                 mergeManager.restoreGroup(snapshot)
@@ -112,6 +118,37 @@ class EntryMergeActionHost(
                 appScope.launch { removal.restore(joined) }
             } else {
                 offerToDeleteDownloads(joined.keys.toList())
+            }
+        }
+    }
+
+    /**
+     * Turns a merge of local series into one series with volumes: the group dissolves and the screen's own
+     * entry takes the others in as its volumes. Undo moves them back out and merges the group again.
+     */
+    fun combineAsVolumes() {
+        val related = group.relatedIds
+        dismissDialog()
+        scope.launch {
+            val anchor = anchorId()
+            val contentType = removal.entryId(anchor).contentType
+            // Dissolving, combining and merging again after a failed combine run as one step on the app scope,
+            // so leaving the screen part way never leaves the merge dissolved with nothing combined.
+            val combined = appScope.async {
+                val series = volumes.series(contentType, related.toList())
+                val kept = series.firstOrNull { it.id == anchor } ?: return@async null
+                val snapshot = mergeManager.captureGroup(anchor)
+                mergeManager.removeFromGroup(related, related.toList())
+                val move = volumes.combine(contentType, kept, series - kept)
+                if (move.result is LocalMoveResult.Failed) mergeManager.restoreGroup(snapshot)
+                Triple(kept, snapshot, move)
+            }.await() ?: return@launch
+            val (kept, snapshot, move) = combined
+            withIOContext { group.refresh(anchor) }
+            val message = context.stringResource(MR.strings.local_volumes_combined, kept.title)
+            if (!snackbarHostState.reportVolumeMove(context, move, message) && move.result is LocalMoveResult.Moved) {
+                appScope.async { mergeManager.restoreGroup(snapshot) }.await()
+                withIOContext { group.refresh(anchor) }
             }
         }
     }

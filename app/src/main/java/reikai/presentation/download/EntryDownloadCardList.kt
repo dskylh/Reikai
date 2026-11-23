@@ -33,10 +33,12 @@ import mihon.icons.materialsymbols.rounded.DragHandle
 import mihon.icons.materialsymbols.rounded.KeyboardArrowDown
 import mihon.icons.materialsymbols.rounded.KeyboardArrowUp
 import reikai.domain.library.ContentType
+import reikai.domain.library.labelRes
 import reikai.presentation.components.CardKicker
-import reikai.presentation.components.ContentTypeBadge
 import reikai.presentation.components.ReikaiListCard
+import reikai.presentation.components.TypeBadge
 import reikai.presentation.components.rememberSettledReorder
+import reikai.util.inOrderOf
 import sh.calvin.reorderable.ReorderableCollectionItemScope
 import sh.calvin.reorderable.ReorderableItem
 import tachiyomi.i18n.MR
@@ -170,7 +172,8 @@ private fun ReorderableCollectionItemScope.EntryDownloadCard(
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     CardKicker(item.sourceName) {
-                        if (showTypeBadge) ContentTypeBadge(item.contentType)
+                        // Not the Show-aware badge: the queue keeps a hidden type's cards.
+                        if (showTypeBadge) TypeBadge(stringResource(item.contentType.labelRes))
                     }
                     Text(
                         text = item.title,
@@ -264,9 +267,9 @@ private fun ReorderableCollectionItemScope.EntryDownloadCard(
 private fun EntryDownloadStatusChip(status: EntryDownloadCardStatus) {
     val (label, color) = when (status) {
         EntryDownloadCardStatus.DOWNLOADING ->
-            stringResource(MR.strings.download_card_status_downloading) to MaterialTheme.colorScheme.primary
+            stringResource(MR.strings.ext_downloading) to MaterialTheme.colorScheme.primary
         EntryDownloadCardStatus.ERROR ->
-            stringResource(MR.strings.download_card_status_error) to MaterialTheme.colorScheme.error
+            stringResource(MR.strings.chapter_error) to MaterialTheme.colorScheme.error
         EntryDownloadCardStatus.QUEUED ->
             stringResource(MR.strings.download_card_status_queued) to MaterialTheme.colorScheme.onSurfaceVariant
     }

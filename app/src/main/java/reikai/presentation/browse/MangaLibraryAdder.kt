@@ -3,6 +3,7 @@ package reikai.presentation.browse
 import dev.zacsweers.metro.Inject
 import eu.kanade.domain.manga.interactor.UpdateManga
 import kotlinx.coroutines.flow.firstOrNull
+import logcat.LogPriority
 import reikai.domain.category.groupCategoryIds
 import reikai.domain.category.resolveDefaultCategoryIds
 import reikai.domain.category.withoutSystemCategory
@@ -11,12 +12,15 @@ import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.manga.MangaChapterSettings
 import reikai.domain.manga.MangaGroupCategories
 import reikai.domain.manga.MangaMergeManager
+import reikai.domain.manga.MangaViewerFlagSettings
 import reikai.domain.manga.RemoveMangaFromLibrary
 import reikai.domain.track.autobind.AutoBindOnAdd
 import reikai.presentation.browse.components.EntrySourceLabel
 import reikai.presentation.library.reikaiSortCategories
+import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.core.common.preference.mapAsCheckboxState
+import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.category.interactor.GetCategories
 import tachiyomi.domain.category.interactor.SetMangaCategories
 import tachiyomi.domain.category.model.Category
@@ -52,6 +56,7 @@ class MangaLibraryAdder(
     private val reikaiLibraryPreferences: ReikaiLibraryPreferences,
     private val removeMangaFromLibrary: RemoveMangaFromLibrary,
     private val chapterSettings: MangaChapterSettings,
+    private val viewerFlagSettings: MangaViewerFlagSettings,
 ) {
 
     private val groupCategories = MangaGroupCategories(getCategories, setMangaCategories)
@@ -100,11 +105,10 @@ class MangaLibraryAdder(
      * sequence, filed in the group's categories, so it never asks. Only the picks: the duplicate list
      * is fuzzy, and one member is enough since the merge absorbs that member's whole group.
      */
-    suspend fun addToExistingGroup(manga: Manga, selectedIds: List<Long>): AddFavoriteResult = addEntryOrPrompt(
+    suspend fun addToExistingGroup(manga: Manga, selectedIds: List<Long>): AddOutcome = addEntry(
         resolveCategories = { groupCategoryIdsOf(selectedIds) },
         favorite = { joinGroupForAdd(manga, selectedIds) },
         fileCategories = { _, categoryIds -> moveToCategories(manga, categoryIds) },
-        categoryPicker = { categoryPickerSelection(manga.id) },
     )
 
     // The defaults go first, so the setting the join hands the entry is the one it keeps.
@@ -123,11 +127,17 @@ class MangaLibraryAdder(
      */
     suspend fun joinGroup(manga: Manga, selectedIds: List<Long>): Long? {
         val stored = getManga.await(manga.id) ?: return null
-        val favorited = chapterSettings.rejoin(manga.id, mergeManager) {
-            transactions.run {
-                val ok = stored.favorite || updateManga.awaitUpdateFavorite(manga.id, true)
-                if (ok) mergeManager.merge(selectedIds + manga.id)
-                ok
+        val favorited = rejoinGroup(manga.id) {
+            // A write inside that swallowed its failure rolled the whole unit back, which is a failed write too.
+            runCatchingCancellable {
+                transactions.runThrowingOnRollback {
+                    val ok = stored.favorite || updateManga.awaitUpdateFavorite(manga.id, true)
+                    if (ok) mergeManager.merge(selectedIds + manga.id)
+                    ok
+                }
+            }.getOrElse { e ->
+                logcat(LogPriority.ERROR, e) { "Adding to a group failed" }
+                false
             }
         }
         if (!favorited) return null
@@ -221,7 +231,7 @@ class MangaLibraryAdder(
     suspend fun favoriteForAdd(mangaId: Long, onAdded: suspend (Manga) -> Unit = {}): Long? {
         val stored = getManga.await(mangaId) ?: return null
         if (stored.favorite) return mangaId
-        val added = chapterSettings.rejoin(mangaId, mergeManager) {
+        val added = rejoinGroup(mangaId) {
             updateManga.awaitUpdateFavorite(mangaId, true).also { if (it) onAdded(stored) }
         }
         if (!added) return null
@@ -258,4 +268,8 @@ class MangaLibraryAdder(
         categories = getCategories.subscribe().firstOrNull()?.filterNot { it.isSystemCategory }.orEmpty(),
         sortOrder = reikaiLibraryPreferences.categorySortOrder.get(),
     )
+
+    /** [add], after which a series back in the library takes its group's chapter settings and reader flags. */
+    private suspend fun <T> rejoinGroup(id: Long, add: suspend () -> T): T =
+        chapterSettings.rejoin(id, mergeManager) { viewerFlagSettings.rejoin(id, mergeManager, add) }
 }

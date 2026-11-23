@@ -6,6 +6,7 @@ import reikai.domain.merge.ChapterUnit
 import reikai.domain.merge.CopyToOpen
 import reikai.domain.merge.DownloadTargets
 import reikai.domain.merge.GroupChapterFlags
+import reikai.domain.merge.GroupViewerFlags
 import reikai.domain.merge.MergeScope
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelChapterSettings
@@ -39,12 +40,21 @@ data class NovelGroupChapters(
         { it.read },
         { it.bookmark },
     ) { onDisk(pooledChapters) }
+
+    /** The copy a download of each of [chapters] fetches, a copy counting as fetchable while its novel in
+     *  [owners] [isInstalled]: the library's bulk download, stitch or none, as manga's `Group.downloadTargets`. */
+    inline fun downloadTargets(owners: Map<Long, Novel>, isInstalled: (Novel) -> Boolean): DownloadTargets {
+        val installed = owners.filterValues(isInstalled).keys
+        return DownloadTargets.of(MergeScope.Group, pooledChapters, chapters, stitch, { it.id }) {
+            it.novelId in installed
+        }
+    }
 }
 
 /**
  * [GetNextNovelChapter.readingRows]: [rows] in the reader's scope, plus the group behind them. [pooled] is
  * empty and [copies] null for a novel in no group; [copies] is null in source scope too. [downloadTargets]
- * is the copy each row's download fetches, every row's own wherever [copies] is null or [stitch] empty.
+ * is the copy each row's download fetches, or none for a row no installed source holds.
  */
 data class NovelReadingRows(
     val rows: List<NovelChapter>,
@@ -114,17 +124,15 @@ class GetNextNovelChapter(
         val memberIds = ids.ifEmpty { listOf(novelId) }
         if (sourceScoped || pooled.isEmpty()) {
             val own = chapterRepository.getByNovelId(novelId)
-            return NovelReadingRows(own, memberIds, pooled, stitch, copies = null, DownloadTargets.OWN)
+            val installed = novelRepository.ownersOf(own).filterValues { isInstalled(it) }.keys
+            val fetched = DownloadTargets.of(MergeScope.Source, own, own, stitch, { it.id }) { it.novelId in installed }
+            return NovelReadingRows(own, memberIds, pooled, stitch, copies = null, fetched)
         }
         val owners = novelRepository.ownersOf(pooled)
-        // Gated as manga's reader gates it: with no stitch there is no other copy, so each row fetches its
-        // own rather than none.
-        val fetched = if (stitch.isEmpty()) {
-            DownloadTargets.OWN
-        } else {
-            val installed = owners.filterValues { isInstalled(it) }.keys
-            DownloadTargets.of(MergeScope.Group, pooled, pooled, stitch, { it.id }) { it.novelId in installed }
-        }
+        val installed = owners.filterValues { isInstalled(it) }.keys
+        val fetched = DownloadTargets.of(MergeScope.Group, pooled, pooled, stitch, {
+            it.id
+        }) { it.novelId in installed }
         val copies = CopyToOpen(MergeScope.Group, pooled, stitch, { it.id }, downloadedIds(pooled, owners), fetched)
         val rows = copies.inPlaceOf(mergedChapterProvider.merged(pooled, stitch)) { copy, row ->
             copy.copy(sourceOrder = row.sourceOrder)
@@ -194,4 +202,8 @@ class GetNextNovelChapter(
         val novel = novelRepository.getById(novelId) ?: return null
         return groupSettings.shown(novel, mergeManager.computeRelatedIds(novelId).asList())
     }
+
+    /** Where [novelId]'s series keeps its reader flags ([GroupViewerFlags]). */
+    suspend fun viewerFlags(novelId: Long): GroupViewerFlags =
+        GroupViewerFlags.of(novelId, mergeManager.computeRelatedIds(novelId).asList())
 }

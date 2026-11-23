@@ -1,0 +1,113 @@
+-- Moves one chapter of a local series to another series and another address, with everything keyed by
+-- the chapter's owner and address, so its read state, history and corrections stay with it. Rows keyed
+-- by the chapter's own id (sessions, words, a novel's history) follow the row without a write.
+
+moveMangaChapter:
+UPDATE chapter SET manga_id = :toOwner, remote_url = :toUrl
+WHERE manga_id = :fromOwner AND remote_url = :fromUrl;
+
+moveMangaHistory:
+UPDATE history SET manga_id = :toOwner
+WHERE chapter_id = (SELECT id FROM chapter WHERE manga_id = :toOwner AND remote_url = :toUrl);
+
+moveMangaNumberOverride:
+UPDATE OR IGNORE manga_chapter_number_override SET manga_id = :toOwner, url = :toUrl
+WHERE manga_id = :fromOwner AND url = :fromUrl;
+
+moveMangaCopyMark:
+UPDATE OR IGNORE manga_chapter_copy_mark SET manga_id = :toOwner, url = :toUrl
+WHERE manga_id = :fromOwner AND url = :fromUrl;
+
+moveNovelChapter:
+UPDATE novel_chapters SET novel_id = :toOwner, url = :toUrl
+WHERE novel_id = :fromOwner AND url = :fromUrl;
+
+moveNovelNumberOverride:
+UPDATE OR IGNORE novel_chapter_number_override SET novel_id = :toOwner, url = :toUrl
+WHERE novel_id = :fromOwner AND url = :fromUrl;
+
+moveNovelCopyMark:
+UPDATE OR IGNORE novel_chapter_copy_mark SET novel_id = :toOwner, url = :toUrl
+WHERE novel_id = :fromOwner AND url = :fromUrl;
+
+-- A chapter arriving where its new owner already holds a row at that address (a restore made before a
+-- combine gives both series one) folds onto that row as a kept state does: the arriving row is kept as a
+-- tombstone, then deleted, and what the owner already keys at the address wins over what arrives.
+mangaChapterIdAt:
+SELECT id FROM chapter WHERE manga_id = :ownerId AND remote_url = :url;
+
+novelChapterIdAt:
+SELECT _id FROM novel_chapters WHERE novel_id = :ownerId AND url = :url;
+
+deleteMangaChapter:
+DELETE FROM chapter WHERE id = :id;
+
+deleteNovelChapter:
+DELETE FROM novel_chapters WHERE _id = :id;
+
+forgetMangaExtras {
+    DELETE FROM manga_chapter_number_override WHERE manga_id = :ownerId AND url = :url;
+    DELETE FROM manga_chapter_copy_mark WHERE manga_id = :ownerId AND url = :url;
+}
+
+forgetNovelExtras {
+    DELETE FROM novel_chapter_number_override WHERE novel_id = :ownerId AND url = :url;
+    DELETE FROM novel_chapter_copy_mark WHERE novel_id = :ownerId AND url = :url;
+}
+
+-- Every chapter address a local series' rows hold, read inside a rename's transaction so none is missed.
+mangaChapterUrls:
+SELECT remote_url FROM chapter WHERE manga_id = :ownerId;
+
+novelChapterUrls:
+SELECT url FROM novel_chapters WHERE novel_id = :ownerId;
+
+-- A local series' files renamed: its address, then its volumes' saved order and labels and its picked chip,
+-- which are keyed by the folder and file names.
+renameManga:
+UPDATE manga SET remote_url = :url WHERE id = :id;
+
+renameNovel:
+UPDATE novels SET url = :url WHERE _id = :id;
+
+renameVolume:
+UPDATE local_volume SET volume_key = :toKey
+WHERE content_type = :contentType AND series = :series AND volume_key = :fromKey;
+
+renameVolumeSeries:
+UPDATE local_volume SET series = :toSeries
+WHERE content_type = :contentType AND series = :fromSeries;
+
+renameVolumePick:
+UPDATE local_volume_pick SET volume_key = :toKey
+WHERE content_type = :contentType AND entry_id = :entryId AND volume_key = :fromKey;
+
+-- A saved row at a name no file holds any more, which a move or rename onto that name replaces.
+forgetVolume:
+DELETE FROM local_volume
+WHERE content_type = :contentType AND series = :series AND volume_key = :volumeKey;
+
+forgetSeriesVolumes:
+DELETE FROM local_volume
+WHERE content_type = :contentType AND series = :series;
+
+forgetVolumePick:
+DELETE FROM local_volume_pick
+WHERE content_type = :contentType AND entry_id = :entryId AND volume_key = :volumeKey;
+
+moveVolume:
+UPDATE local_volume SET series = :toSeries, volume_key = :toKey, position = :position
+WHERE content_type = :contentType AND series = :fromSeries AND volume_key = :fromKey;
+
+-- The local series at an address, which a regroup hands the chapters its table now gives that series.
+localMangaId:
+SELECT id FROM manga WHERE source_id = 0 AND remote_url = :url;
+
+localNovelId:
+SELECT _id FROM novels WHERE source = 'local' AND url = :url;
+
+localMangaUrls:
+SELECT remote_url FROM manga WHERE source_id = 0;
+
+localNovelUrls:
+SELECT url FROM novels WHERE source = 'local';

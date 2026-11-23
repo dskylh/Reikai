@@ -4,6 +4,10 @@ import logcat.LogPriority
 import tachiyomi.core.common.util.system.logcat
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 object NovelRegexReplacements {
 
@@ -13,12 +17,15 @@ object NovelRegexReplacements {
      * exactly as typed, so a price like `$5` does not read as a group and fail the whole rule.
      */
     data class Compiled(val regex: Regex, val replacement: String, val literal: Boolean) {
-        fun applyTo(input: String): String =
-            if (literal) regex.replace(input) { replacement } else regex.replace(input, replacement)
+        fun applyTo(input: CharSequence): String =
+            regex.replace(input, if (literal) Regex.escapeReplacement(replacement) else replacement)
     }
 
     /** The pattern compiled but its replacement cannot be read, so the editor marks the Replace field. */
     class InvalidReplacementException(cause: Exception) : IllegalArgumentException(cause.message, cause)
+
+    /** The pattern ran past its time budget, which the editor says instead of an output. */
+    class TooSlowException : IllegalStateException()
 
     // Compiling a rule set costs more than running it and the same set is re-applied to every
     // chapter, so the compiled form is cached against the raw JSON. Access-ordered and capped, so
@@ -57,7 +64,31 @@ object NovelRegexReplacements {
         return Regex(bounded, options)
     }
 
-    fun apply(content: String, rulesJson: String): String {
+    /**
+     * Runs compiled rules for at most [budget] each. A pattern that once ran past it is skipped from then on:
+     * its thread may still be matching, and running it again would start another that cannot be stopped.
+     */
+    class BudgetedRun(private val budget: Duration) {
+        private val tooSlow: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+        /** [rule] over [input], or null when it ran past the budget, now or before. */
+        fun applyOrNull(rule: Compiled, input: String, isActive: () -> Boolean): String? {
+            if (rule.regex.pattern in tooSlow) return null
+            return UserRegexRunner.run(budget, isActive) { wrap -> rule.applyTo(wrap(input)) }
+                ?: null.also {
+                    tooSlow += rule.regex.pattern
+                    logcat(LogPriority.WARN) { "Regex rule /${rule.regex.pattern}/ ran past $budget, now skipped" }
+                }
+        }
+    }
+
+    private val reading = BudgetedRun(2.seconds)
+
+    /**
+     * Throws [CancellationException] once [isActive] turns false, even inside a slow match. A rule that
+     * runs past its budget leaves the text as it found it and is skipped from then on.
+     */
+    fun apply(content: String, rulesJson: String, isActive: () -> Boolean = { true }): String {
         if (rulesJson.isBlank() || rulesJson == "[]") return content
 
         val compiled = synchronized(cache) {
@@ -77,7 +108,9 @@ object NovelRegexReplacements {
         var result = content
         for (rule in compiled) {
             try {
-                result = rule.applyTo(result)
+                result = reading.applyOrNull(rule, result, isActive) ?: result
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 logcat(LogPriority.WARN, e) { "Regex replacement failed" }
             }

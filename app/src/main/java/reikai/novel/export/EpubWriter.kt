@@ -1,0 +1,361 @@
+package reikai.novel.export
+
+import eu.kanade.tachiyomi.util.lang.Hash
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import org.jsoup.nodes.Entities
+import reikai.novel.content.NovelChapterAddress
+import reikai.novel.content.NovelHtmlUtils
+import reikai.novel.content.RenderTarget
+import reikai.novel.content.anchorTarget
+import reikai.novel.local.LocalNovelPicture
+import java.io.OutputStream
+import java.util.Base64
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+/** A book to write: [chapters] in reading order, each body HTML as the reader stores it. */
+data class EpubExportBook(
+    val title: String,
+    val author: String?,
+    val description: String?,
+    val language: String?,
+    val genres: List<String>,
+    val identifier: String,
+    val cover: ExportPicture?,
+    val chapters: List<ExportChapter>,
+    val artist: String? = null,
+    /** The source's own word for the status ("Ongoing"), kept so an import reads it back. */
+    val status: String? = null,
+    /** Where this book stands in a series of exports of one novel, so an import orders them by it. */
+    val seriesPosition: Int? = null,
+)
+
+/**
+ * One chapter, its HTML read only when the writer reaches it, so a long novel is never held whole.
+ * [sourceKey] is the source chapter's own address, which names the chapter's file in the book. A local
+ * novel's chapter names its pictures by its book's address, which [localPicture] reads in place of `data:`.
+ */
+class ExportChapter(
+    val title: String,
+    val sourceKey: String,
+    val localPicture: suspend (address: String) -> LocalNovelPicture? = { null },
+    val html: suspend () -> String,
+)
+
+data class ExportPicture(val bytes: ByteArray, val mime: String)
+
+/**
+ * Writes an EPUB 3 with an EPUB 2 table of contents beside it, so older readers find the chapters too.
+ * Each chapter becomes well-formed XHTML: pictures carried as `data:` or local book addresses become files
+ * of their own (one per distinct picture), web pictures are dropped since a book on disk cannot fetch them,
+ * and nothing that runs is kept. [includePictures] false drops every picture.
+ * Design: docs/dev/subsystems/local-novels.md.
+ */
+class EpubWriter(private val includePictures: Boolean = true) {
+
+    suspend fun write(book: EpubExportBook, out: OutputStream, onChapter: (done: Int) -> Unit = {}) {
+        ZipOutputStream(out).use { zip ->
+            zip.stored("mimetype", "application/epub+zip".toByteArray())
+            zip.text("META-INF/container.xml", CONTAINER)
+            zip.text("OEBPS/style.css", STYLE)
+
+            // Each picture is written when first met, so only its name and type are kept for the manifest.
+            val pictures = LinkedHashMap<String, Pair<String, String>>()
+            val taken = HashSet<String>()
+            val files = book.chapters.mapIndexed { index, chapter ->
+                // A chapter read from the device never has to suspend, so a cancel would run to the book's end.
+                currentCoroutineContext().ensureActive()
+                // Named by its source chapter, never its place: an imported book keys a chapter by its file, so
+                // a re-export missing earlier chapters would otherwise hand their read state to later ones.
+                val stem = "text/chapter-" + Hash.md5(chapter.sourceKey).take(FILE_HASH_LENGTH)
+                val name = generateSequence(1) { it + 1 }
+                    .map { if (it == 1) "$stem.xhtml" else "$stem-$it.xhtml" }
+                    .first(taken::add)
+                val xhtml = chapterXhtml(chapter, book.language, pictures) { path, picture ->
+                    zip.bytes("OEBPS/$path", picture.bytes)
+                }
+                zip.text("OEBPS/$name", xhtml)
+                onChapter(index + 1)
+                name
+            }
+            val cover = book.cover?.takeIf { includePictures }?.let { "images/cover.${extensionOf(it.mime)}" to it }
+            cover?.let { (path, picture) -> zip.bytes("OEBPS/$path", picture.bytes) }
+
+            zip.text("OEBPS/nav.xhtml", nav(book, files))
+            zip.text("OEBPS/toc.ncx", ncx(book, files))
+            zip.text("OEBPS/content.opf", opf(book, files, pictures.values.toList(), cover))
+        }
+    }
+
+    private suspend fun chapterXhtml(
+        chapter: ExportChapter,
+        language: String?,
+        pictures: MutableMap<String, Pair<String, String>>,
+        writePicture: (path: String, picture: ExportPicture) -> Unit,
+    ): String {
+        // The reader's own prune drops what runs; inline styles stay, since they are the book's formatting.
+        val safe = NovelHtmlUtils.sanitizeForRender(
+            chapter.html(),
+            RenderTarget.WEB_VIEW,
+            keepEmbeddedCss = true,
+            keepEmbeddedJs = false,
+            blockMedia = false,
+        )
+        val body = Jsoup.parseBodyFragment(safe).body()
+        // What a book needs gone beyond that: controls with nothing to drive them, styling the book's own
+        // sheet replaces, and prefixed attributes, whose undeclared namespace makes the XHTML invalid. A
+        // control can be a jump's target, so its id stays.
+        body.select("input, button, style, link").forEach { it.keepingId().remove() }
+        // A jump to a place in this chapter still works in the book, found as both readers find it; a target
+        // named by `name` or xml:id gets the id a book's reader looks for. Any other relative link pointed at
+        // the source's site and leads nowhere here, so it keeps only its text.
+        // Every target is settled before any link goes, since a target can itself be a link that goes.
+        val dropped = body.select("a[href]").filter { link ->
+            val href = link.attr("href")
+            if (NovelChapterAddress.isWebAddress(href)) return@filter false
+            val fragment = href.takeIf { it.startsWith('#') }?.substring(1)
+            val target = fragment?.let { anchorTarget(body, it) } ?: return@filter true
+            if (!target.hasAttr("id")) {
+                target.attr("id", target.attr("name").ifEmpty { target.attr("xml:id") })
+            } else if (target.id() != fragment && fragment in listOf(target.attr("name"), target.attr("xml:id"))) {
+                // Found by name while it carries another id, which is the one a book's reader follows.
+                link.attr("href", "#${target.id()}")
+            }
+            false
+        }
+        dropped.forEach { it.keepingId().unwrap() }
+        for (element in body.getAllElements()) {
+            element.attributes().asList()
+                .filter { it.key == "contenteditable" || ':' in it.key }
+                .forEach { element.removeAttr(it.key) }
+        }
+        for (img in body.select("img")) {
+            val src = img.attr("src")
+            val picture = if (includePictures) {
+                decodeDataAddress(src) ?: chapter.localPicture(src)?.let { bookPicture(it.bytes, it.mime) }
+            } else {
+                null
+            }
+            if (picture == null) {
+                img.keepingId().remove()
+                continue
+            }
+            val hash = Hash.md5(picture.bytes)
+            val path = pictures.getOrPut(hash) {
+                val path = "images/image-${pictures.size + 1}.${extensionOf(picture.mime)}"
+                writePicture(path, picture)
+                path to picture.mime
+            }.first
+            img.attributes().asList().map { it.key }.filter { it != "alt" }.forEach(img::removeAttr)
+            img.attr("src", "../$path").attr("alt", img.attr("alt"))
+        }
+
+        val document = Document.createShell("")
+        document.outputSettings()
+            .syntax(Document.OutputSettings.Syntax.xml)
+            .escapeMode(Entities.EscapeMode.xhtml)
+            .charset(Charsets.UTF_8)
+            .prettyPrint(false)
+        val html = document.child(0)
+        html.attr("xmlns", XHTML_NS).attr("xmlns:epub", EPUB_NS).attr("xml:lang", language ?: UNDETERMINED)
+        document.head().appendElement("meta").attr("charset", "utf-8")
+        document.head().appendElement("title").text(chapter.title)
+        document.head().appendElement(
+            "link",
+        ).attr("rel", "stylesheet").attr("type", "text/css").attr("href", "../style.css")
+        val section = document.body().appendElement("section").attr("epub:type", "chapter")
+        if (!startsWithHeading(body, chapter.title)) section.appendElement("h2").text(chapter.title)
+        section.insertChildren(section.childNodeSize(), body.childNodes().toList())
+        return XML_HEADER + "<!DOCTYPE html>\n" + html.outerHtml()
+    }
+
+    private fun nav(book: EpubExportBook, files: List<String>): String {
+        val items = book.chapters.zip(files).joinToString("\n") { (chapter, file) ->
+            "      <li><a href=\"$file\">${escape(chapter.title)}</a></li>"
+        }
+        return """$XML_HEADER<!DOCTYPE html>
+<html xmlns="$XHTML_NS" xmlns:epub="$EPUB_NS" xml:lang="${escape(book.language ?: UNDETERMINED)}">
+<head><meta charset="utf-8"/><title>${escape(book.title)}</title></head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <h1>${escape(book.title)}</h1>
+    <ol>
+$items
+    </ol>
+  </nav>
+</body>
+</html>
+"""
+    }
+
+    private fun ncx(book: EpubExportBook, files: List<String>): String {
+        val points = book.chapters.zip(files).mapIndexed { index, (chapter, file) ->
+            """    <navPoint id="nav-${index + 1}" playOrder="${index + 1}">
+      <navLabel><text>${escape(chapter.title)}</text></navLabel>
+      <content src="$file"/>
+    </navPoint>"""
+        }.joinToString("\n")
+        return """$XML_HEADER<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <head><meta name="dtb:uid" content="${escape(book.identifier)}"/></head>
+  <docTitle><text>${escape(book.title)}</text></docTitle>
+  <navMap>
+$points
+  </navMap>
+</ncx>
+"""
+    }
+
+    private fun opf(
+        book: EpubExportBook,
+        files: List<String>,
+        pictures: List<Pair<String, String>>,
+        cover: Pair<String, ExportPicture>?,
+    ): String {
+        val manifest = buildList {
+            add("""<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>""")
+            add("""<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>""")
+            add("""<item id="css" href="style.css" media-type="text/css"/>""")
+            cover?.let { (path, picture) ->
+                add("""<item id="cover" href="$path" media-type="${picture.mime}" properties="cover-image"/>""")
+            }
+            files.forEachIndexed { index, file ->
+                add("""<item id="c${index + 1}" href="$file" media-type="application/xhtml+xml"/>""")
+            }
+            pictures.forEachIndexed { index, (path, mime) ->
+                add("""<item id="img${index + 1}" href="$path" media-type="$mime"/>""")
+            }
+        }.joinToString("\n    ")
+        val spine = files.indices.joinToString("\n    ") { """<itemref idref="c${it + 1}"/>""" }
+        val metadata = buildList {
+            add("""<dc:identifier id="book-id">${escape(book.identifier)}</dc:identifier>""")
+            add("<dc:title>${escape(book.title)}</dc:title>")
+            add("<dc:language>${escape(book.language ?: UNDETERMINED)}</dc:language>")
+            book.author?.let { add("<dc:creator>${escape(it)}</dc:creator>") }
+            book.artist?.let {
+                add("""<dc:contributor id="artist">${escape(it)}</dc:contributor>""")
+                add("""<meta refines="#artist" property="role" scheme="marc:relators">ill</meta>""")
+            }
+            book.status?.let { add("""<meta property="reikai:status">${escape(it)}</meta>""") }
+            book.seriesPosition?.let { position ->
+                // EPUB 3's collection for EPUB 3 readers, Calibre's metas for Calibre and EPUB 2 readers.
+                val series = escape(book.title)
+                add("""<meta property="belongs-to-collection" id="series">$series</meta>""")
+                add("""<meta refines="#series" property="collection-type">series</meta>""")
+                add("""<meta refines="#series" property="group-position">$position</meta>""")
+                add("""<meta name="calibre:series" content="$series"/>""")
+                add("""<meta name="calibre:series_index" content="$position"/>""")
+            }
+            // As HTML paragraphs, the form readers and Calibre expect, so a reader keeps its line breaks.
+            book.description?.let { add("<dc:description>${escape(descriptionHtml(it))}</dc:description>") }
+            book.genres.forEach { add("<dc:subject>${escape(it)}</dc:subject>") }
+            add("""<meta property="dcterms:modified">${modifiedNow()}</meta>""")
+            if (cover != null) add("""<meta name="cover" content="cover"/>""")
+        }.joinToString("\n    ")
+        return """$XML_HEADER<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id" prefix="reikai: https://reikai.app/epub#">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    $metadata
+  </metadata>
+  <manifest>
+    $manifest
+  </manifest>
+  <spine toc="ncx">
+    $spine
+  </spine>
+</package>
+"""
+    }
+
+    /** The chapter opens with a heading naming it, however deep the book's markup puts the heading. */
+    private fun startsWithHeading(body: Element, title: String): Boolean {
+        val heading = body.selectFirst("h1, h2, h3, h4")?.text()?.trim()?.ifEmpty { null } ?: return false
+        val opensWithIt = body.text().trim().startsWith(heading)
+        return opensWithIt &&
+            (title.contains(heading, ignoreCase = true) || heading.contains(title.trim(), ignoreCase = true))
+    }
+
+    private fun ZipOutputStream.stored(name: String, bytes: ByteArray) {
+        val entry = ZipEntry(name).apply {
+            method = ZipEntry.STORED
+            size = bytes.size.toLong()
+            compressedSize = bytes.size.toLong()
+            crc = CRC32().apply { update(bytes) }.value
+        }
+        putNextEntry(entry)
+        write(bytes)
+        closeEntry()
+    }
+
+    private fun ZipOutputStream.text(name: String, text: String) = bytes(name, text.toByteArray(Charsets.UTF_8))
+
+    private fun ZipOutputStream.bytes(name: String, bytes: ByteArray) {
+        putNextEntry(ZipEntry(name))
+        write(bytes)
+        closeEntry()
+    }
+
+    companion object {
+        /** A `data:` picture's bytes and type, or null for any other address or type. Parsed by hand, not by a
+         *  regex, since a picture's base64 runs to megabytes. */
+        internal fun decodeDataAddress(src: String): ExportPicture? {
+            if (!NovelChapterAddress.isDataAddress(src)) return null
+            val marker = src.indexOf(";base64,")
+            if (marker < 0) return null
+            val declared = src.substring(5, marker).substringBefore(';')
+            val data = src.substring(marker + BASE64_MARKER.length)
+            val bytes = runCatching { Base64.getMimeDecoder().decode(data) }.getOrNull() ?: return null
+            return bookPicture(bytes, declared)
+        }
+
+        /** [bytes] as a picture a book can carry, typed JPEG when [declared] names nothing; null for another type. */
+        private fun bookPicture(bytes: ByteArray, declared: String?): ExportPicture? {
+            val type = declared?.ifEmpty { null }?.lowercase() ?: "image/jpeg"
+            // Servers often send the unregistered image/jpg, which a book's manifest may not declare.
+            val mime = if (type == "image/jpg") "image/jpeg" else type
+            return ExportPicture(bytes, mime).takeIf { mime in PICTURE_TYPES }
+        }
+
+        private fun extensionOf(mime: String): String = when (mime) {
+            "image/png" -> "png"
+            "image/gif" -> "gif"
+            "image/webp" -> "webp"
+            "image/svg+xml" -> "svg"
+            else -> "jpg"
+        }
+
+        private fun descriptionHtml(text: String): String = text.trim().split(Regex("""\n\s*\n"""))
+            .joinToString("") { paragraph -> "<p>" + escape(paragraph.trim()).replace("\n", "<br/>") + "</p>" }
+
+        private fun escape(text: String): String = NovelHtmlUtils.escapeHtml(text)
+
+        private const val BASE64_MARKER = ";base64,"
+        private const val FILE_HASH_LENGTH = 12
+        private val PICTURE_TYPES =
+            setOf("image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml")
+
+        /** BCP 47's tag for a language nobody stated, rather than guessing English. */
+        private const val UNDETERMINED = "und"
+        private const val XML_HEADER = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+        private const val XHTML_NS = "http://www.w3.org/1999/xhtml"
+        private const val EPUB_NS = "http://www.idpf.org/2007/ops"
+        private fun modifiedNow(): String =
+            java.time.Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString()
+        private val CONTAINER = """$XML_HEADER<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+"""
+        private const val STYLE = "body { margin: 0 5%; line-height: 1.5; }\n" +
+            "p { margin: 0 0 0.8em; }\n" +
+            "img { max-width: 100%; height: auto; }\n" +
+            "h1, h2, h3 { text-align: center; }\n"
+    }
+}
+
+/** [this], its id left on an empty span in its place, so a link to it still lands once it is gone. */
+private fun Element.keepingId(): Element = apply { if (id().isNotEmpty()) before(Element("span").attr("id", id())) }

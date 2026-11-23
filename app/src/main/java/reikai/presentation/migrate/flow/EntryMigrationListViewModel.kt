@@ -54,7 +54,6 @@ class EntryMigrationListViewModel(
     // Assisted so a test can drive the driver and the commits on its own scheduler; the screen passes
     // Dispatchers.IO, which is what launchIO would have used.
     @Assisted private val io: CoroutineDispatcher = Dispatchers.IO,
-    private val pickHandoff: MigrationPickHandoff,
 ) : ViewModel() {
 
     val state: StateFlow<EntryMigrationListViewModel.State>
@@ -372,34 +371,39 @@ class EntryMigrationListViewModel(
         }
     }
 
+    /** Every manual pick, keyed per row, so rows never block each other; see [LatestPickGate]. */
+    private val picks = LatestPickGate<EntryId>()
+
     /**
-     * Apply a target picked on a pushed browse screen, if one came back for a row here.
+     * Apply a target picked on a pushed browse screen to its row here, if it is still listed.
      *
-     * Called when the list returns to the foreground. The pick is a stored row already, so it wraps
-     * into a resolved candidate with no search; the same guards as any other pick apply, so a pick
-     * that arrives after the row migrated is dropped rather than re-arming it.
+     * The pick is a stored row already, so it wraps into a resolved candidate with no search; the same
+     * guards as any other pick apply, so a pick that arrives after the row migrated is dropped rather
+     * than re-arming it.
      */
-    fun collectPendingPick() {
-        val snapshot = rows
+    fun takePick(pick: MatchOverrideEvent) {
+        val row = rows.firstOrNull { it.entry.id == pick.current } ?: return
+        val ticket = picks.begin(row.entry.id, pick) ?: return
         viewModelScope.launch(io) {
-            snapshot.forEach { row ->
-                val candidate = when (val pick = adapter.takePendingPick(pickHandoff, row.entry.id)) {
-                    null -> return@forEach
+            try {
+                val candidate = when (val read = adapter.takePendingPick(pick, row.entry.id)) {
+                    null -> return@launch
                     is PendingPick.Rejected -> {
-                        reportPick(pick.outcome)
-                        return@forEach
+                        if (picks.isCurrent(ticket)) reportPick(read.outcome)
+                        return@launch
                     }
-                    is PendingPick.Ready -> pick.candidate
+                    is PendingPick.Ready -> read.candidate
                 }
-                // The row may have left the list while storedCandidate was in flight; the pick was
-                // already consumed, so it lands on the LIVE row for the entry, not the snapshot it
-                // started from.
-                val live = rows.firstOrNull { it.entry.id == row.entry.id } ?: return@forEach
+                // The row may have left the list while storedCandidate was in flight, so the pick lands
+                // on the LIVE row for the entry, not the one it started from.
+                val live = rows.firstOrNull { it.entry.id == row.entry.id } ?: return@launch
                 // The same path a strip pick takes: a browsed candidate carries no counts until
                 // something asks, and it is exactly the pick upstream refuses when it has no
                 // chapters. Without the resolve the row read unknown forever and the
                 // chapter-shortfall warning could never fire on a deep pick.
-                acceptPicked(live, candidate)
+                acceptPicked(live, candidate, ticket)
+            } finally {
+                picks.end(ticket)
             }
         }
     }
@@ -435,11 +439,25 @@ class EntryMigrationListViewModel(
     fun pick(id: EntryId, candidate: MigrationCandidate) {
         val row = rows.firstOrNull { it.entry.id == id } ?: return
         if (!MigrationRowRules.canChoose(row.commit.value)) return
-        row.scope.launch(io) { acceptPicked(row, candidate) }
+        val ticket = picks.begin(id, candidate) ?: return
+        row.scope.launch(io) {
+            try {
+                acceptPicked(row, candidate, ticket)
+            } finally {
+                picks.end(ticket)
+            }
+        }
     }
 
-    /** Take a manually picked target through [resolvePick]. A refusal puts the row back and says so. */
-    private suspend fun acceptPicked(row: MigratingEntryRow, candidate: MigrationCandidate) {
+    /**
+     * Take a manually picked target through [resolvePick]. A refusal puts the row back and says so;
+     * either answer is dropped once a later pick for the row has superseded [ticket].
+     */
+    private suspend fun acceptPicked(
+        row: MigratingEntryRow,
+        candidate: MigrationCandidate,
+        ticket: LatestPickGate.Ticket<EntryId>,
+    ) {
         if (!MigrationRowRules.canChoose(row.commit.value)) return
         // A pick answers the question the picker was open for; leaving it open buries the result.
         row.expanded.value = false
@@ -452,15 +470,20 @@ class EntryMigrationListViewModel(
             syncCounts()
         }
         // The counts come from the resolve, so no peek follows this.
-        when (val pick = adapter.resolvePick(candidate)) {
-            is PendingPick.Rejected -> reportPick(pick.outcome)
-            // Re-checked after the fetch: a commit may have claimed the row while it ran.
-            is PendingPick.Ready -> if (MigrationRowRules.canChoose(row.commit.value)) {
-                row.acceptance.value = Acceptance.Accepted(pick.candidate)
+        val pick = adapter.resolvePick(candidate)
+        if (picks.isCurrent(ticket)) {
+            when (pick) {
+                is PendingPick.Rejected -> reportPick(pick.outcome)
+                // Re-checked after the fetch: a commit may have claimed the row while it ran.
+                is PendingPick.Ready -> if (MigrationRowRules.canChoose(row.commit.value)) {
+                    row.acceptance.value = Acceptance.Accepted(pick.candidate)
+                }
             }
         }
         if (previous != null) row.search.value = previous
         syncCounts()
+        // A commit that settled every other row meanwhile found this one borrowed and left the gate shut.
+        finishIfNothingFailed()
     }
 
     /**
@@ -733,12 +756,6 @@ class EntryMigrationListViewModel(
 
     /** Close an open dialog. Only a dialog: a commit is not something a dismissal may cancel. */
     fun dismissDialog() = state.update { it.copy(dialog = null) }
-
-    override fun onCleared() {
-        super.onCleared()
-        // An uncollected pick belongs to this migration only.
-        pickHandoff.clear()
-    }
 
     /**
      * What is actually running. The truth about the commit, and nothing else.

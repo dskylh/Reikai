@@ -8,7 +8,8 @@ import reikai.domain.entry.EntryCustomInfo
 /**
  * Numbered as Komikku and Yōkai number them on their BackupManga (803 is skipped in both), so custom
  * info restores across the three apps. Yōkai has no 603, so it drops only the cover URL. BackupNovel
- * reuses the numbers, which gives both content types one mapping.
+ * reuses the numbers, which gives both content types one mapping. 806, the alternative titles, is
+ * Reikai's own: none of the three numbers it, so the others skip it.
  */
 interface BackupCustomInfoFields {
     var customStatus: Int
@@ -18,21 +19,23 @@ interface BackupCustomInfoFields {
     var customAuthor: String?
     var customDescription: String?
     var customGenre: List<String>?
+    var customAltTitles: List<String>
 }
 
 /** One entry's custom info, a null field meaning no override. */
 data class BackupCustomInfo(
-    val title: String? = null,
-    val author: String? = null,
-    val artist: String? = null,
-    val description: String? = null,
-    val genre: List<String>? = null,
-    val status: Long? = null,
-    val thumbnailUrl: String? = null,
-)
+    override val title: String? = null,
+    override val author: String? = null,
+    override val artist: String? = null,
+    override val description: String? = null,
+    override val genre: List<String>? = null,
+    override val status: Long? = null,
+    override val thumbnailUrl: String? = null,
+    override val altTitles: List<String> = emptyList(),
+) : EntryCustomInfo
 
 fun EntryCustomInfo.toBackupCustomInfo() =
-    BackupCustomInfo(title, author, artist, description, genre, status, thumbnailUrl)
+    BackupCustomInfo(title, author, artist, description, genre, status, thumbnailUrl, altTitles)
 
 /**
  * Null when the entry carries no custom info. Status 0 is Unknown, which the editor never stores as an
@@ -48,7 +51,8 @@ var BackupCustomInfoFields.customInfo: BackupCustomInfo?
         genre = customGenre?.takeIf { it.isNotEmpty() },
         status = customStatus.takeIf { it > 0 }?.toLong(),
         thumbnailUrl = customThumbnailUrl,
-    ).takeUnless { it == BackupCustomInfo() }
+        altTitles = customAltTitles,
+    ).takeUnless { it.isEmpty }
     set(value) {
         customTitle = value?.title
         customAuthor = value?.author
@@ -57,6 +61,7 @@ var BackupCustomInfoFields.customInfo: BackupCustomInfo?
         customGenre = value?.genre
         customStatus = value?.status?.toInt() ?: 0
         customThumbnailUrl = value?.thumbnailUrl
+        customAltTitles = value?.altTitles.orEmpty()
     }
 
 /**

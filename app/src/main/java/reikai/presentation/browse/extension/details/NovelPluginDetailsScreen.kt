@@ -28,22 +28,25 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
+import androidx.navigation3.runtime.NavKey
 import dev.zacsweers.metrox.viewmodel.assistedMetroViewModel
-import eu.kanade.presentation.browse.ExtensionUninstallConfirmation
+import eu.kanade.presentation.browse.ExtensionIncognitoSwitch
 import eu.kanade.presentation.browse.InfoDivider
 import eu.kanade.presentation.browse.InfoText
+import eu.kanade.presentation.browse.UninstallPromptDialog
 import eu.kanade.presentation.components.AppBar
+import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.more.settings.widget.TextPreferenceWidget
-import eu.kanade.presentation.util.Screen
-import eu.kanade.tachiyomi.ui.webview.WebViewScreen
+import kotlinx.serialization.Serializable
+import mihon.core.navigation.LocalNavigator
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.Settings
+import reikai.domain.source.SourceKey
 import reikai.novel.source.NovelSettings
 import reikai.presentation.browse.browseLanguageLabel
 import reikai.presentation.browse.components.NovelSourceIcon
 import reikai.presentation.novel.browse.NovelSourceSettingsSheet
+import reikai.presentation.webview.webViewRoute
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.components.material.Scaffold
 import tachiyomi.presentation.core.components.material.padding
@@ -56,46 +59,53 @@ import tachiyomi.presentation.core.screens.LoadingScreen
  * opens Mihon's `ExtensionDetailsScreen`. A plugin is not a package the system can remove, so its
  * Uninstall is confirmed here.
  */
-data class NovelPluginDetailsScreen(private val pluginId: String) : Screen() {
+@Serializable
+data class NovelPluginDetailsRoute(val pluginId: String) : NavKey
 
-    @Composable
-    override fun Content() {
-        val navigator = LocalNavigator.currentOrThrow
-        val viewModel = assistedMetroViewModel<NovelPluginDetailsViewModel, NovelPluginDetailsViewModel.Factory> {
-            create(pluginId)
+@Composable
+fun NovelPluginDetailsScreen(pluginId: String) {
+    val navigator = LocalNavigator.current
+    val viewModel = assistedMetroViewModel<NovelPluginDetailsViewModel, NovelPluginDetailsViewModel.Factory> {
+        create(pluginId)
+    }
+    val state by viewModel.state.collectAsStateWithLifecycle()
+
+    when (val current = state) {
+        NovelPluginDetailsViewModel.State.Loading -> LoadingScreen()
+        NovelPluginDetailsViewModel.State.Uninstalled -> {
+            LaunchedEffect(Unit) { navigator.pop() }
+            EmptyScreen(MR.strings.empty_screen)
         }
-        val state by viewModel.state.collectAsStateWithLifecycle()
-
-        when (val current = state) {
-            NovelPluginDetailsViewModel.State.Loading -> LoadingScreen()
-            NovelPluginDetailsViewModel.State.Uninstalled -> {
-                LaunchedEffect(Unit) { navigator.pop() }
-                EmptyScreen(MR.strings.empty_screen)
-            }
-            is NovelPluginDetailsViewModel.State.Success -> Scaffold(
-                topBar = { scrollBehavior ->
-                    AppBar(
-                        title = stringResource(MR.strings.label_extension_info),
-                        navigateUp = navigator::pop,
-                        scrollBehavior = scrollBehavior,
-                    )
-                },
-            ) { contentPadding ->
-                NovelPluginDetails(
-                    state = current,
-                    contentPadding = contentPadding,
-                    onOpenSite = {
-                        navigator.push(
-                            WebViewScreen(
-                                url = current.plugin.site,
-                                initialTitle = current.plugin.name,
-                                pluginId = current.plugin.id,
+        is NovelPluginDetailsViewModel.State.Success -> Scaffold(
+            topBar = { scrollBehavior ->
+                AppBar(
+                    title = stringResource(MR.strings.label_extension_info),
+                    navigateUp = navigator::pop,
+                    actions = {
+                        AppBarActions(
+                            actions = listOf(
+                                AppBar.OverflowAction(
+                                    title = stringResource(MR.strings.pref_clear_cookies),
+                                    onClick = viewModel::clearCookies,
+                                ),
                             ),
                         )
                     },
-                    onUninstall = viewModel::uninstall,
+                    scrollBehavior = scrollBehavior,
                 )
-            }
+            },
+        ) { contentPadding ->
+            NovelPluginDetails(
+                state = current,
+                contentPadding = contentPadding,
+                onOpenSite = {
+                    navigator.push(
+                        SourceKey.Novel(current.plugin.id).webViewRoute(current.plugin.site, current.plugin.name),
+                    )
+                },
+                onUninstall = viewModel::uninstall,
+                onIncognitoChange = viewModel::setIncognito,
+            )
         }
     }
 }
@@ -106,6 +116,7 @@ private fun NovelPluginDetails(
     contentPadding: PaddingValues,
     onOpenSite: () -> Unit,
     onUninstall: () -> Unit,
+    onIncognitoChange: (Boolean) -> Unit,
 ) {
     val plugin = state.plugin
     val context = LocalContext.current
@@ -193,7 +204,9 @@ private fun NovelPluginDetails(
             }
         }
 
-        HorizontalDivider(modifier = Modifier.padding(top = MaterialTheme.padding.small))
+        ExtensionIncognitoSwitch(state.isIncognito, onIncognitoChange)
+
+        HorizontalDivider()
 
         if (settings != null) {
             TextPreferenceWidget(
@@ -205,9 +218,10 @@ private fun NovelPluginDetails(
     }
 
     if (confirmUninstall) {
-        ExtensionUninstallConfirmation(
-            extensionName = plugin.name,
-            onClickConfirm = onUninstall,
+        UninstallPromptDialog(
+            name = plugin.name,
+            icon = { NovelSourceIcon(plugin.iconUrl) },
+            onConfirm = onUninstall,
             onDismissRequest = { confirmUninstall = false },
         )
     }

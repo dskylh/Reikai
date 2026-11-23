@@ -8,9 +8,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.core.screen.Screen
+import androidx.navigation3.runtime.result.LocalResultEventBus
 import eu.kanade.tachiyomi.ui.history.HistoryViewModel
-import eu.kanade.tachiyomi.ui.home.HomeScreen
+import eu.kanade.tachiyomi.ui.home.ShowBottomNavEvent
 import eu.kanade.tachiyomi.ui.main.MainActivity
 import kotlinx.coroutines.flow.collectLatest
 import reikai.presentation.history.NovelHistoryViewModel
@@ -24,7 +24,7 @@ import tachiyomi.i18n.MR
  * stays on each tab, which builds it from the two helpers below where it has a read lane.
  */
 @Composable
-internal fun Screen.RecentsTabBody(
+internal fun RecentsTabBody(
     engine: RecentsEngine,
     title: String,
     // Hoisted for a tab that speaks for itself: a reselect answering "no next chapter" comes from
@@ -40,8 +40,9 @@ internal fun Screen.RecentsTabBody(
     )
 
     val selectionEmpty = engine.selection.collectAsState().value.isEmpty()
+    val bus = LocalResultEventBus.current
     LaunchedEffect(selectionEmpty) {
-        HomeScreen.showBottomNav(selectionEmpty)
+        bus.sendResult(ShowBottomNavEvent(selectionEmpty))
     }
 
     val loaded = engine.rendered.collectAsStateWithLifecycle().value?.loading == false

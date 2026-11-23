@@ -26,8 +26,25 @@ import kotlinx.serialization.json.decodeFromStream
 import logcat.LogPriority
 import mihon.core.archive.archiveReader
 import mihon.core.archive.epubReader
-import nl.adaptivity.xmlutil.core.AndroidXmlReader
 import nl.adaptivity.xmlutil.serialization.XML
+import reikai.domain.chapter.LocalVolumeRepository
+import reikai.domain.chapter.LooseFiles
+import reikai.domain.chapter.inUserOrder
+import reikai.domain.library.ContentType
+import reikai.domain.local.LocalGroups
+import reikai.domain.local.LocalSeriesLocks
+import reikai.domain.local.VolumeOwner
+import reikai.domain.local.localGroupUnit
+import reikai.domain.local.localVolumeKey
+import reikai.source.local.LOCAL_SYSTEM_FOLDERS
+import reikai.source.local.isLocalSeriesName
+import reikai.source.local.isLocalVolumeExtras
+import reikai.source.local.isVolumeCover
+import reikai.source.local.localChapterUnit
+import reikai.source.local.localChapterUrl
+import reikai.source.local.volumeExtras
+import reikai.storage.listOrNull
+import reikai.storage.localCover
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.storage.extension
@@ -38,8 +55,11 @@ import tachiyomi.core.common.util.system.logcat
 import tachiyomi.core.metadata.comicinfo.COMIC_INFO_FILE
 import tachiyomi.core.metadata.comicinfo.ComicInfo
 import tachiyomi.core.metadata.comicinfo.copyFromComicInfo
+import tachiyomi.core.metadata.comicinfo.decodeComicInfo
 import tachiyomi.core.metadata.comicinfo.getComicInfo
+import tachiyomi.core.metadata.comicinfo.setLocalLanguage
 import tachiyomi.core.metadata.tachiyomi.MangaDetails
+import tachiyomi.domain.chapter.model.NoChaptersException
 import tachiyomi.domain.chapter.service.ChapterRecognition
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.i18n.MR
@@ -49,9 +69,7 @@ import tachiyomi.source.local.io.Archive
 import tachiyomi.source.local.io.Format
 import tachiyomi.source.local.io.LocalSourceFileSystem
 import tachiyomi.source.local.metadata.fillMetadata
-import uy.kohesive.injekt.injectLazy
 import java.io.InputStream
-import java.nio.charset.StandardCharsets
 import kotlin.time.Duration.Companion.days
 import tachiyomi.domain.source.model.Source as DomainSource
 
@@ -61,10 +79,11 @@ class LocalSource(
     private val context: Context,
     private val fileSystem: LocalSourceFileSystem,
     private val coverManager: LocalCoverManager,
+    private val json: Json,
+    private val xml: XML,
+    private val userVolumes: LocalVolumeRepository, // RK
+    private val seriesLocks: LocalSeriesLocks, // RK
 ) : Source, UnmeteredSource {
-
-    private val json: Json by injectLazy()
-    private val xml: XML by injectLazy()
 
     @Suppress("PrivatePropertyName")
     private val PopularFilters = FilterList(OrderBy.Popular(context))
@@ -94,9 +113,11 @@ class LocalSource(
             0L
         }
 
+        val groups = LocalGroups(userVolumes.all(ContentType.MANGA)) // RK
         var mangaDirs = fileSystem.getFilesInBaseDirectory()
             // Filter out files that are hidden and is not a folder
-            .filter { it.isDirectory && !it.name.orEmpty().startsWith('.') }
+            .filter { it.isDirectory && isLocalSeriesName(it.name.orEmpty()) } // RK: nor a folder a system keeps
+            .filterNot { groups.isLentWhole(it.name.orEmpty()) } // RK: a folder combined into another series
             .distinctBy { it.name }
             .filter {
                 if (lastModifiedLimit == 0L && query.isBlank()) {
@@ -195,6 +216,7 @@ class LocalSource(
                         description?.let { manga.description = it }
                         genre?.let { manga.genre = it.joinToString() }
                         status?.let { manga.status = it }
+                        language?.let { manga.setLocalLanguage(it) } // RK
                     }
                     // Replace with ComicInfo.xml file
                     val comicInfo = manga.getComicInfo()
@@ -211,6 +233,8 @@ class LocalSource(
                 // Copy ComicInfo.xml from chapter archive to top level if found
                 noXmlFile == null -> {
                     val chapterArchives = mangaDirFiles.filter(Archive::isSupported)
+                        // RK: a series kept only in volume folders has its chapter archives one level down
+                        .ifEmpty { mangaDirFiles.filter(::isChapterFile).flatMap { it.volumeArchives() } }
 
                     val copiedFile = copyComicInfoFileFromChapters(chapterArchives, mangaDir)
                     if (copiedFile != null) {
@@ -257,9 +281,7 @@ class LocalSource(
     }
 
     private fun parseComicInfo(stream: InputStream): ComicInfo {
-        return AndroidXmlReader(stream, StandardCharsets.UTF_8.name()).use {
-            xml.decodeFromReader<ComicInfo>(it)
-        }
+        return xml.decodeComicInfo(stream) // RK: the decode the import shares
     }
 
     private fun setMangaDetailsFromComicInfoFile(stream: InputStream, manga: SManga) {
@@ -289,13 +311,43 @@ class LocalSource(
 
     // Chapters
     private suspend fun getChapterList(manga: SManga): List<SChapter> = withIOContext {
-        val chapters = fileSystem.getFilesInMangaDirectory(manga.url)
-            // Only keep supported formats
-            .filterNot { it.name.orEmpty().startsWith('.') }
-            .filter { it.isDirectory || Archive.isSupported(it) || it.extension.equals("epub", true) }
-            .map { chapterFile ->
+        // RK --> under the lock on the series' whole group, which Organize files holds from its rows to its last
+        // file step, so the listing cannot read moved files against rows at other addresses and drop them
+        seriesLocks.withSeries(ContentType.MANGA, manga.url) { listChapters(manga) }
+    }
+
+    private suspend fun listChapters(manga: SManga): List<SChapter> {
+        // A series lists its own folder and the volumes of other folders it holds, each chapter at the address of
+        // its own file, so grouping series into volumes moves no file (LocalGroups).
+        val groups = LocalGroups(userVolumes.all(ContentType.MANGA))
+        val folders = groups.foldersOf(manga.url)
+        // A member folder renamed or removed outside the app is left out, and the sync keeps its rows as they are.
+        val missing = if (folders.any { it != manga.url }) {
+            groups.missingMembers(
+                manga.url,
+                listedOrFail(fileSystem.getBaseDirectory(), manga.url).mapNotNull {
+                    it.name
+                },
+            )
+        } else {
+            emptySet()
+        }
+        val chapters = folders.filterNot { it in missing }.flatMap { folder -> listFolder(folder).map { folder to it } }
+            .filter { (folder, chapter) ->
+                groups.ownerOf(folder, chapter.first?.name ?: VolumeOwner.LOOSE) == manga.url
+            }
+            .map { (folder, chapter) ->
+                val (volume, chapterFile) = chapter
+                // RK <--
+                val isExtras = chapterFile === volume
                 SChapter.create().apply {
-                    url = "${manga.url}/${chapterFile.name}"
+                    // RK --> the folder the file sits in, which is the series' own unless a group lists it
+                    url = localChapterUrl(
+                        folder,
+                        volume?.name ?: VolumeOwner.LOOSE,
+                        if (isExtras) "" else chapterFile.name.orEmpty(),
+                    )
+                    // RK <--
                     name = if (chapterFile.isDirectory) {
                         chapterFile.name
                     } else {
@@ -322,11 +374,21 @@ class LocalSource(
                     } catch (e: Exception) {
                         logcat(LogPriority.ERROR, e) { "Failed to read metadata for ${chapterFile.name}" }
                     }
+                    // RK --> after the metadata, which may name the chapter, so the volume order survives the sort;
+                    // a loose chapter of another folder in a group is led by that folder, as a volume's is by it
+                    if (isExtras) name = context.stringResource(MR.strings.local_volume_extras)
+                    (volume?.name ?: folder.takeIf { it != manga.url })?.let { name = "$it - $name" }
+                    // RK <--
                 }
             }
             .sortedWith { c1, c2 ->
                 c2.name.compareToCaseInsensitiveNaturalOrder(c1.name)
             }
+            .inUserVolumeOrder(manga.url, folders) // RK
+            .numberingExtras() // RK
+        // RK: no chapter at all is also how a picked folder's failed listing reads, so the refresh fails rather
+        // than deleting every row, as a local novel with no book does
+        if (chapters.isEmpty()) throw NoChaptersException()
 
         // Copy the cover from the first chapter found if not available
         if (manga.thumbnail_url.isNullOrBlank()) {
@@ -335,8 +397,32 @@ class LocalSource(
             }
         }
 
-        chapters
+        return chapters // RK: listChapters returns what getChapterList's withIOContext gave
     }
+
+    // RK --> one series folder's chapters, each with the volume folder it sits in, or none for a loose one
+    private fun listFolder(folder: String): List<Pair<UniFile?, UniFile>> =
+        // A folder that cannot be listed fails the refresh, as a local novel's does, since an empty list
+        // deletes every chapter row of the series and its read state with it.
+        listedOrFail(fileSystem.getMangaDirectory(folder), folder)
+            // Only keep supported formats
+            .filter(::isChapterFile)
+            // A folder holding chapter files or chapter folders is a volume, read one level down; its
+            // chapters carry it in their address and in front of their name, as a local novel's volumes do
+            .flatMap { file ->
+                val path = "$folder/${file.name}"
+                val listed = if (file.isDirectory) listedOrFail(file, path) else emptyList()
+                // A folder of pages holding folders of pictures (credits, a group's extras) is one chapter, as
+                // upstream reads it: a volume holds a chapter archive, or no pages of its own beside its cover.
+                val inside = listed.filter { isVolumeChapter(it, "$path/${it.name}") }
+                    .takeIf { chapters -> chapters.any { !it.isFolderName() } || listed.extraPictures().isEmpty() }
+                    .orEmpty()
+                // Pictures beside a volume's chapters, other than its cover, read as one Extras chapter: the
+                // folder itself, which the reader opens as a folder of pictures.
+                val extras = listOfNotNull(file.takeIf { inside.isNotEmpty() && listed.extraPictures().isNotEmpty() })
+                if (inside.isNotEmpty()) (extras + inside).map { file to it } else listOf(null to file)
+            }
+    // RK <--
 
     // Filters
     override fun getFilterList() = FilterList(OrderBy.Popular(context))
@@ -346,10 +432,9 @@ class LocalSource(
 
     fun getFormat(chapter: SChapter): Format {
         try {
-            val (mangaDirName, chapterName) = chapter.url.split('/', limit = 2)
-            return fileSystem.getBaseDirectory()
-                ?.findFile(mangaDirName)
-                ?.findFile(chapterName)
+            // RK: one step per path part, since a chapter in a volume folder sits two levels down
+            return chapter.url.split('/').filter { it.isNotEmpty() }
+                .fold(fileSystem.getBaseDirectory()) { dir, part -> dir?.findFile(part) }
                 ?.let(Format.Companion::valueOf)
                 ?: throw Exception(context.stringResource(MR.strings.chapter_not_found))
         } catch (e: Format.UnknownFormatException) {
@@ -358,6 +443,115 @@ class LocalSource(
             throw e
         }
     }
+
+    // RK --> volume folders
+    // In the order the user gave them, each led by its Extras, still newest first like the rest of the list.
+    // A group's volumes come folder by folder, its own first, until the user orders them; a loose file shown as a
+    // volume of its own is ordered by its own key, as the details screen keys it.
+    private suspend fun List<SChapter>.inUserVolumeOrder(series: String, folders: List<String>): List<SChapter> {
+        val saved = userVolumes.loadedVolumes(ContentType.MANGA)[series]
+        val each = userVolumes.loadedLooseFiles()[series] == LooseFiles.EACH_ITS_OWN
+        return asReversed().groupBy { chapter ->
+            localChapterUnit(chapter.url).let { (folder, volume) ->
+                val file = chapter.url.split('/').last { it.isNotEmpty() }
+                localVolumeKey(series, folder, volume, file, each)
+            }
+        }
+            .entries.sortedBy { folders.indexOf(localGroupUnit(series, it.key).first) }
+            .inUserOrder({ it.key }, saved)
+            .flatMap { (_, chapters) -> chapters.sortedByDescending { isLocalVolumeExtras(it.url) } }.asReversed()
+    }
+
+    // An Extras chapter has no number of its own, so it takes one just below its volume's first, which keeps it
+    // at the head of its volume under a sort by chapter number too.
+    private fun List<SChapter>.numberingExtras(): List<SChapter> = onEach { extras ->
+        if (!isLocalVolumeExtras(extras.url)) return@onEach
+        val first = filter { it.url.startsWith(extras.url) && it !== extras && it.chapter_number >= 0f }
+            .minOfOrNull { it.chapter_number } ?: return@onEach
+        extras.chapter_number = first - 0.01f
+    }
+
+    /**
+     * A volume folder's cover: a picture named cover or folder, or its only picture. Another folder's loose chapters,
+     * a series combined in whole, show that series' own cover, as its folder holds it.
+     */
+    fun volumeCover(series: String, key: String): UniFile? {
+        val (folder, volume) = localGroupUnit(series, key)
+        if (volume == VolumeOwner.LOOSE) {
+            return if (folder == series) null else fileSystem.getFilesInMangaDirectory(folder).localCover()
+        }
+        val pictures = fileSystem.getMangaDirectory(folder)?.findFile(volume)?.listFiles().orEmpty().filter {
+            it.isPicture()
+        }
+        return pictures.firstOrNull { it.isNamedCover() } ?: pictures.singleOrNull()
+    }
+
+    /**
+     * A volume's own summary: its folder's ComicInfo.xml, else the first of its archives that carries one, or a
+     * volume archive's own. A series combined in whole shows that series' summary; this series' loose files, none.
+     */
+    suspend fun volumeDescription(series: String, key: String): String? = withIOContext {
+        val (folder, volume) = localGroupUnit(series, key)
+        val dir = fileSystem.getMangaDirectory(folder)
+        val unit = when {
+            volume != VolumeOwner.LOOSE -> dir?.findFile(volume)
+            folder != series -> dir
+            else -> null
+        } ?: return@withIOContext null
+        val infos = if (unit.isDirectory) {
+            listOfNotNull(unit.findFile(COMIC_INFO_FILE)) + unit.volumeArchives()
+        } else {
+            listOf(unit)
+        }
+        infos.firstNotNullOfOrNull { file ->
+            runCatching {
+                if (file.name == COMIC_INFO_FILE) {
+                    file.openInputStream().use(::parseComicInfo)
+                } else {
+                    getComicInfoForChapter(file, ::parseComicInfo)
+                }
+            }.getOrNull()?.summary?.value?.takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun List<UniFile>.extraPictures(): List<UniFile> = volumeExtras(filter { it.isPicture() })
+
+    // By name alone, as a picture-named folder is never a chapter: each isDirectory is a query on a picked folder.
+    private fun UniFile.isPicture() = ImageUtil.isImage(name)
+
+    private fun UniFile.isNamedCover() = isVolumeCover(this)
+    // RK <--
+
+    // RK: a chapter's own file or folder, in a series folder or a volume folder; never a folder a system keeps
+    // The name checks run first: on a picked folder each isDirectory is a query, and a chapter holds many pages.
+    private fun isChapterFile(file: UniFile): Boolean =
+        !file.name.orEmpty().startsWith('.') &&
+            (
+                !file.isFolderName() ||
+                    (!ImageUtil.isImage(file.name) && file.name !in LOCAL_SYSTEM_FOLDERS && file.isDirectory)
+                )
+
+    // RK: a volume folder's chapter archives, read for the series' details when it has none of its own
+    private fun UniFile.volumeArchives(): List<UniFile> =
+        if (isFolderName()) listFiles().orEmpty().filter(Archive::isSupported) else emptyList()
+
+    // RK: an archive or a book, by its name alone, so no folder query is spent on one
+    private fun UniFile.isFolderName() = !Archive.isSupported(this) && !extension.equals("epub", true)
+
+    // RK: a chapter inside a volume folder. A folder there counts only with a picture or an archive in it, or
+    // a chapter of pictures holding any other folder would read as a volume and lose its own chapter row.
+    private fun isVolumeChapter(file: UniFile, path: String): Boolean = isChapterFile(file) &&
+        (
+            !file.isDirectory || listedOrFail(file, path).any {
+                !it.name.orEmpty().startsWith('.') && (it.isPicture() || Archive.isSupported(it))
+            }
+            )
+
+    // RK: [dir]'s files, or a failed refresh when it is missing or its listing fails, which an empty or short
+    // list would read as chapters deleted
+    private fun listedOrFail(dir: UniFile?, path: String): List<UniFile> =
+        dir?.listOrNull(context)
+            ?: throw Exception(context.stringResource(MR.strings.local_folder_unreadable, path))
 
     private fun updateCover(chapter: SChapter, manga: SManga): UniFile? {
         return try {

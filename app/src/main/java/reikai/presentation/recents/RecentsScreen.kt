@@ -35,11 +35,7 @@ import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import cafe.adriel.voyager.core.screen.Screen
-import cafe.adriel.voyager.navigator.LocalNavigator
-import cafe.adriel.voyager.navigator.currentOrThrow
 import eu.kanade.domain.ui.UiPreferences
-import eu.kanade.presentation.category.components.ChangeCategoryDialog
 import eu.kanade.presentation.components.AppBar
 import eu.kanade.presentation.components.AppBarActions
 import eu.kanade.presentation.components.AppBarTitle
@@ -54,14 +50,15 @@ import eu.kanade.presentation.updates.UpdatesDeleteConfirmationDialog
 import eu.kanade.presentation.util.formatChapterNumber
 import eu.kanade.presentation.util.rememberIs24HourSystem
 import eu.kanade.tachiyomi.data.download.model.Download
-import eu.kanade.tachiyomi.ui.category.CategoryScreen
 import eu.kanade.tachiyomi.util.lang.toLocalDate
 import eu.kanade.tachiyomi.util.lang.toTimestampString
 import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import mihon.app.di.appGraph
-import mihon.feature.upcoming.UpcomingScreen
+import mihon.core.navigation.LocalNavigator
+import mihon.core.navigation.StatsRoute
+import mihon.core.navigation.UpcomingRoute
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.rounded.Delete
 import mihon.icons.materialsymbols.rounded.Favorite
@@ -72,13 +69,16 @@ import reikai.domain.chapter.isRecognizedChapterNumber
 import reikai.domain.download.whereDownloadOffered
 import reikai.domain.entry.EntryId
 import reikai.domain.library.ChapterSwipeActions
-import reikai.presentation.browse.components.EntryDuplicateDialog
+import reikai.presentation.browse.EntryAddDialogs
 import reikai.presentation.components.ContentTypeFilterChips
 import reikai.presentation.components.HeaderTabRow
+import reikai.presentation.components.KeepListAtTop
 import reikai.presentation.components.LibraryUpdatePullRefresh
+import reikai.presentation.components.NO_PROGRESS
+import reikai.presentation.components.asProvider
 import reikai.presentation.components.libraryRefreshMessage
 import reikai.presentation.components.readProgressLabel
-import reikai.presentation.migrate.flow.EntryMigrateFor
+import reikai.presentation.details.detailsRoute
 import reikai.presentation.selection.chapterSelectionOffers
 import reikai.presentation.updates.EntryUpdatesRow
 import tachiyomi.core.common.i18n.stringResource
@@ -104,7 +104,7 @@ import kotlin.time.Clock
  * how it looks. Record: docs/dev/subsystems/recents.md.
  */
 @Composable
-fun Screen.RecentsScreen(
+fun RecentsScreen(
     engine: RecentsEngine,
     title: String,
     modifier: Modifier = Modifier,
@@ -113,7 +113,7 @@ fun Screen.RecentsScreen(
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
 ) {
     val context = LocalContext.current
-    val navigator = LocalNavigator.currentOrThrow
+    val navigator = LocalNavigator.current
     val scope = rememberCoroutineScope()
     var filterSheetOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -128,6 +128,7 @@ fun Screen.RecentsScreen(
 
     val mode by engine.mode.collectAsState()
     val contentType by engine.contentType.collectAsState()
+    val statsInMenus by engine.statsInMenus.collectAsState()
     val query by engine.query.collectAsState()
     // The three flows the engine shares with WhileSubscribed are read with a lifecycle, so the window
     // can actually close: a plain collectAsState runs for as long as this tab stays composed, which
@@ -169,33 +170,13 @@ fun Screen.RecentsScreen(
         }
     }
 
-    /**
-     * Run a bulk verb on what the selected rows are actually about. Resolved here rather than in the
-     * bar because this is where the coroutine is, and once rather than per verb so the four cannot
-     * disagree; a row whose target is still unresolved pays for it now, off the main thread.
-     */
-    fun actOnSelection(items: List<RecentsItem>, action: (Set<ChapterRef>) -> Unit) {
-        scope.launchIO {
-            val chapters = engine.actingChapters(items, mode, membership)
-            withUIContext { action(chapters) }
-        }
-    }
+    fun openDetails(entry: EntryId) = navigator.push(entry.detailsRoute())
 
-    fun openDetails(entry: EntryId) {
-        scope.launchIO {
-            val screen = engine.detailsScreen(entry) ?: return@launchIO
-            withUIContext { navigator.push(screen) }
-        }
-    }
-
-    fun clearHistory() {
-        scope.launchIO {
-            // Only announced once it has actually happened: the wipe can fail, and this is the one
-            // message about it the user has no way of checking.
-            if (!engine.clearHistory()) return@launchIO
-            withUIContext {
-                snackbarHostState.showSnackbar(context.stringResource(MR.strings.clear_history_completed))
-            }
+    // Only announced once it has actually happened: the wipe can fail, and this is the one message
+    // about it the user has no way of checking.
+    LaunchedEffect(engine) {
+        engine.historyCleared.collect {
+            snackbarHostState.showSnackbar(context.stringResource(MR.strings.clear_history_completed))
         }
     }
 
@@ -228,13 +209,14 @@ fun Screen.RecentsScreen(
                 filterActive = filterActive,
                 onFilterClicked = { filterSheetOpen = true },
                 showsCalendar = RecentsTypeCapability.UPCOMING in chipCapabilities && showsUpdated,
-                onCalendarClicked = { navigator.push(UpcomingScreen()) },
+                onCalendarClicked = { navigator.push(UpcomingRoute) },
                 // Both are the updated lane's: History has never offered either, and a takeover that
                 // added them would be inventing an affordance rather than carrying one across.
                 showsRefresh = showsUpdated,
                 onRefresh = { scope.launch { refresh() } },
                 showsClearHistory = showsRead,
                 onClearHistory = { engine.openDialog(RecentsDialog.ClearHistory) },
+                onStatsClicked = { navigator.push(StatsRoute) }.takeIf { statsInMenus },
             )
         },
         bottomBar = {
@@ -244,14 +226,9 @@ fun Screen.RecentsScreen(
             RecentsBottomBar(
                 engine = engine,
                 selected = selectedItems,
-                onAct = { action -> actOnSelection(selectedItems, action) },
+                onAct = { verb -> engine.actOnSelection(selectedItems, mode, membership, verb) },
                 // By the scope each row was shown in, which decides the copy its download fetches.
-                onDownload = {
-                    scope.launchIO {
-                        val chapters = engine.actingChaptersByScope(selectedItems, mode, membership)
-                        withUIContext { engine.downloadSelection(chapters) }
-                    }
-                },
+                onDownload = { engine.downloadSelection(selectedItems, mode, membership) },
                 // The dialog carries the resolved chapters, decided when it is raised rather than when
                 // it is confirmed, so the confirm cannot act on a row the list has since dropped.
                 onDeleteDownloads = {
@@ -317,7 +294,7 @@ fun Screen.RecentsScreen(
                                         orderedRefs = orderedRefs,
                                         swipeActions = swipeActions,
                                         timeFormatter = timeFormatter,
-                                        onOpen = ::open,
+                                        onOpen = { open(it) },
                                         onOpenDetails = ::openDetails,
                                     )
                                 }
@@ -351,9 +328,9 @@ fun Screen.RecentsScreen(
     RecentsDialogs(
         engine = engine,
         membership = membership,
-        onOpenDetails = ::openDetails,
-        onClearHistory = ::clearHistory,
+        onClearHistory = engine::clearHistory,
     )
+    engine.addFlows.forEach { EntryAddDialogs(it) }
 }
 
 /**
@@ -377,6 +354,7 @@ internal fun RecentsToolbar(
     onRefresh: () -> Unit,
     showsClearHistory: Boolean,
     onClearHistory: () -> Unit,
+    onStatsClicked: (() -> Unit)?,
 ) {
     if (selectionCount > 0) {
         AppBar(
@@ -451,6 +429,10 @@ internal fun RecentsToolbar(
                             ),
                         )
                     }
+                    // Opt-in: Statistics otherwise sits under More, and reading time is what this screen is about.
+                    onStatsClicked?.let {
+                        add(AppBar.OverflowAction(title = stringResource(MR.strings.label_stats), onClick = it))
+                    }
                 },
             )
         },
@@ -524,6 +506,8 @@ private fun RecentsMixedLaneRow(
         swipeable -> download?.state?.invoke() ?: Download.State.NOT_DOWNLOADED
         else -> Download.State.NOT_DOWNLOADED
     }
+    // Asked once and only for a swipe, for the same reason: an unswiped row's actions are all Disabled.
+    val swipeOffersDownload = !swipeable || download?.offered?.invoke() != false
 
     RecentsCombinedRow(
         cover = ui.cover,
@@ -548,8 +532,8 @@ private fun RecentsMixedLaneRow(
         onLongClick = { onLongPress(item) },
         onClickCover = { onOpenDetails(item.entryId) }.takeIf { !selectionActive },
         // A Download swipe goes with the control on a chapter nothing could fetch.
-        chapterSwipeStartAction = swipe.start.whereDownloadOffered(download?.offered?.invoke() != false),
-        chapterSwipeEndAction = swipe.end.whereDownloadOffered(download?.offered?.invoke() != false),
+        chapterSwipeStartAction = swipe.start.whereDownloadOffered(swipeOffersDownload),
+        chapterSwipeEndAction = swipe.end.whereDownloadOffered(swipeOffersDownload),
         onChapterSwipe = { action ->
             if (state != null && actingRef != null) {
                 engine.runChapterSwipe(actingRef, item.lane, state, { downloadState }, action)
@@ -708,8 +692,8 @@ private fun LazyListScope.recentsRows(
                 selectionActive = selection.isNotEmpty(),
                 swipeActions = swipeActions,
                 timeFormatter = timeFormatter,
-                onPress = ::press,
-                onLongPress = ::longPress,
+                onPress = { press(it) },
+                onLongPress = { longPress(it) },
                 onOpenDetails = onOpenDetails,
                 modifier = Modifier.animateItem(),
             )
@@ -997,13 +981,11 @@ private fun RecentsBottomBar(
 
 /** The surface's one dialog slot, drawn wherever the engine raised it. */
 @Composable
-private fun Screen.RecentsDialogs(
+private fun RecentsDialogs(
     engine: RecentsEngine,
     membership: Map<EntryId, Long>,
-    onOpenDetails: (EntryId) -> Unit,
     onClearHistory: () -> Unit,
 ) {
-    val navigator = LocalNavigator.currentOrThrow
     val dialog by engine.dialog.collectAsState()
     val onDismiss = engine::dismissDialog
     when (val open = dialog) {
@@ -1025,33 +1007,6 @@ private fun Screen.RecentsDialogs(
         is RecentsDialog.DeleteDownloads -> UpdatesDeleteConfirmationDialog(
             onDismissRequest = onDismiss,
             onConfirm = { engine.deleteDownloads(open.chapters) },
-        )
-        is RecentsDialog.Duplicate -> EntryDuplicateDialog(
-            duplicates = open.duplicates.duplicates,
-            toUi = { it.card },
-            onDismissRequest = onDismiss,
-            onConfirm = { engine.addAnyway(open.entry) },
-            onOpen = { onOpenDetails(it.entry) },
-            onMigrate = { engine.migrateOntoEntry(open.entry, it.entry) },
-            groupIdByEntryId = open.duplicates.groupIdByRawId,
-            onAddToGroup = { picked: List<Long> ->
-                engine.addToGroup(
-                    open.entry,
-                    open.duplicates.duplicates.filter { it.card.id in picked }.map { it.entry },
-                )
-            }.takeIf { open.duplicates.suggestGroup },
-        )
-        is RecentsDialog.ChangeCategory -> ChangeCategoryDialog(
-            initialSelection = open.initialSelection,
-            onDismissRequest = onDismiss,
-            onEditCategories = { navigator.push(CategoryScreen()) },
-            onConfirm = { include, _ -> engine.applyAddCategories(open.entry, include) },
-        )
-        is RecentsDialog.Migrate -> EntryMigrateFor(
-            contentType = open.current.contentType,
-            currentId = open.current.rawId,
-            targetId = open.target.rawId,
-            onDismissRequest = onDismiss,
         )
     }
 }

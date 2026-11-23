@@ -3,23 +3,29 @@ package reikai.presentation.migrate.flow
 import reikai.presentation.migrate.PickMember
 
 /** Whether [url] on [sourceKey] is this entry's own listing, which is never a migration target. */
-fun MigrationEntry.isOwnListing(sourceKey: String, url: String): Boolean {
-    val ownUrl = when (payload) {
+fun MigrationEntry.isOwnListing(sourceKey: String, url: String): Boolean =
+    sourceKey == this.sourceKey && url == ownUrl
+
+/** The url of this entry's own listing on [MigrationEntry.sourceKey]. */
+val MigrationEntry.ownUrl: String
+    get() = when (payload) {
         is MigrationPayload.OfManga -> payload.manga.url
         is MigrationPayload.OfNovel -> payload.novel.url
     }
-    return sourceKey == this.sourceKey && url == ownUrl
-}
 
-/** Every stored entry in [ids] expanded to its merge group ([relatedIds]), deduped in encounter order. */
+/**
+ * Every entry in [ids] expanded to its merge group ([relatedIds]), deduped in encounter order, with an
+ * entry no longer stored dropped by [load]. Null when the groups add nothing to [ids]: there is no choice
+ * to offer, so no row is loaded for it.
+ */
 suspend fun <T : Any> mergeGroupPickMembers(
     ids: List<Long>,
+    relatedIds: Map<Long, List<Long>>,
     load: suspend (Long) -> T?,
-    relatedIds: suspend (Long) -> LongArray,
     toMember: suspend (T) -> PickMember,
-): List<PickMember> {
-    val memberIds = LinkedHashSet<Long>()
-    ids.forEach { id -> if (load(id) != null) memberIds += relatedIds(id).asList() }
+): List<PickMember>? {
+    val memberIds = ids.flatMapTo(LinkedHashSet()) { relatedIds[it] ?: listOf(it) }
+    if (memberIds == ids.toSet()) return null
     return memberIds.mapNotNull { id -> load(id)?.let { toMember(it) } }
 }
 
@@ -29,6 +35,7 @@ fun <T> applicableFlagsOf(
     hasCustomCover: (T) -> Boolean,
     hasNotes: (T) -> Boolean,
     hasDownloads: (T) -> Boolean,
+    hasCustomInfo: (T) -> Boolean,
 ): Set<MigrationDataFlag> = MigrationDataFlag.entries.filterTo(LinkedHashSet()) { flag ->
     when (flag) {
         MigrationDataFlag.CHAPTER -> true
@@ -36,5 +43,6 @@ fun <T> applicableFlagsOf(
         MigrationDataFlag.CUSTOM_COVER -> entries.any(hasCustomCover)
         MigrationDataFlag.NOTES -> entries.any(hasNotes)
         MigrationDataFlag.REMOVE_DOWNLOAD -> entries.any(hasDownloads)
+        MigrationDataFlag.CUSTOM_INFO -> entries.any(hasCustomInfo)
     }
 }

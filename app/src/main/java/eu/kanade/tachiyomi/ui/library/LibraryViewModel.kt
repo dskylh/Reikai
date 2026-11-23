@@ -39,6 +39,7 @@ import reikai.domain.chapter.DownloadCandidates
 import reikai.domain.chapter.hiddenKey
 import reikai.domain.library.ContentType
 import reikai.domain.library.ReikaiLibraryPreferences
+import reikai.domain.library.TagAliases
 import reikai.domain.manga.AdultContentChecker
 import reikai.domain.manga.MangaGroupCategories
 import reikai.domain.manga.MangaMergeManager
@@ -190,7 +191,9 @@ class LibraryViewModel(
             // RK: the custom-info overlay rides with favorites but is
             //     NOT applied here: search/filter/sort below all read the raw favorites. It is
             //     carried into LibraryData and applied only at the display read (see State).
-            combine(getFavoritesFlow(), getCustomMangaInfo.subscribeAll(), ::Pair),
+            // RK: the custom-info query re-emits on every write to its table, so it is deduped here, on
+            //     Default, which is what LibraryData's identity equality relies on.
+            combine(getFavoritesFlow(), getCustomMangaInfo.subscribeAll().distinctUntilChanged(), ::Pair),
             // RK: no filter input either: the filters ride searchAndTracks, so a tracker filter waits for
             //     the tracks it reads instead of filtering against none while they load.
         ) {
@@ -198,8 +201,9 @@ class LibraryViewModel(
                 (favorites, customInfo),
             ->
             val (searchQuery, chapterMatches) = search // RK
+            val customById = customInfo.associateBy { it.mangaId } // RK
             val filteredFavorites = favorites
-                .applyFilters(tracksMap, filters.resolve()) // RK
+                .applyFilters(tracksMap, filters.resolve(), customById) // RK
                 // RK: parse once, then filter through the shared query kernel, the same one the novel
                 //     library runs, so one typed query means one thing on every row of the All list.
                 //     A gallery entry ALSO answers each term with the EXH tag grammar, a manga-only
@@ -216,12 +220,14 @@ class LibraryViewModel(
                             getSearchTitles::awaitAll,
                         )
                         val queryFields = mangaQueryFields(
+                            items,
                             chapterMatches,
                             customInfo,
                             gallery,
                             categoryMatches,
                             tracksMap,
                             filters.trackers.keys,
+                            filters.tagAliases, // RK
                         )
                         items.filter { libraryQueryMatches(queryNode, it, queryFields) }
                     }
@@ -233,10 +239,11 @@ class LibraryViewModel(
                 tracksMap = tracksMap,
                 loggedInTrackerIds = filters.trackers.keys, // RK
                 // RK: display-only overrides, keyed by real manga id; applied at the display read.
-                customInfo = customInfo.associateBy { it.mangaId },
+                customInfo = customById,
+                allFavorites = favorites, // RK
             )
         }
-            .distinctUntilChanged()
+            // RK: no output dedup: every input above is distinct, so a new LibraryData is a change
             .flowOn(Dispatchers.Default)
             // RK: seeded null, which the derived state reads as still loading. The shared assembly emits
             //     a tick after this one; LibraryTab keeps loading until it lands.
@@ -282,12 +289,9 @@ class LibraryViewModel(
     // RK <--
 
     // RK -->
-    fun setHopperGravity(value: Int) {
-        reikaiLibraryPreferences.hopperGravity.set(value)
-    }
-
-    // RK: category collapse moved to LibraryEngine, which writes the same preferences. It is library-wide
-    // rather than per content type, so it belongs beside the selection and not on a per-type model.
+    // RK: category collapse and the hopper gravity moved to LibraryEngine, which writes the same
+    // preferences. Both are library-wide rather than per content type, so they belong beside the
+    // selection and not on a per-type model.
 
     // RK: dynamic grouping moved to LibraryEngine, which runs the shared kernel once over both content
     // types' feeds. This model contributes its half through LibraryProvider.dynamicGroupingFeed.
@@ -300,6 +304,7 @@ class LibraryViewModel(
     private suspend fun List<LibraryItem>.applyFilters(
         trackMap: Map<Long, List<Track>>,
         prefs: LibraryFilterPrefs,
+        customInfo: Map<Long, CustomMangaInfo>,
     ): List<LibraryItem> {
         val sourceKey = { item: LibraryItem -> item.libraryManga.manga.source.toString() }
         val adultSources = if (prefs.lewd != TriState.DISABLED) {
@@ -313,6 +318,7 @@ class LibraryViewModel(
             adultSource = { it in adultSources },
             lewdSourceName = { it.name },
             trackerIds = { item -> mergedGroupTracks(item.memberIds(), trackMap).map { it.trackerId } },
+            customTags = { customInfo[it.id]?.genre },
         )
         return fastFilter { libraryFilterMatches(it, prefs, fields) }
     }
@@ -321,15 +327,18 @@ class LibraryViewModel(
     // RK: the manga binding of the shared query kernel. The source key is the numeric source id as a
     // string (novels supply a plugin slug).
     private fun mangaQueryFields(
+        rows: List<LibraryItem>,
         chapterMatches: Map<String, Set<Long>>,
         customInfo: List<CustomMangaInfo>,
         gallery: GallerySearchIndex,
         categoryMatches: Map<String, Set<Long>>,
         trackMap: Map<Long, List<Track>>,
         loggedInTrackerIds: Set<Long>,
+        tagAliases: TagAliases,
     ): LibraryQueryFields<LibraryItem> {
         return libraryItemQueryFields(
             sourceKey = { it.libraryManga.manga.source.toString() },
+            rows = rows,
             chapterMatches = chapterMatches,
             // Search matches what the card shows, so a renamed entry is findable by the name you gave it.
             // The rows stay override-free: filter, sort and grouping deliberately read the source values.
@@ -338,6 +347,7 @@ class LibraryViewModel(
             categoryMatches = categoryMatches,
             tracksById = trackMap,
             trackers = trackerManager.getAll(loggedInTrackerIds).associateBy { it.id },
+            tagAliases = tagAliases,
         )
     }
 
@@ -355,8 +365,8 @@ class LibraryViewModel(
     // RK: getLibraryItemPreferencesFlow and ItemPreferences moved to libraryBadgePrefsFlow, the badge
     //     gates the novel library reads too; the filter preferences live in libraryFilterSettingsFlow.
 
-    // RK: the row building moved to MangaLibraryRows, which Statistics lists its series from as well
-    private fun getFavoritesFlow(): Flow<List<LibraryItem>> = mangaLibraryRows.rows() // RK
+    // RK: the row building moved to MangaLibraryRows, one shared build Statistics and Hidden entries read too
+    private fun getFavoritesFlow(): Flow<List<LibraryItem>> = mangaLibraryRows.rows // RK
 
     // RK: getTrackingFiltersFlow moved into libraryFilterSettingsFlow (LibraryFilterSettings.trackers).
 
@@ -416,14 +426,8 @@ class LibraryViewModel(
     ) {
         val ownerOf = { chapter: Chapter -> group?.mangaById?.get(chapter.mangaId) ?: anchor }
         val flags = group.groupFlags(chapters) { downloadManager.downloadedChapterIds(it, ownerOf) }
-        val targets = group?.takeIf { it.stitch.isNotEmpty() }?.let { merged ->
-            val installed = merged.mangaById.values
-                .filter { sourceManager.isInstalled(it.source) }
-                .mapTo(HashSet()) { it.id }
-            DownloadTargets.of(MergeScope.Group, merged.pooledChapters, chapters, merged.stitch, { it.id }) {
-                it.mangaId in installed
-            }
-        } ?: DownloadTargets.OWN
+        val targets = group?.downloadTargets(MergeScope.Group, chapters) { sourceManager.isInstalled(it.source) }
+            ?: DownloadTargets.OWN
         // One snapshot, since searching the queue for each chapter of a long list adds up
         val queued = downloadManager.getQueuedDownloadsByChapterId()
         DownloadCandidates.forGroup(
@@ -558,8 +562,17 @@ class LibraryViewModel(
         //     search/filter/sort/selection (those use the raw favorites); applied only at the
         //     display read in State.withOverlay, through the adapter.
         val customInfo: Map</* Manga */ Long, CustomMangaInfo> = emptyMap(),
+        // RK: every merge-collapsed favourite before filter and search, which the tag picker counts over.
+        val allFavorites: List<LibraryItem> = emptyList(),
     ) {
         val favoritesById by lazy { favorites.associateBy { it.id } }
+
+        // RK --> identity, since a new instance is always a change (the inputs are deduped on Default):
+        //     the StateFlows holding this compare on Main, where a structural pass walked every row.
+        override fun equals(other: Any?): Boolean = this === other
+
+        override fun hashCode(): Int = System.identityHashCode(this)
+        // RK <--
     }
 
     @Immutable

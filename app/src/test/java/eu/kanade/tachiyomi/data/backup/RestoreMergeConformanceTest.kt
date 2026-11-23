@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.data.backup
 
+import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import eu.kanade.tachiyomi.data.backup.models.BackupChapter
 import eu.kanade.tachiyomi.data.backup.models.BackupManga
 import eu.kanade.tachiyomi.data.backup.models.BackupNovel
@@ -8,22 +9,36 @@ import eu.kanade.tachiyomi.data.backup.models.BackupNovelTracking
 import eu.kanade.tachiyomi.data.backup.models.BackupTracking
 import eu.kanade.tachiyomi.data.backup.restore.restorers.MangaRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.NovelRestorer
+import eu.kanade.tachiyomi.source.model.UpdateStrategy
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
+import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.MethodSource
+import reikai.data.novel.NovelChapterRepositoryImpl
+import reikai.data.novel.NovelRepositoryImpl
+import reikai.data.readinglog.ReadingPaceRepositoryImpl
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
 import reikai.domain.db.PassThroughTransactions
+import reikai.domain.library.FakeLibraryManualOrderRepository
 import reikai.domain.merge.RestoreMergeGroups
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.NovelTrackRepository
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.novel.model.NovelTrack
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
+import tachiyomi.data.Database
+import tachiyomi.data.DatabaseBindings
 import tachiyomi.domain.chapter.model.Chapter
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.track.model.Track
@@ -42,19 +57,26 @@ class RestoreMergeConformanceTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("restorers")
     fun `an initialized device keeps its details over an initialized backup`(restorer: MergeRestorer) = runTest {
-        restorer.description(deviceInitialized = true, backupInitialized = true) shouldBe "device"
+        restorer.details(deviceInitialized = true, backupInitialized = true) shouldBe SeriesDetails.DEVICE
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("restorers")
     fun `an initialized backup fills in a device that never fetched its details`(restorer: MergeRestorer) = runTest {
-        restorer.description(deviceInitialized = false, backupInitialized = true) shouldBe "backup"
+        restorer.details(deviceInitialized = false, backupInitialized = true) shouldBe SeriesDetails.BACKUP
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("restorers")
     fun `an uninitialized backup never replaces the device's details`(restorer: MergeRestorer) = runTest {
-        restorer.description(deviceInitialized = false, backupInitialized = false) shouldBe "device"
+        restorer.details(deviceInitialized = false, backupInitialized = false) shouldBe SeriesDetails.DEVICE
+    }
+
+    // Novels only: a manga keeps no page count.
+    @Test
+    fun `a novel's page count comes with the details the backup fills in`() = runTest {
+        listOf(NovelMergeRestorer().totalPages(false, true), NovelMergeRestorer().totalPages(true, true)) shouldBe
+            listOf(12L, 1L)
     }
 
     @ParameterizedTest(name = "{0}")
@@ -138,6 +160,14 @@ class RestoreMergeConformanceTest {
         ) shouldBe null
     }
 
+    // A length only differs when the chapter changed since the backup; neither side can tell which is current.
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("restorers")
+    fun `a chapter keeps the larger of its two lengths`(restorer: MergeRestorer) = runTest {
+        listOf(restorer.length(device = 40, backup = 25), restorer.length(device = 25, backup = 40)) shouldBe
+            listOf(40L, 40L)
+    }
+
     companion object {
         const val DEVICE_ID = 10L
         const val TRACKER_ID = 3L
@@ -146,6 +176,23 @@ class RestoreMergeConformanceTest {
 
         @JvmStatic
         fun restorers() = listOf(MangaMergeRestorer(), NovelMergeRestorer())
+    }
+}
+
+/** Every detail a restore takes from one side, each set apart on the two sides. */
+data class SeriesDetails(
+    val title: String,
+    val author: String?,
+    val artist: String?,
+    val description: String?,
+    val genre: List<String>?,
+    val status: Long,
+    val thumbnailUrl: String?,
+    val updateStrategy: UpdateStrategy,
+) {
+    companion object {
+        val DEVICE = SeriesDetails("dT", "dAu", "dAr", "dD", listOf("dG"), 1, "dC", UpdateStrategy.ALWAYS_UPDATE)
+        val BACKUP = SeriesDetails("bT", "bAu", "bAr", "bD", listOf("bG"), 2, "bC", UpdateStrategy.ONLY_FETCH_ONCE)
     }
 }
 
@@ -162,8 +209,8 @@ data class TrackState(
 /** One type's restore of a single series already on the device under [RestoreMergeConformanceTest.DEVICE_ID]. */
 interface MergeRestorer {
 
-    /** Restores a series described "backup" over one described "device", returning the description kept. */
-    suspend fun description(deviceInitialized: Boolean, backupInitialized: Boolean): String?
+    /** Restores a series of [SeriesDetails.BACKUP] over one of [SeriesDetails.DEVICE], returning the details kept. */
+    suspend fun details(deviceInitialized: Boolean, backupInitialized: Boolean): SeriesDetails?
 
     /** Restores a series added at [backup] over one added at [device], returning the date kept. */
     suspend fun addedAt(device: Long, backup: Long): Long?
@@ -176,6 +223,9 @@ interface MergeRestorer {
 
     /** Restores one track over the device's track on the same tracker, returning the device's row afterwards. */
     suspend fun track(device: TrackState, backup: TrackState): TrackState?
+
+    /** Restores one chapter of [backup] length over the device's of [device] length, returning the length kept. */
+    suspend fun length(device: Long, backup: Long): Long
 }
 
 class MangaMergeRestorer : MergeRestorer {
@@ -184,11 +234,23 @@ class MangaMergeRestorer : MergeRestorer {
 
     private val deviceManga = Manga.create().copy(url = "u", source = 1L, title = "T")
 
-    override suspend fun description(deviceInitialized: Boolean, backupInitialized: Boolean): String? =
-        restoreOver(
-            deviceManga.copy(description = "device", initialized = deviceInitialized),
-            BackupManga(source = 1L, url = "u", description = "backup", initialized = backupInitialized),
-        ).description
+    override suspend fun details(deviceInitialized: Boolean, backupInitialized: Boolean): SeriesDetails? {
+        val (dT, dAu, dAr, dD, dG, dS, dC, dU) = SeriesDetails.DEVICE
+        val (bT, bAu, bAr, bD, bG, bS, bC, bU) = SeriesDetails.BACKUP
+        val stored = restoreOver(
+            deviceManga.copy(
+                title = dT, author = dAu, artist = dAr, description = dD, genre = dG, status = dS,
+                thumbnailUrl = dC, updateStrategy = dU, initialized = deviceInitialized,
+            ),
+            BackupManga(
+                source = 1L, url = "u", title = bT, author = bAu, artist = bAr, description = bD, genre = bG!!,
+                status = bS.toInt(), thumbnailUrl = bC, updateStrategy = bU, initialized = backupInitialized,
+            ),
+        )
+        return with(stored) {
+            SeriesDetails(title, author, artist, description, genre, status, thumbnailUrl, updateStrategy)
+        }
+    }
 
     override suspend fun addedAt(device: Long, backup: Long): Long? = restoreOver(
         deviceManga.copy(favoriteAt = Instant.fromEpochMilliseconds(device)),
@@ -246,6 +308,20 @@ class MangaMergeRestorer : MergeRestorer {
             ChapterState(stored.read, stored.bookmark, stored.lastPageRead.toLong())
         }
 
+    override suspend fun length(device: Long, backup: Long): Long = MangaRestoreHarness.create().use { harness ->
+        val id = harness.insert(deviceManga)
+        // Every other field matches the backup's, so the restore cannot tell the two apart but for the length.
+        harness.insert(
+            Chapter.create().copy(mangaId = id, url = "c", name = "C", chapterNumber = 0.0, pageCount = device.toInt()),
+        )
+        val backupChapter = BackupChapter(url = "c", name = "C", pageCount = backup)
+        harness.restorer().restore(
+            listOf(BackupManga(source = 1L, url = "u", chapters = listOf(backupChapter))),
+            emptyList(),
+        )
+        harness.chapters.getChapterByMangaId(id).single().pageCount.toLong()
+    }
+
     override suspend fun track(device: TrackState, backup: TrackState): TrackState? =
         MangaRestoreHarness.create().use { harness ->
             val id = harness.insert(deviceManga)
@@ -293,16 +369,34 @@ class NovelMergeRestorer : MergeRestorer {
 
     private val deviceNovel = Novel.create().copy(id = RestoreMergeConformanceTest.DEVICE_ID, url = "u", source = "s")
 
-    override suspend fun description(deviceInitialized: Boolean, backupInitialized: Boolean): String? =
-        restoreOver(
-            deviceNovel.copy(description = "device", initialized = deviceInitialized),
-            BackupNovel(source = "s", url = "u", description = "backup", initialized = backupInitialized),
-        )?.description
+    override suspend fun details(deviceInitialized: Boolean, backupInitialized: Boolean): SeriesDetails? {
+        val (dT, dAu, dAr, dD, dG, dS, dC, dU) = SeriesDetails.DEVICE
+        val (bT, bAu, bAr, bD, bG, bS, bC, bU) = SeriesDetails.BACKUP
+        val written = restoreOver(
+            deviceNovel.copy(
+                title = dT, author = dAu, artist = dAr, description = dD, genre = dG, status = dS,
+                thumbnailUrl = dC, updateStrategy = dU, initialized = deviceInitialized,
+            ),
+            BackupNovel(
+                source = "s", url = "u", title = bT, author = bAu, artist = bAr, description = bD, genre = bG!!,
+                status = bS, thumbnailUrl = bC, updateStrategy = bU, initialized = backupInitialized,
+            ),
+        )
+        return written?.run {
+            SeriesDetails(title, author, artist, description, genre, status, thumbnailUrl, updateStrategy)
+        }
+    }
 
     override suspend fun addedAt(device: Long, backup: Long): Long? = restoreOver(
         deviceNovel.copy(favoriteAt = Instant.fromEpochMilliseconds(device)),
         BackupNovel(source = "s", url = "u", favorite = true, dateAdded = backup),
     )?.favoriteAt?.toEpochMilliseconds()
+
+    // A novel's page count is one of its details, so it comes from the side the details do.
+    suspend fun totalPages(deviceInitialized: Boolean, backupInitialized: Boolean): Long? = restoreOver(
+        deviceNovel.copy(totalPages = 1, initialized = deviceInitialized),
+        BackupNovel(source = "s", url = "u", totalPages = 12, initialized = backupInitialized),
+    )?.totalPages
 
     /** Restores [backup] over [dbNovel], returning the novel as written. */
     private suspend fun restoreOver(dbNovel: Novel, backup: BackupNovel): Novel? {
@@ -417,6 +511,51 @@ class NovelMergeRestorer : MergeRestorer {
         return result
     }
 
+    /** Over real SQL, since the novel side's rule lives in the word-count upsert. */
+    override suspend fun length(device: Long, backup: Long): Long {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        return try {
+            Database.Schema.create(driver).await()
+            val database = DatabaseBindings.providesDatabase(driver)
+            listOf(
+                "INSERT INTO novels(_id, source, url, title, status, initialized, chapter_flags, favorite_at) " +
+                    "VALUES (1, 's', 'u', 'T', 0, 0, 0, 0)",
+                "INSERT INTO novel_chapters(_id, novel_id, url, name, read, bookmark, chapter_number, " +
+                    "source_order, date_fetch, date_upload) VALUES (10, 1, 'c', 'C', 0, 0, 1, 0, 0, 0)",
+                "INSERT INTO novel_chapter_words(chapter_id, words) VALUES (10, $device)",
+            ).forEach { driver.execute(null, it, 0).await() }
+            val pace = ReadingPaceRepositoryImpl(database)
+            NovelRestorer(
+                tombstones = NoChapterTombstoneRepository,
+                manualOrder = FakeLibraryManualOrderRepository(),
+                novelRepository = NovelRepositoryImpl(database),
+                novelChapterRepository = NovelChapterRepositoryImpl(database),
+                categoryRepository = mockk(relaxed = true),
+                novelTrackRepository = mockk(relaxed = true),
+                restoreMergeGroups = RestoreMergeGroups(mockk(relaxed = true), PassThroughTransactions),
+                setCustomNovelInfo = mockk(relaxed = true),
+                novelHistoryRepository = mockk(relaxed = true),
+                chapterNumberOverrides = NoChapterNumberOverrides,
+                copyMarks = InMemoryChapterCopyMarks(),
+                localVolumes = NoLocalVolumes,
+                volumePicks = NoVolumePicks,
+                readingLog = NoReadingLog,
+                readingPace = pace,
+                localNovelLanguages = NoLocalNovelLanguages,
+            ).restore(
+                BackupNovel(
+                    source = "s",
+                    url = "u",
+                    chapters = listOf(BackupNovelChapter(url = "c", name = "C", words = backup)),
+                ),
+                emptyList(),
+            )
+            pace.novelChapterPace(listOf(1L)).single().words
+        } finally {
+            driver.close()
+        }
+    }
+
     private fun novels(dbNovel: Novel, block: NovelRepository.() -> Unit = {}) =
         mockk<NovelRepository>(relaxed = true) {
             coEvery { getByUrlAndSource("u", "s") } returns dbNovel
@@ -430,6 +569,8 @@ class NovelMergeRestorer : MergeRestorer {
         chapters: NovelChapterRepository = mockk(relaxed = true),
         tracks: NovelTrackRepository = mockk(relaxed = true),
     ) = NovelRestorer(
+        tombstones = NoChapterTombstoneRepository,
+        manualOrder = FakeLibraryManualOrderRepository(),
         novelRepository = novels,
         novelChapterRepository = chapters,
         categoryRepository = mockk(relaxed = true),
@@ -438,6 +579,11 @@ class NovelMergeRestorer : MergeRestorer {
         setCustomNovelInfo = mockk(relaxed = true),
         novelHistoryRepository = mockk(relaxed = true),
         chapterNumberOverrides = NoChapterNumberOverrides,
+        copyMarks = InMemoryChapterCopyMarks(),
+        localVolumes = NoLocalVolumes,
+        volumePicks = NoVolumePicks,
         readingLog = NoReadingLog,
+        readingPace = NoReadingPace,
+        localNovelLanguages = NoLocalNovelLanguages,
     )
 }

@@ -1,0 +1,119 @@
+package reikai.presentation.stats
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import dev.zacsweers.metrox.viewmodel.metroViewModel
+import eu.kanade.presentation.components.AppBar
+import eu.kanade.presentation.components.AppBarActions
+import eu.kanade.presentation.more.stats.StatsScreenContent
+import eu.kanade.presentation.more.stats.StatsScreenState
+import eu.kanade.tachiyomi.ui.stats.StatsViewModel
+import kotlinx.collections.immutable.persistentListOf
+import mihon.core.navigation.LocalNavigator
+import mihon.icons.materialsymbols.MaterialSymbols
+import mihon.icons.materialsymbols.rounded.Edit
+import reikai.presentation.details.detailsRoute
+import reikai.presentation.stats.details.StatsGroupRoute
+import reikai.presentation.stats.details.StatsMostReadRoute
+import reikai.presentation.stats.details.StatsReadingRoute
+import reikai.presentation.stats.details.StatsSeriesRoute
+import tachiyomi.i18n.MR
+import tachiyomi.presentation.core.components.material.Scaffold
+import tachiyomi.presentation.core.i18n.stringResource
+import tachiyomi.presentation.core.screens.LoadingScreen
+
+/** The Statistics body, for the pushed StatsScreen and for StatsTab. */
+@Composable
+fun StatsContent(navigateUp: (() -> Unit)?) {
+    val navigator = LocalNavigator.current
+
+    val viewModel = metroViewModel<StatsViewModel>()
+    // As a tab the model lives all session, so it reloads whenever Statistics comes back on screen.
+    StatsRefreshOnResume(viewModel::refresh)
+    val state by viewModel.state.collectAsState()
+    val contentType by viewModel.contentType.collectAsState()
+    val cardLayout by viewModel.cardLayout.collectAsState()
+    val hiddenCards by viewModel.hiddenCards.collectAsState()
+    val figureLayout by viewModel.figureLayout.collectAsState()
+    val hiddenFigures by viewModel.hiddenFigures.collectAsState()
+    var isArranging by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = isArranging) { isArranging = false }
+
+    Scaffold(
+        topBar = { scrollBehavior ->
+            if (isArranging) {
+                AppBar(
+                    title = stringResource(MR.strings.stats_arrange_cards),
+                    navigateUp = { isArranging = false },
+                    actions = {
+                        AppBarActions(
+                            persistentListOf(
+                                AppBar.OverflowAction(
+                                    title = stringResource(MR.strings.action_reset),
+                                    onClick = viewModel::resetCardLayout,
+                                ),
+                            ),
+                        )
+                    },
+                    scrollBehavior = scrollBehavior,
+                )
+            } else {
+                AppBar(
+                    title = stringResource(MR.strings.label_stats),
+                    navigateUp = navigateUp,
+                    actions = {
+                        AppBarActions(
+                            persistentListOf(
+                                AppBar.Action(
+                                    title = stringResource(MR.strings.stats_arrange_cards),
+                                    icon = MaterialSymbols.Rounded.Edit,
+                                    onClick = { isArranging = true },
+                                ),
+                            ),
+                        )
+                    },
+                    scrollBehavior = scrollBehavior,
+                )
+            }
+        },
+    ) { paddingValues ->
+        if (isArranging) {
+            StatsArrangeList(
+                layout = cardLayout,
+                hidden = hiddenCards,
+                figureLayout = figureLayout,
+                hiddenFigures = hiddenFigures,
+                contentPadding = paddingValues,
+                onArrange = viewModel::setCardLayout,
+                onHide = viewModel::setHiddenCards,
+                onArrangeFigures = viewModel::setFigureLayout,
+                onHideFigures = viewModel::setHiddenFigures,
+            )
+            return@Scaffold
+        }
+        if (state is StatsScreenState.Loading) {
+            LoadingScreen()
+            return@Scaffold
+        }
+
+        StatsScreenContent(
+            state = state as StatsScreenState.Success,
+            paddingValues = paddingValues,
+            contentType = contentType,
+            onContentTypeSelected = viewModel::setContentType,
+            onSeeAll = { navigator.push(StatsGroupRoute(it)) },
+            onOpenRow = { navigator.push(StatsSeriesRoute(it.group.key, it.name, contentType)) },
+            onOpenKey = { navigator.push(StatsSeriesRoute(it, null, contentType)) },
+            onOpenEntry = { navigator.push(it.detailsRoute()) },
+            onOpenReading = { navigator.push(StatsReadingRoute) },
+            onOpenMostRead = { navigator.push(StatsMostReadRoute) },
+            cardLayout = statsShownCards(cardLayout, hiddenCards, hiddenFigures),
+            figures = figureLayout - hiddenFigures,
+        )
+    }
+}

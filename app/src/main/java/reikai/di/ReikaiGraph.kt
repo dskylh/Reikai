@@ -3,6 +3,7 @@ package reikai.di
 import eu.kanade.domain.source.interactor.ToggleIncognito
 import eu.kanade.tachiyomi.data.cache.PagePreviewCache
 import eu.kanade.tachiyomi.data.coil.MangaCoverMetadata
+import eu.kanade.tachiyomi.data.saver.ImageSaver
 import exh.GalleryAdder
 import exh.eh.EHentaiUpdateHelper
 import exh.eh.EHentaiUpdateWorker
@@ -20,16 +21,18 @@ import reikai.data.novel.tts.TtsRenderSpeedTest
 import reikai.data.novel.tts.TtsRenderWorker
 import reikai.data.novel.tts.TtsServerClient
 import reikai.data.novel.tts.TtsServerDiscovery
+import reikai.data.local.LocalFileJournalReplay
 import reikai.data.novel.update.NovelUpdateWorker
 import reikai.data.track.TrackerRefreshWorker
 import reikai.domain.category.GetNovelCategories
+import reikai.domain.chapter.ChapterCopyMarkRepository
+import reikai.domain.entry.ResetEntryViewerFlags
 import reikai.domain.extension.ExtensionUpdateCounts
 import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.manga.MangaMergeManager
-import reikai.domain.novel.NovelChapterRepository
+import reikai.domain.manga.MangaPreferences
 import reikai.domain.novel.NovelMergeManager
 import reikai.domain.novel.NovelPreferences
-import reikai.domain.novel.interactor.GetNovelTracks
 import reikai.domain.novel.interactor.RepairNovelDetails
 import reikai.domain.novel.track.NovelDelayedTrackingUpdateWorker
 import reikai.domain.recommendation.ReikaiRecommendationPreferences
@@ -37,31 +40,36 @@ import reikai.domain.recommendation.taste.RefreshTrackerLibrary
 import reikai.domain.recommendation.taste.TasteLibraryRepository
 import reikai.domain.recommendation.taste.TrackerLibraryFetcher
 import reikai.domain.source.ReikaiSourcePreferences
-import reikai.domain.track.KitsuEntryIdCopies
+import reikai.domain.task.TaskBannerPreferences
 import reikai.novel.download.NovelDownloadCache
 import reikai.novel.download.NovelDownloadWorker
+import reikai.novel.export.NovelEpubExportWorker
 import reikai.novel.font.NovelFontManager
+import reikai.novel.host.LnPluginHost
 import reikai.novel.network.NovelImageRequests
 import reikai.novel.source.NovelSourceManager
 import reikai.novel.source.ireader.IReaderHostServices
 import reikai.novel.update.LnPluginUpdateChecker
 import reikai.novel.update.LnPluginUpdateNotifier
 import reikai.presentation.details.MangaEntryCoverViewModel
+import reikai.presentation.details.VolumePicking
 import reikai.presentation.library.MangaLibraryAdapter
 import reikai.presentation.library.NovelLibraryAdapter
 import reikai.presentation.migrate.flow.MigrationAdapters
-import reikai.presentation.migrate.flow.MigrationPickHandoff
+import reikai.presentation.novel.browse.NovelLibraryAdder
 import reikai.presentation.novel.details.NovelCoverViewModel
 import reikai.presentation.recents.MangaRecentsAdapter
 import reikai.presentation.recents.NovelRecentsAdapter
 import reikai.presentation.widget.UnifiedUpdatesGlanceWidget
 import reikai.presentation.widget.UnifiedUpdatesWidgetManager
+import reikai.util.LauncherIconState
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.domain.category.repository.CategoryRepository
 import tachiyomi.domain.manga.interactor.GetExhFavoriteMangaWithMetadata
 import tachiyomi.domain.manga.interactor.GetFlatMetadataById
 import tachiyomi.domain.manga.interactor.GetManga
 import tachiyomi.domain.manga.interactor.InsertFlatMetadata
+import tachiyomi.domain.storage.service.StorageManager
 
 /**
  * Reikai's members of the app graph. `AppGraph` extends this, so each is still read as
@@ -72,6 +80,7 @@ interface ReikaiGraph {
     fun inject(ttsRenderWorker: TtsRenderWorker)
     fun inject(novelUpdateWorker: NovelUpdateWorker)
     fun inject(trackerRefreshWorker: TrackerRefreshWorker)
+    fun inject(novelEpubExportWorker: NovelEpubExportWorker)
     fun inject(eHentaiUpdateWorker: EHentaiUpdateWorker)
     fun inject(ehFavoritesBackupWorker: EhFavoritesBackupWorker)
     fun inject(mangaDexSyncWorker: MangaDexSyncWorker)
@@ -83,6 +92,9 @@ interface ReikaiGraph {
     fun inject(ehLoginActivity: EhLoginActivity)
 
     val preferenceStore: PreferenceStore
+
+    // Advanced settings' clear rows forget the site storage plugins keep.
+    val lnPluginHost: LnPluginHost
 
     // Read through Context.appGraph by companions, objects and composable bodies, none of which can
     // be member-injected. migrationAdapters is read from the migrate screens, which pick one by
@@ -101,26 +113,32 @@ interface ReikaiGraph {
     val ttsServerClient: TtsServerClient // the read-aloud settings pair with and test the PC server
     val ttsRenderSpeedTest: TtsRenderSpeedTest // the read-aloud settings time the engine
     val ttsServerDiscovery: TtsServerDiscovery // the read-aloud settings list servers on the network
+    val novelLibraryAdder: NovelLibraryAdder // a tap on a listed novel stores its row to open it
+    val mangaPreferences: MangaPreferences // the Downloads settings read the manga delays
+    val resetEntryViewerFlags: ResetEntryViewerFlags
     val novelSourceManager: NovelSourceManager
     val iReaderHostServices: IReaderHostServices // the extension loader builds IReader sources with it
     val novelImageRequests: NovelImageRequests // novel covers and pictures take their source's headers
+    val imageSaver: ImageSaver // the reader's picture viewer saves and shares from the host
     val extensionUpdateCounts: ExtensionUpdateCounts // the Browse badge counts plugin updates too
     val reikaiRecommendationPreferences: ReikaiRecommendationPreferences
     val lnPluginUpdateChecker: LnPluginUpdateChecker
     val lnPluginUpdateNotifier: LnPluginUpdateNotifier // the plugin update job posts and clears its notice
     val refreshTrackerLibrary: RefreshTrackerLibrary
-    val kitsuEntryIdCopies: KitsuEntryIdCopies // Kitsu heals every copy of a Yokai-restored row
     val reikaiLibraryPreferences: ReikaiLibraryPreferences
     val reikaiSourcePreferences: ReikaiSourcePreferences
+    val taskBannerPreferences: TaskBannerPreferences // the Library and Data settings host its two switches
+    val chapterCopyMarks: ChapterCopyMarkRepository
+    val volumePicking: VolumePicking
+    val launcherIconState: LauncherIconState // the app header and the icon picker read it
 
     val pagePreviewCache: PagePreviewCache
     val mangaCoverMetadata: MangaCoverMetadata
     val novelDownloadCache: NovelDownloadCache // Settings invalidates both download indexes
     val mangaMergeManager: MangaMergeManager
     val novelMergeManager: NovelMergeManager
-    val novelChapterRepository: NovelChapterRepository // NovelUpdates finds the release a read links to
     val novelFontManager: NovelFontManager
-    val migrationPickHandoff: MigrationPickHandoff
+    val storageManager: StorageManager // the storage picker checks a folder before saving it
     val unifiedUpdatesWidgetManager: UnifiedUpdatesWidgetManager // the receiver reports widgets placed
 
     // The two details adapters build their cover model for whichever entry the source chip is showing,
@@ -137,17 +155,16 @@ interface ReikaiGraph {
     val tasteLibraryRepository: TasteLibraryRepository
     val trackerLibraryFetchers: List<TrackerLibraryFetcher> // Settings draws each pull switch from its fetcher
 
-    // Interactors are unscoped, so every read builds a fresh instance. That matches the pre-port
-    // shape: Injekt registered every one of these with addFactory, never addSingletonFactory.
-    val getNovelCategories: GetNovelCategories
     val categoryRepository: CategoryRepository // Settings counts every category of both libraries
-    val getNovelTracks: GetNovelTracks // NovelUpdates reads the chapters its track reaches, per the sharing switch
 
-    // The metadata trio backs source-api's MetadataSource contract, which installed extensions
-    // implement, so these three are reached through Injekt rather than the graph.
+    // Interactors are unscoped, so every read builds a fresh instance; they hold no state to share.
+    val getNovelCategories: GetNovelCategories
+
+    // MetroInjektRegistrar reads these three to answer source-api's MetadataSource Injekt reads.
     val getManga: GetManga
     val getFlatMetadataById: GetFlatMetadataById
     val insertFlatMetadata: InsertFlatMetadata
+
     val getExhFavoriteMangaWithMetadata: GetExhFavoriteMangaWithMetadata
     val toggleIncognito: ToggleIncognito
     val repairNovelDetails: RepairNovelDetails
@@ -158,4 +175,7 @@ interface ReikaiGraph {
 
     // App retries, at each launch, a download folder merge the upgrade's dedupe left unfinished
     val mergedDuplicateCarryMigration: MergedDuplicateCarryMigration
+
+    // App repairs, at each launch, a local file rename or replace a kill cut off between its disk and row steps
+    val localFileJournalReplay: LocalFileJournalReplay
 }

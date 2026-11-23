@@ -1,23 +1,21 @@
 package reikai.presentation.reader
 
+import android.os.SystemClock
 import eu.kanade.presentation.manga.components.ChapterDownloadAction
 import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.ui.reader.ReaderViewModel
 import eu.kanade.tachiyomi.ui.reader.loader.DownloadPageLoader
+import eu.kanade.tachiyomi.ui.reader.loader.PageLoader
+import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.params.ParameterizedTest
@@ -25,7 +23,10 @@ import org.junit.jupiter.params.provider.MethodSource
 import reikai.domain.manga.MergedChapterProvider
 import reikai.domain.merge.ChapterUnit
 import reikai.domain.merge.renderStoredStitch
+import reikai.util.resetVirtualDispatchers
+import reikai.util.virtualDispatchers
 import tachiyomi.domain.chapter.model.Chapter
+import java.io.IOException
 
 /**
  * Which copy of a merged chapter the reader reads, pinned once over both readers. Each group has two
@@ -35,10 +36,12 @@ import tachiyomi.domain.chapter.model.Chapter
 class MergedCopyToOpenConformanceTest {
 
     @BeforeEach
-    fun setUp() = Dispatchers.setMain(StandardTestDispatcher())
+    fun setUp() {
+        virtualDispatchers()
+    }
 
     @AfterEach
-    fun tearDown() = Dispatchers.resetMain()
+    fun tearDown() = resetVirtualDispatchers()
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("probes")
@@ -75,13 +78,13 @@ class MergedCopyToOpenConformanceTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("probes")
     fun `in source scope a sheet delete leaves another source's copy`(probe: MergedCopyProbe) = runTest {
-        probe.sheetDeleteReachesSibling(this, sourceScoped = true) shouldBe false
+        probe.sheetDeleted(this, sourceScoped = true) shouldBe (true to false)
     }
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("probes")
     fun `in group scope a sheet delete removes another source's copy too`(probe: MergedCopyProbe) = runTest {
-        probe.sheetDeleteReachesSibling(this, sourceScoped = false) shouldBe true
+        probe.sheetDeleted(this, sourceScoped = false) shouldBe (true to true)
     }
 
     // Manga only: the novel reader already walks the list it pages (NovelReaderViewModel.maybeDownloadAhead).
@@ -94,6 +97,12 @@ class MergedCopyToOpenConformanceTest {
     @org.junit.jupiter.api.Test
     fun `manga download-ahead walks on from a next chapter that is another source's copy`() = runTest {
         MangaCopyProbe().downloadAheadQueues(onDisk = setOf(22L, 23L, 24L)) shouldBe setOf(23L, 24L)
+    }
+
+    // Manga only: a novel chapter is one request, with no streamed page loader to trade for the copy on disk.
+    @org.junit.jupiter.api.Test
+    fun `manga preload finds a neighbour downloaded under its own source`() = runTest {
+        MangaCopyProbe().preloadFindsOnDisk() shouldBe true
     }
 
     // What queueing does with a failed chapter is the engines' rule (ChapterDownloadActionsConformanceTest).
@@ -122,9 +131,9 @@ interface MergedCopyProbe {
      *  leading copy in [sourceScoped], shows that row as downloaded. */
     suspend fun sheetShowsDownloaded(scope: TestScope, sourceScoped: Boolean): Boolean
 
-    /** Deleting chapter 6's download from the sheet, opened on the leading copy in [sourceScoped]:
-     *  whether the delete reaches the second source's copy. */
-    suspend fun sheetDeleteReachesSibling(scope: TestScope, sourceScoped: Boolean): Boolean
+    /** Deleting chapter 6's download from the sheet, opened on the leading copy in [sourceScoped]: whether
+     *  the delete removes the row's own copy, and whether it reaches the second source's copy. */
+    suspend fun sheetDeleted(scope: TestScope, sourceScoped: Boolean): Pair<Boolean, Boolean>
 }
 
 /**
@@ -169,14 +178,30 @@ class MangaCopyProbe : MergedCopyProbe {
             val pages = loadedPages(current, 2)
             // Download-ahead only runs while the chapter being read is itself read from disk.
             current.pageLoader = mockk<DownloadPageLoader>(relaxed = true)
-            model.onPageSelected(pages[1])
-            withContext(Dispatchers.Default) {
-                withTimeoutOrNull(3_000) { while (queued.isEmpty()) delay(20) }
-                delay(300)
-            }
+            settle(model) { model.onPageSelected(pages[1]) }
             queued.toSet()
         }
     }
+
+    /**
+     * Chapter 7 is on disk only as the second source's copy, which the reader pages to, and its streamed
+     * load failed: whether preloading it asks that source's folder and so readies it to load from disk.
+     */
+    suspend fun preloadFindsOnDisk(): Boolean =
+        open(onDisk = setOf(23L), downloadedOnly = false, sourceScoped = false) { model, state, _ ->
+            val next = state.viewerChapters!!.nextChapter!!
+            next.pageLoader = mockk<PageLoader>(relaxed = true) { every { isLocal } returns false }
+            next.state = ReaderChapter.State.Error(IOException("no connection"))
+            // The retry cooldown reads the uptime clock, which an Android stub cannot answer on the JVM.
+            mockkStatic(SystemClock::class)
+            try {
+                every { SystemClock.elapsedRealtime() } returns 0L
+                model.preload(next, userAsked = true)
+            } finally {
+                unmockkStatic(SystemClock::class)
+            }
+            next.state == ReaderChapter.State.Wait
+        }
 
     /** Tapping chapter 6's download indicator on the sheet raises START: the ids handed to the downloader. */
     suspend fun sheetStartQueues(): Set<Long> {
@@ -187,15 +212,21 @@ class MangaCopyProbe : MergedCopyProbe {
             sourceScoped = false,
             onDownload = { chapters -> chapters.forEach { queued += it.id } },
         ) { model, _, group ->
-            model.handleChapterDownload(group.pooledChapters.first { it.id == 12L }, ChapterDownloadAction.START)
-            withContext(Dispatchers.Default) {
-                withTimeoutOrNull(3_000) { while (queued.isEmpty()) delay(20) }
+            settle(model) {
+                model.handleChapterDownload(
+                    listOf(
+                        group.pooledChapters.first {
+                            it.id == 12L
+                        },
+                    ),
+                    ChapterDownloadAction.START,
+                )
             }
             queued.toSet()
         }
     }
 
-    override suspend fun sheetDeleteReachesSibling(scope: TestScope, sourceScoped: Boolean): Boolean {
+    override suspend fun sheetDeleted(scope: TestScope, sourceScoped: Boolean): Pair<Boolean, Boolean> {
         val deleted = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
         return open(
             onDisk = setOf(12L, 22L),
@@ -203,12 +234,17 @@ class MangaCopyProbe : MergedCopyProbe {
             sourceScoped = sourceScoped,
             onDelete = { chapters -> chapters.forEach { deleted += it.id } },
         ) { model, _, group ->
-            model.handleChapterDownload(group.pooledChapters.first { it.id == 12L }, ChapterDownloadAction.DELETE)
-            withContext(Dispatchers.Default) {
-                withTimeoutOrNull(3_000) { while (12L !in deleted) delay(20) }
-                delay(200)
+            settle(model) {
+                model.handleChapterDownload(
+                    listOf(
+                        group.pooledChapters.first {
+                            it.id == 12L
+                        },
+                    ),
+                    ChapterDownloadAction.DELETE,
+                )
             }
-            22L in deleted
+            (12L in deleted) to (22L in deleted)
         }
     }
 
@@ -223,7 +259,11 @@ class MangaCopyProbe : MergedCopyProbe {
         downloadAhead: Int = 0,
         onDownload: (List<Chapter>) -> Unit = {},
         onDelete: (List<Chapter>) -> Unit = {},
-        probe: suspend (ReaderViewModel, ReaderViewModel.State, MergedChapterProvider.Group) -> T,
+        probe: suspend MangaReaderViewModelHarness.(
+            ReaderViewModel,
+            ReaderViewModel.State,
+            MergedChapterProvider.Group,
+        ) -> T,
     ): T = MangaReaderViewModelHarness.create().use { harness ->
         val leading = harness.manga(LEADING, source = 100L, title = "Leading")
         val other = harness.manga(OTHER, source = 200L, title = "Other")
@@ -257,7 +297,7 @@ class MangaCopyProbe : MergedCopyProbe {
             sourceScoped = sourceScoped,
             onDownload = onDownload,
             onDelete = onDelete,
-        ) { model, state -> probe(model, state, group) }
+        ) { model, state -> harness.probe(model, state, group) }
     }
 
     private companion object {
@@ -314,7 +354,7 @@ class NovelCopyProbe : MergedCopyProbe {
             model.chapterRows(EnglishChapterTitleWords).first().single().downloadState == Download.State.DOWNLOADED
         }
 
-    override suspend fun sheetDeleteReachesSibling(scope: TestScope, sourceScoped: Boolean): Boolean =
+    override suspend fun sheetDeleted(scope: TestScope, sourceScoped: Boolean): Pair<Boolean, Boolean> =
         NovelReaderViewModelHarness.create(scope.testScheduler).use { harness ->
             val leading = harness.novel(harness.source("alpha"))
             val other = harness.novel(harness.source("beta"))
@@ -328,8 +368,8 @@ class NovelCopyProbe : MergedCopyProbe {
             val model = harness.open(leading, opened.id, sourceScoped = sourceScoped)
             scope.advanceUntilIdle()
 
-            model.downloadChapter(opened.id, ChapterDownloadAction.DELETE)
+            model.downloadChapter(listOf(opened.id), ChapterDownloadAction.DELETE)
             scope.advanceUntilIdle()
-            sibling.id in deleted
+            (opened.id in deleted) to (sibling.id in deleted)
         }
 }

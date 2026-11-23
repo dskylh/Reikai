@@ -12,10 +12,10 @@ data class Backup(
     @ProtoNumber(104) var backupPreferences: List<BackupPreference> = emptyList(),
     @ProtoNumber(105) var backupSourcePreferences: List<BackupSourcePreferences> = emptyList(),
     @ProtoNumber(106) var backupExtensionStores: List<BackupExtensionStore> = emptyList(),
-    // RK: light-novel library. Proto numbers in the 700 range stay clear of Mihon's
-    // (1-106) and Komikku's fork additions (600/610). Merge groups carry stable {url,source} refs
-    // (see BackupNovelMerge), since novel ids change on restore. 703 is no longer written, and is read only
-    // from a backup without field 718.
+    // RK: light-novel library. Proto numbers in the 700 range stay clear of Mihon's (1-106) and the forks'
+    // additions (Komikku's 600/610, TachiyomiSY's 600/601), pinned by RefAppBackupFieldClashTest. Merge
+    // groups carry stable {url,source} refs (see BackupNovelMerge), since novel ids change on restore. 703 is no
+    // longer written, and is read only from a backup without field 718.
     @ProtoNumber(700) var backupNovels: List<BackupNovel> = emptyList(),
     @ProtoNumber(701) var backupNovelCategories: List<BackupNovelCategory> = emptyList(),
     @ProtoNumber(702) var backupNovelMerges: List<BackupNovelMergeGroup> = emptyList(),
@@ -45,4 +45,6 @@ data class Backup(
     @ProtoNumber(719) var backupSortOverridesStored: BackupSortOverridesStored? = null,
     // RK: present when Kitsu scores are on Kitsu's native 2-20 scale; without it a restore may double them.
     @ProtoNumber(720) var backupKitsuNativeScale: BackupKitsuNativeScale? = null,
+    // RK: the reader fonts the user added, whole, so a restored font setting finds its file.
+    @ProtoNumber(721) var backupNovelFonts: List<BackupNovelFont> = emptyList(),
 )

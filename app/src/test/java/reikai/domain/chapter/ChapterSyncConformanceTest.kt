@@ -19,8 +19,10 @@ import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
 import reikai.data.chapter.ChapterNumberOverrideRepositoryImpl
 import reikai.data.novel.NovelChapterRepositoryImpl
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.NovelRepositoryImpl
 import reikai.data.novel.syncChaptersWithNovelSource
+import reikai.domain.library.ContentType
 import reikai.novel.host.ChapterItem
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.core.common.preference.InMemoryPreferenceStore.InMemoryPreference
@@ -102,6 +104,21 @@ class ChapterSyncConformanceTest {
         (type.isRead(database, "/c5-b") to synced.newUrls) shouldBe (true to emptyList())
     }
 
+    /** Never skip keeps a chapter out of every set of copies, the duplicate read on sync's among them. */
+    @ParameterizedTest
+    @EnumSource(Type::class)
+    fun `a read chapter marked Never skip marks no new copy of it read`(type: Type) = runTest {
+        type.seed(driver)
+        type.sync(database, Listed("/c5-a", 5.0))
+        type.markRead(driver, "/c5-a")
+        val marks = InMemoryChapterCopyMarks()
+        marks.set(type.contentType, listOf(ChapterCopyMark(OWNER, "/c5-a", CopyMark.NeverSkip)))
+
+        type.sync(database, Listed("/c5-b", 5.0), Listed("/c5-a", 5.0), copyMarks = marks)
+
+        type.isRead(database, "/c5-b") shouldBe false
+    }
+
     @ParameterizedTest
     @EnumSource(Type::class)
     fun `with duplicate marking off, a new chapter numbered like a read one is unread and new`(type: Type) =
@@ -133,8 +150,8 @@ class ChapterSyncConformanceTest {
     /** What a sync reports: whether it found a release, and the urls of the chapters it calls new. */
     data class Synced(val foundRelease: Boolean, val newUrls: List<String>)
 
-    enum class Type(val excludesGroups: Boolean) {
-        MANGA(excludesGroups = true) {
+    enum class Type(val excludesGroups: Boolean, val contentType: ContentType) {
+        MANGA(excludesGroups = true, ContentType.MANGA) {
             override suspend fun seed(driver: JdbcSqliteDriver) {
                 driver.execute(
                     null,
@@ -146,7 +163,12 @@ class ChapterSyncConformanceTest {
                 ).await()
             }
 
-            override suspend fun sync(database: Database, vararg chapters: Listed, markDuplicates: Boolean): Synced {
+            override suspend fun sync(
+                database: Database,
+                vararg chapters: Listed,
+                markDuplicates: Boolean,
+                copyMarks: ChapterCopyMarkRepository,
+            ): Synced {
                 val found = slot<Boolean>()
                 val updateManga = mockk<UpdateManga> {
                     coEvery {
@@ -164,6 +186,8 @@ class ChapterSyncConformanceTest {
                     getExcludedScanlators = excluded,
                     libraryPreferences = libraryPreferences(markDuplicates),
                     chapterNumberOverrides = ChapterNumberOverrideRepositoryImpl(database),
+                    chapterCopyMarks = copyMarks,
+                    localTombstones = NoChapterTombstones,
                 ).await(
                     chapters.map { listed ->
                         SChapter.create().apply {
@@ -186,7 +210,7 @@ class ChapterSyncConformanceTest {
             override suspend fun isRead(database: Database, url: String) =
                 ChapterRepositoryImpl(database).getChapterByMangaId(OWNER).single { it.url == url }.read
         },
-        NOVEL(excludesGroups = false) {
+        NOVEL(excludesGroups = false, ContentType.NOVELS) {
             override suspend fun seed(driver: JdbcSqliteDriver) {
                 driver.execute(
                     null,
@@ -196,7 +220,12 @@ class ChapterSyncConformanceTest {
                 ).await()
             }
 
-            override suspend fun sync(database: Database, vararg chapters: Listed, markDuplicates: Boolean): Synced {
+            override suspend fun sync(
+                database: Database,
+                vararg chapters: Listed,
+                markDuplicates: Boolean,
+                copyMarks: ChapterCopyMarkRepository,
+            ): Synced {
                 val result = syncChaptersWithNovelSource(
                     chapters.map {
                         ChapterItem(name = "Chapter ${it.number}", path = it.url, chapterNumber = it.number)
@@ -205,7 +234,11 @@ class ChapterSyncConformanceTest {
                     NovelChapterRepositoryImpl(database),
                     NovelRepositoryImpl(database),
                     libraryPreferences(markDuplicates),
-                    ChapterNumberOverrideRepositoryImpl(database),
+                    NovelChapterSyncRules(
+                        ChapterNumberOverrideRepositoryImpl(database),
+                        copyMarks,
+                        NoChapterTombstones,
+                    ),
                 )
                 return Synced(result.foundRelease, result.newChapters.map { it.url })
             }
@@ -222,7 +255,12 @@ class ChapterSyncConformanceTest {
         abstract suspend fun seed(driver: JdbcSqliteDriver)
 
         /** Syncs a source listing [chapters], newest first; [markDuplicates] is the "mark duplicate read" setting. */
-        abstract suspend fun sync(database: Database, vararg chapters: Listed, markDuplicates: Boolean = true): Synced
+        abstract suspend fun sync(
+            database: Database,
+            vararg chapters: Listed,
+            markDuplicates: Boolean = true,
+            copyMarks: ChapterCopyMarkRepository = InMemoryChapterCopyMarks(),
+        ): Synced
 
         abstract suspend fun markRead(driver: JdbcSqliteDriver, url: String)
 

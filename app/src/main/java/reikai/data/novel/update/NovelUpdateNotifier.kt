@@ -5,7 +5,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat.NotificationWithIdAndTag
-import eu.kanade.tachiyomi.R
+import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.notification.Notifications
@@ -24,6 +24,7 @@ import reikai.data.notification.postedEntries
 import reikai.data.notification.setNewChaptersEntry
 import reikai.data.notification.setNewChaptersSummary
 import reikai.data.notification.updateProgressPercent
+import reikai.data.notification.updatingText
 import reikai.data.updateerror.setUpdateErrorContent
 import reikai.data.updateerror.updateErrorPendingIntent
 import reikai.domain.entry.EntryId
@@ -34,6 +35,7 @@ import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.novel.model.asNovelCover
 import reikai.domain.novel.model.withCustomInfo
+import reikai.util.notificationIcon
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
@@ -44,6 +46,7 @@ import mihon.icons.materialsymbols.R as MaterialSymbolsR
  * while favorited novels are checked, then one entry per novel that gained chapters under a summary
  * that opens Updates, as the manga updater's does. Sibling of [reikai.novel.download.NovelDownloadNotifier].
  */
+@Inject
 class NovelUpdateNotifier(
     private val context: Context,
     private val securityPreferences: SecurityPreferences,
@@ -73,8 +76,8 @@ class NovelUpdateNotifier(
         }
     }
 
-    /** Build the progress notification (also used for the worker's `getForegroundInfo`, with no [name]). */
-    fun progress(name: String?, current: Int, total: Int): Notification =
+    /** Build the progress notification (also used for the worker's `getForegroundInfo`, with no [text]). */
+    fun progress(text: String?, current: Int, total: Int): Notification =
         progressBuilder
             .setContentTitle(
                 if (total == 0) {
@@ -86,16 +89,23 @@ class NovelUpdateNotifier(
                     )
                 },
             )
-            .setContentText(name)
+            .setContentText(text)
+            .apply { text?.let { setStyle(NotificationCompat.BigTextStyle().bigText(it)) } }
             .setProgress(total, current, total == 0)
             .build()
 
     private val progressThrottle = UpdateProgressThrottle()
 
-    suspend fun showProgress(novel: Novel, current: Int, total: Int) {
+    suspend fun showProgress(novels: List<Novel>, current: Int, total: Int) {
         if (!progressThrottle.tryPass(isFinal = current >= total)) return
-        val name = listOf(novel).shown().single().title.takeUnless { novel.id in hiddenNovelIds(listOf(novel)) }
-        context.notify(Notifications.ID_NOVEL_LIBRARY_PROGRESS, progress(name, current, total))
+        val text = updatingText(visibleTitles(novels)).takeIf { it.isNotEmpty() }
+        context.notify(Notifications.ID_NOVEL_LIBRARY_PROGRESS, progress(text, current, total))
+    }
+
+    /** What a progress notice may name of [novels], by Edit info title. */
+    suspend fun visibleTitles(novels: List<Novel>): List<String> {
+        val hidden = hiddenNovelIds(novels)
+        return novels.filterNot { it.id in hidden }.shown().map { it.title }
     }
 
     fun dismissProgress() {
@@ -129,7 +139,7 @@ class NovelUpdateNotifier(
                         newChapters.size,
                     ),
                 )
-                setSmallIcon(R.drawable.ic_reikai)
+                setSmallIcon(context.notificationIcon)
                 cover?.let(::setLargeIcon)
                 setGroup(Notifications.GROUP_NOVEL_NEW_CHAPTERS)
                 setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_SUMMARY)
@@ -180,7 +190,7 @@ class NovelUpdateNotifier(
                     hideAll,
                 ),
             )
-            setSmallIcon(R.drawable.ic_reikai)
+            setSmallIcon(context.notificationIcon)
             setGroup(Notifications.GROUP_NOVEL_NEW_CHAPTERS)
             setGroupSummary(true)
             setAutoCancel(true)

@@ -3,6 +3,7 @@ package reikai.presentation.reader
 import android.app.Instrumentation
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
@@ -86,7 +87,7 @@ class TextViewportContractTest(private val renderer: Renderer) {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private lateinit var scenario: ActivityScenario<WebViewHostActivity>
     private lateinit var viewport: TextViewport
-    private val view: View get() = (viewport as ReaderViewport).view
+    private val view: View get() = viewport.view
 
     /** Set by a case that destroys the viewport itself, which the teardown must not do again. */
     private var destroyed = false
@@ -136,7 +137,8 @@ class TextViewportContractTest(private val renderer: Renderer) {
         cutoutTopDp = { cutout },
         onChapterFits = { id, fit -> fits[id] = fit },
         onChapterEndSeen = { endsSeen += it },
-        onReaderScrolled = { scrolls += it },
+        onScrolled = { dy, touching -> if (touching) scrolls += dy },
+        onReaderTurned = {},
         onPageTurned = {},
         onPageShown = { _, _ -> },
     )
@@ -457,6 +459,15 @@ class TextViewportContractTest(private val renderer: Renderer) {
         assertEquals(1, menuToggles.get())
     }
 
+    /** An anchor with no address is only a jump target, not a link, so a tap on its text is the reader's. */
+    @Test
+    fun aTapOnAnAnchorWithNoAddressTogglesTheMenu() {
+        open(chapter(FIRST, "<a name=\"top\">${long("first")}</a>"))
+        tap(view.width / 2f, view.height / 2f)
+        awaitWhile { menuToggles.get() == 0 }
+        assertEquals(1, menuToggles.get())
+    }
+
     /** A tap read in pixels rather than fractions of the screen lands in no zone, which opens the menu, so
      *  only a tap on a zone that moves the column shows both renderers scale it. */
     @Test
@@ -643,6 +654,26 @@ class TextViewportContractTest(private val renderer: Renderer) {
         assertTrue("a volume-down moved $moved of the screen", moved in 0.08f..0.12f)
     }
 
+    /**
+     * The slowest auto-scroll moves under a device pixel a frame, which a page left to round each step
+     * loses on a screen over 60Hz and overshoots at 60Hz. 0.2 is CSS pixels a frame at 60Hz, so 12 a second.
+     */
+    @Test
+    fun theSlowestAutoScrollMovesAtItsSpeed() {
+        open(chapter(FIRST, long("first")))
+        instrumentation.runOnMainSync { (viewport as ReaderViewport).seekTo(ChapterProgress.Percent(2_000)) }
+        awaitScrollStill()
+        val autoScroll = (viewport as ReaderViewport).autoScroll as ViewportAutoScroll.Continuous
+        val before = scrollOffset()
+        instrumentation.runOnMainSync { autoScroll.run(SLOW_AUTO_SCROLL) }
+        Thread.sleep(AUTO_SCROLL_MS)
+        instrumentation.runOnMainSync { autoScroll.run(0f) }
+        val moved = scrollOffset() - before
+        val cssPixels = SLOW_AUTO_SCROLL * 60 * AUTO_SCROLL_MS / 1000f
+        val expected = if (renderer == Renderer.NATIVE) dp(1) * cssPixels else cssPixels
+        assertTrue("moved $moved, expected about $expected", moved in expected * 0.6f..expected * 1.4f)
+    }
+
     /** A drag is the reader scrolling, which the host hides its menu on past a threshold. */
     @Test
     fun aVerticalDragReportsTheReaderScrolling() {
@@ -702,9 +733,14 @@ class TextViewportContractTest(private val renderer: Renderer) {
         val (top, bottom) = checkNotNull(awaitMark())
         highlight(position.copy(paragraph = position.paragraph - 1))
         val (_, previousBottom) = checkNotNull(awaitMark())
+        // The paragraph before may still show part of its last line, which is passed over. Native's last line
+        // carries the paragraph spacing too.
+        val lastLine = readerTestSettings.fontSize * unitsPerCssPx() *
+            (readerTestSettings.lineHeight + readerTestSettings.paragraphSpacing)
         assertTrue(
             "paragraph ${position.paragraph} spans $top..$bottom, the one before ends at $previousBottom",
-            position.paragraph > 0 && bottom > 0 && top < viewportHeight() && previousBottom <= EDGE_SLACK_PX,
+            position.paragraph > 0 && bottom > 0 && top < viewportHeight() &&
+                previousBottom <= lastLine + EDGE_SLACK_PX,
         )
     }
 
@@ -744,6 +780,16 @@ class TextViewportContractTest(private val renderer: Renderer) {
         val (top, bottom) = checkNotNull(awaitMark())
         obscure(top = devicePx((top + bottom) / 2), bottom = 0)
         assertEquals(ReadAloudPosition(FIRST, 2), firstVisibleParagraph())
+    }
+
+    /** Half a last line is nothing to read from, so the paragraph it ends goes to the one below. */
+    @Test
+    fun aParagraphEndingUnderTheCoveredTopIsPassedOver() {
+        open(chapter(FIRST, long("first")), readerTestSettings.copy(ttsKeepInView = false))
+        highlight(ReadAloudPosition(FIRST, 2))
+        val (_, bottom) = checkNotNull(awaitMark())
+        obscure(top = devicePx(bottom - readerTestSettings.fontSize * unitsPerCssPx() / 2), bottom = 0)
+        assertEquals(ReadAloudPosition(FIRST, 3), firstVisibleParagraph())
     }
 
     @Test
@@ -1134,6 +1180,18 @@ class TextViewportContractTest(private val renderer: Renderer) {
         return line
     }
 
+    /** The settled report is the immediate save; without it a scroll's end waits for the debounced one. */
+    @Test
+    fun aScrollTheReaderEndsSendsASettledReport() {
+        open(chapter(FIRST, long("first")))
+        awaitScrollStill()
+        reports.clear()
+        drag(view.width / 2f, view.width / 2f, fromY = view.height * 0.8f, toY = view.height * 0.2f)
+        awaitScrollStill()
+        Thread.sleep(QUIET_MS)
+        assertTrue("reports: ${reports.toList()}", reports.lastOrNull { it.chapterId == FIRST }?.settled == true)
+    }
+
     /** A report from the chapter's top, sent before the landing, would be saved over the position. */
     @Test
     fun aChapterOpenedPartWayNeverReportsItsTop() {
@@ -1223,7 +1281,7 @@ class TextViewportContractTest(private val renderer: Renderer) {
         }
         awaitWhile { !textShown() }
         // At once, since the wait for the pictures runs out after three seconds and takes the veil with it.
-        assertTrue("the saved place landed before the tap", reports.none { it.chapterId == FIRST })
+        requireTapDuringTheWait()
         tapOn(JUMP_LINK)
         settle()
         checkNotNull(server).release()
@@ -1237,6 +1295,20 @@ class TextViewportContractTest(private val renderer: Renderer) {
         open(chapter(FIRST, "<p>A short chapter.</p>", progressPercent = SAVED_PERCENT))
         awaitScrollStill()
         assertEquals(0, reports.lastOrNull { it.chapterId == FIRST }?.percent)
+    }
+
+    /**
+     * That a tap sent now still lands while the saved place waits for its pictures. A WebView may draw
+     * nothing under the opening veil until the wait ends, and a page that has drawn nothing drops touches,
+     * so there the case has no tap to hold and is skipped rather than failed.
+     */
+    private fun requireTapDuringTheWait() {
+        val waiting = reports.none { it.chapterId == FIRST }
+        if (renderer == Renderer.WEB) {
+            assumeTrue("the page drew nothing until the saved place landed", waiting)
+        } else {
+            assertTrue("the saved place landed before the tap", waiting)
+        }
     }
 
     /**
@@ -1298,9 +1370,28 @@ class TextViewportContractTest(private val renderer: Renderer) {
             viewport.load(illustratedChapter(SAVED_PERCENT, held = true), readerTestSettings)
         }
         awaitWhile { !textShown() }
+        requireTapDuringTheWait()
         tap(view.width / 2f, view.height / 2f)
         Thread.sleep(QUIET_MS)
         assertEquals(0, menuToggles.get())
+    }
+
+    /** A Page Down is held the same way: scrolling then dropped the veil and stranded the reader at the top. */
+    @Test
+    fun aKeyWhileASavedPlaceWaitsForItsPicturesIsHeld() {
+        onMain {
+            viewport.load(illustratedChapter(SAVED_PERCENT, held = true), readerTestSettings)
+        }
+        awaitWhile { !textShown() }
+        requireTapDuringTheWait()
+        instrumentation.runOnMainSync {
+            (viewport as ReaderViewport).handleKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_PAGE_DOWN))
+            (viewport as ReaderViewport).handleKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_PAGE_DOWN))
+        }
+        settle()
+        checkNotNull(server).release()
+        awaitIllustratedLanding()
+        assertEquals(SAVED_PERCENT.toFloat(), landedPercent(), LANDING_SLACK_PERCENT)
     }
 
     /** Until its pictures land a long illustrated chapter measures short, and would be read on opening. */
@@ -1365,6 +1456,55 @@ class TextViewportContractTest(private val renderer: Renderer) {
         val after = topLines.lastOrNull { it.first == FIRST }?.second
         assertTrue("no line was reported before the box", before != null)
         assertEquals(before, after)
+    }
+
+    /**
+     * The chunk holding a failed picture tells a screen reader what the box says, which the chunk's own text
+     * cannot: the box is a drawable. The page's box is markup, so a screen reader reads it there anyway.
+     */
+    @Test
+    fun aFailedPictureIsReadOutByItsChunk() {
+        assumeTrue("only the text renderer draws the box", renderer == Renderer.NATIVE)
+        val picture = PngServer(pngOf(SMALL_IMAGE_PX, SMALL_IMAGE_PX), failFirst = Int.MAX_VALUE).also { server = it }
+        open(chapter(FIRST, "<p>$SHORT_PARAGRAPH</p><img src=\"${picture.url}\">"))
+        awaitWhile { imageFailure() == null }
+        var heading = ""
+        var spoken = ""
+        instrumentation.runOnMainSync {
+            val chunk = textViews().first {
+                (it.text as? Spanned)?.getSpans(0, it.text.length, ImageSpan::class.java)?.isNotEmpty() ==
+                    true
+            }
+            val image = (chunk.text as Spanned).let { it.getSpans(0, it.length, ImageSpan::class.java).first() }
+            heading = ((image.drawable as DrawableWrapper).innerDrawable as ImageFailureDrawable).heading
+            spoken = chunk.createAccessibilityNodeInfo().text.toString()
+        }
+        assertTrue("the chunk reads \"$spoken\"", heading in spoken)
+    }
+
+    /**
+     * The chapter before this one failing once the reader has scrolled in puts its box above the text: inside
+     * the chapter's item natively, before the chapters on the page, where scroll anchoring is off. Either way
+     * the line being read stays put.
+     */
+    @Test
+    fun aFailureAppearingAboveTheTextKeepsTheLineTheReaderWasOn() {
+        open(chapter(SECOND, long("second")))
+        scrollBy(REBUILT_SCROLL_DP)
+        Thread.sleep(QUIET_MS)
+        val before = topLines.lastOrNull { it.first == SECOND }?.second
+        instrumentation.runOnMainSync {
+            viewport.window.setBoundaryFailures(
+                NovelReaderViewModel.BoundaryFailure("offline", failedAtElapsedMs = 1L, chapterId = FIRST),
+                null,
+            )
+        }
+        awaitScrollStill()
+        scrollBy(SCROLL_DP)
+        scrollBy(-SCROLL_DP)
+        Thread.sleep(QUIET_MS)
+        val after = topLines.lastOrNull { it.first == SECOND }?.second
+        assertEquals("[$renderer] the failure box pushed the line", true to before, (before != null) to after)
     }
 
     /** Further in, where a landing measured against the placeholders would fall further short. */
@@ -1552,8 +1692,10 @@ class TextViewportContractTest(private val renderer: Renderer) {
         open(chapter(FIRST, "<p>$ABOVE_RULE</p><hr><p>$BELOW_RULE</p>"))
         val from = textBox(ABOVE_RULE).bottom.roundToInt()
         val to = textBox(BELOW_RULE).top.roundToInt()
-        val background = android.graphics.Color.parseColor(readerTestSettings.backgroundColor)
         val shot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        val asked = android.graphics.Color.parseColor(readerTestSettings.backgroundColor)
+        // As drawn, since on a screen that shifts colours every pixel would differ from the asked-for one.
+        val background = checkNotNull(shot.shownColor(asked, from, to)) { "no background between y $from and $to" }
         val row = IntArray(shot.width)
         val drawn = (from until to).any { y ->
             shot.getPixels(row, 0, shot.width, 0, y, shot.width, 1)
@@ -1592,6 +1734,18 @@ class TextViewportContractTest(private val renderer: Renderer) {
         awaitWhile { abs(textBox(NOTE).top - at[1]) > textSizePx() * 3 }
         awaitScrollStill()
         assertEquals(at[1].toFloat(), textBox(NOTE).top, textSizePx() * 3)
+    }
+
+    /** An address is read trimmed, as a browser reads it, so a space before the fragment changes nothing. */
+    @Test
+    fun aLinkToAPlaceWrittenWithALeadingSpaceScrollsWithinItsOwnChapter() {
+        val target = "<p id=\"note\">$NOTE</p>"
+        open(chapter(SECOND, "<p><a href=\" #note\">$JUMP_LINK</a></p>${long("filler")}$target${long("after")}"))
+        prepend(chapter(FIRST, "${long("before")}<p id=\"note\">$OTHER_NOTE</p>"))
+        awaitScrollStill()
+        tapOn(JUMP_LINK)
+        awaitNoteAtTop()
+        assertEquals(viewTop().toFloat(), textBox(NOTE).top, textSizePx() * 3)
     }
 
     /** The chapter's own address plus a fragment is the same jump, which the page left to the browser's. */
@@ -1687,6 +1841,19 @@ class TextViewportContractTest(private val renderer: Renderer) {
         settle()
         awaitScrollStill()
         assertEquals(link.top, textBox(JUMP_LINK).top, textSizePx())
+    }
+
+    /** Selectable text takes focus on a tap, and a list scrolls a focused child's top into view. */
+    @Test
+    fun aTapOnSelectableTextLeavesTheTextWhereItWas() {
+        useSelectableText()
+        open(chapter(FIRST, long("filler")))
+        scrollBy(SCROLL_DP)
+        val before = scrollOffset()
+        tap(view.width / 2f, view.height / 2f)
+        settle()
+        awaitScrollStill()
+        assertEquals(before, scrollOffset(), textSizePx())
     }
 
     /** A touch that had a second finger is no tap, wherever its last finger lifts; a browser fires no click either. */
@@ -2611,6 +2778,11 @@ class TextViewportContractTest(private val renderer: Renderer) {
     }
 
     /** [value] in the renderer's own pixels as the device pixels the host measures the chrome in. */
+    private fun unitsPerCssPx(): Float = when (renderer) {
+        Renderer.NATIVE -> instrumentation.targetContext.resources.displayMetrics.density
+        Renderer.WEB -> 1f
+    }
+
     private fun devicePx(value: Float): Int = when (renderer) {
         Renderer.NATIVE -> value.roundToInt()
         Renderer.WEB -> (value * instrumentation.targetContext.resources.displayMetrics.density).roundToInt()
@@ -2769,12 +2941,15 @@ class TextViewportContractTest(private val renderer: Renderer) {
     }
 
     private fun paintedOrNull(): Painted? {
-        val color = spacedSettings.ttsHighlightColor
         val shot = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
         val at = IntArray(2)
         instrumentation.runOnMainSync { view.getLocationOnScreen(at) }
         val bottom = minOf(shot.height, at[1] + view.height)
         val right = minOf(shot.width, at[0] + view.width)
+        val color = shot.shownColor(spacedSettings.ttsHighlightColor, at[1], bottom) ?: run {
+            shot.recycle()
+            return null
+        }
         val row = IntArray(shot.width)
         val rows = mutableListOf<Int>()
         var left = Int.MAX_VALUE
@@ -2789,6 +2964,26 @@ class TextViewportContractTest(private val renderer: Renderer) {
         }
         shot.recycle()
         return if (rows.isEmpty()) null else Painted(rows, left, furthest)
+    }
+
+    /**
+     * The colour [expected] shows as on this screen, read from rows [top] until [bottom]. A device can
+     * shift everything it draws (a display mode, a warmth filter), so the asked-for value may appear
+     * nowhere. The most common pixel close to it is the fill, and matching stays exact against that, so
+     * glyphs and blended edges are still left out. Null when nothing on screen comes close.
+     */
+    private fun Bitmap.shownColor(expected: Int, top: Int, bottom: Int): Int? {
+        val counts = HashMap<Int, Int>()
+        val row = IntArray(width)
+        for (y in maxOf(0, top) until minOf(height, bottom)) {
+            getPixels(row, 0, width, 0, y, width, 1)
+            row.forEach { if (it.isNear(expected)) counts.merge(it, 1, Int::plus) }
+        }
+        return counts.maxByOrNull { it.value }?.takeIf { it.value >= PAINTED_ROW_MIN_PIXELS }?.key
+    }
+
+    private fun Int.isNear(other: Int): Boolean = listOf(16, 8, 0).all { shift ->
+        abs((this shr shift and 0xFF) - (other shr shift and 0xFF)) <= SHOWN_COLOR_TOLERANCE
     }
 
     /** Each line of the paragraph reading [text], as the box its glyphs fill, in screen pixels. */
@@ -3299,6 +3494,8 @@ class TextViewportContractTest(private val renderer: Renderer) {
         const val COVERED_UNITS = 120f
         const val STILL_SAMPLES = 3
         const val STILL_SAMPLE_MS = 150L
+        const val SLOW_AUTO_SCROLL = 0.2f
+        const val AUTO_SCROLL_MS = 4_000L
         const val LARGER_FONT = 24
 
         /** Past what a line's first character and its line box differ by, far short of one line. */
@@ -3402,6 +3599,9 @@ class TextViewportContractTest(private val renderer: Renderer) {
 
         /** A glyph's gaps leave at least this many pixels of the colour in any row the mark covers. */
         const val PAINTED_ROW_MIN_PIXELS = 3
+
+        /** Per channel, wide enough for a display's colour shift (26 in red was measured on a phone). */
+        const val SHOWN_COLOR_TOLERANCE = 40
 
         /** Every kind of line a chapter can hold that read-aloud has to count the same in both renderers. */
         const val MIXED = "<h2>Heading</h2><p>First para.</p><p>Line a<br>Line b</p>" +

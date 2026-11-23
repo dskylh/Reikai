@@ -88,21 +88,6 @@ fun HeadingItem(text: String) {
 }
 
 @Composable
-fun IconItem(label: String, icon: ImageVector, onClick: () -> Unit) {
-    BaseSettingsItem(
-        label = label,
-        widget = {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-            )
-        },
-        onClick = onClick,
-    )
-}
-
-@Composable
 fun SortItem(label: String, sortDescending: Boolean?, onClick: () -> Unit) {
     val arrowIcon = when (sortDescending) {
         true -> MaterialSymbols.Rounded.ArrowDownward
@@ -214,6 +199,7 @@ fun BaseSliderItem(
     titleStyle: TextStyle = MaterialTheme.typography.titleLarge,
     subtitleStyle: TextStyle = MaterialTheme.typography.bodySmall,
     pillColor: Color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    onChangeFinished: (() -> Unit)? = null, // RK: a drag or tap is over
 ) {
     val haptic = LocalHapticFeedback.current
     Column(
@@ -254,6 +240,7 @@ fun BaseSliderItem(
             },
             valueRange = valueRange,
             steps = steps,
+            onValueChangeFinished = onChangeFinished, // RK
             // RK: keep slider drags off the OS edge back-gesture and off the tab pager while dragging.
             modifier = Modifier.systemGestureExclusion().lockPagerSwipeWhileDragging(),
         )

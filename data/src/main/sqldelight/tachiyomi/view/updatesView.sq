@@ -26,6 +26,8 @@ ON manga.id = excluded_scanlator.manga_id
 AND chapter.remote_scanlator = excluded_scanlator.scanlator
 WHERE user_favorite_at IS NOT NULL
 AND state_date_fetch > user_favorite_at
+-- RK: a series hidden from the library is left out of Updates too
+AND NOT EXISTS (SELECT 1 FROM library_hidden_manga WHERE library_hidden_manga.manga_id = manga.id)
 ORDER BY state_date_fetch DESC;
 
 getRecentUpdatesWithFilters:
@@ -44,6 +46,8 @@ AND (
 )
 AND (:bookmarked IS NULL OR bookmark = :bookmarked)
 AND (excludedScanlator IS NULL OR :hideExcludedScanlators = 0)
+-- RK: with series merging on, a merged series with any hidden member is left out, as the library leaves it out
+AND (:seriesMerging = 0 OR mangaId NOT IN (SELECT manga_id FROM mergeHiddenManga))
 AND (
     -- includedEmpty being true expresses "don't care" state and bypasses the membership filter
     :includedEmpty
@@ -82,6 +86,8 @@ SELECT
 FROM updatesView
 WHERE read = 1
 AND dateUpload > :after
+-- RK: with series merging on, a merged series with any hidden member is left out, as the library leaves it out
+AND (:seriesMerging = 0 OR mangaId NOT IN (SELECT manga_id FROM mergeHiddenManga))
 ORDER BY dateFetch DESC
 LIMIT :limit;
 
@@ -93,5 +99,7 @@ SELECT
 FROM updatesView
 WHERE read = 0
 AND dateUpload > :after
+-- RK: with series merging on, a merged series with any hidden member is left out, as the library leaves it out
+AND (:seriesMerging = 0 OR mangaId NOT IN (SELECT manga_id FROM mergeHiddenManga))
 ORDER BY dateFetch DESC
 LIMIT :limit;

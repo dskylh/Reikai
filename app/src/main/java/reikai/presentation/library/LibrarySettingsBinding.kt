@@ -4,6 +4,7 @@ import dev.icerock.moko.resources.StringResource
 import eu.kanade.tachiyomi.util.system.isReleaseBuildType
 import kotlinx.coroutines.flow.StateFlow
 import reikai.domain.library.ReikaiLibraryPreferences
+import reikai.domain.library.tagFilterFlow
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.TriState
 import tachiyomi.domain.category.model.Category
@@ -35,6 +36,7 @@ fun libraryFilterAxes(
     updateRestrictions: Set<String>,
 ) = buildList {
     add(LibraryFilterAxis(MR.strings.label_downloaded, libraryPreferences.filterDownloaded, true))
+    add(LibraryFilterAxis(MR.strings.label_local, reikaiLibraryPreferences.filterLocal))
     add(LibraryFilterAxis(MR.strings.action_filter_unread, libraryPreferences.filterUnread))
     add(LibraryFilterAxis(MR.strings.label_started, libraryPreferences.filterStarted))
     add(LibraryFilterAxis(MR.strings.action_filter_bookmarked, libraryPreferences.filterBookmarked))
@@ -56,6 +58,17 @@ data class LibraryCategoryFilter(
 )
 
 /**
+ * The tag filter as the sheet edits it: the stored [state], and [seriesTags], every series of the view's
+ * content types with its tags, before any filter, so the picker offers and counts tags the filter hides.
+ */
+class LibraryTagFilter(
+    val preferences: ReikaiLibraryPreferences,
+    val seriesTags: () -> List<List<String>>,
+) {
+    val state = preferences.tagFilterFlow()
+}
+
+/**
  * What a settings sheet needs from one content type, the part that genuinely differs per view. A
  * provider omits a filter axis it lacks rather than the sheet branching on content type. [filterAxes]
  * is a flow because manga's interval-custom row comes and goes with a preference, and [categories]
@@ -64,8 +77,6 @@ data class LibraryCategoryFilter(
 data class LibraryProviderSettings(
     val filterAxes: StateFlow<List<LibraryFilterAxis>>,
     val categories: StateFlow<List<Category>>,
-    /** Whether the Display tab offers the Local badge. Only manga has a local-source concept. */
-    val showLocalBadge: Boolean,
 )
 
 /**
@@ -77,10 +88,12 @@ data class LibrarySettingsBinding(
     val filterAxes: StateFlow<List<LibraryFilterAxis>>,
     val trackerFilter: (trackerId: Int) -> Preference<TriState>,
     val categoryFilter: LibraryCategoryFilter,
+    val tagFilter: LibraryTagFilter,
     val categories: StateFlow<List<Category>>,
     val groupMode: Preference<Int>,
     val globalSort: StateFlow<LibrarySort>,
     val setSort: (categoryId: Long?, type: LibrarySort.Type, direction: LibrarySort.Direction) -> Unit,
     val resetSort: (categoryId: Long) -> Unit,
-    val showLocalBadge: Boolean,
+    /** Drops a stored Manual order: one category's from its own menu, every Manual one's from the global (null). */
+    val resetManualOrder: (categoryId: Long?) -> Unit,
 )

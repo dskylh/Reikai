@@ -40,6 +40,9 @@ fun LibraryToolbar(
     onClickRefreshTrackers: () -> Unit,
     // RK: opt-in "Update errors" overflow entry (null = hidden)
     onClickUpdateErrors: (() -> Unit)? = null,
+    onClickHiddenEntries: () -> Unit, // RK: the series hidden from the library view
+    onClickStats: (() -> Unit)?, // RK: a shortcut to Statistics (null = hidden)
+    onClickImport: () -> Unit, // RK: copy files into the local sources
     searchQuery: String?,
     onSearchQueryChange: (String?) -> Unit,
     scrollBehavior: TopAppBarScrollBehavior?,
@@ -62,6 +65,9 @@ fun LibraryToolbar(
         // RK: tracker refresh and the opt-in update-errors entry
         onClickRefreshTrackers = onClickRefreshTrackers,
         onClickUpdateErrors = onClickUpdateErrors,
+        onClickHiddenEntries = onClickHiddenEntries, // RK
+        onClickStats = onClickStats, // RK
+        onClickImport = onClickImport, // RK
         scrollBehavior = scrollBehavior,
     )
 }
@@ -79,6 +85,9 @@ private fun LibraryRegularToolbar(
     // RK: tracker refresh and the opt-in update-errors entry
     onClickRefreshTrackers: () -> Unit,
     onClickUpdateErrors: (() -> Unit)? = null,
+    onClickHiddenEntries: () -> Unit, // RK
+    onClickStats: (() -> Unit)?, // RK
+    onClickImport: () -> Unit, // RK
     scrollBehavior: TopAppBarScrollBehavior?,
 ) {
     val pillAlpha = if (isSystemInDarkTheme()) 0.12f else 0.08f
@@ -105,7 +114,7 @@ private fun LibraryRegularToolbar(
         actions = {
             val filterTint = if (hasFilters) MaterialTheme.colorScheme.active else LocalContentColor.current
             AppBarActions(
-                // RK: listOfNotNull, since the update-errors entry is null when hidden
+                // RK: listOfNotNull, since the update-errors and Statistics entries are null when hidden
                 listOfNotNull(
                     AppBar.Action(
                         title = stringResource(MR.strings.action_filter),
@@ -136,6 +145,20 @@ private fun LibraryRegularToolbar(
                             title = stringResource(MR.strings.label_update_errors),
                             onClick = it,
                         )
+                    },
+                    // RK: the series hidden from the library view, where they are shown again
+                    AppBar.OverflowAction(
+                        title = stringResource(MR.strings.label_hidden_entries),
+                        onClick = onClickHiddenEntries,
+                    ),
+                    // RK: files picked or shared, copied into the local sources
+                    AppBar.OverflowAction(
+                        title = stringResource(MR.strings.local_import_title),
+                        onClick = onClickImport,
+                    ),
+                    // RK: an opt-in shortcut to Statistics, which otherwise sits under More
+                    onClickStats?.let {
+                        AppBar.OverflowAction(title = stringResource(MR.strings.label_stats), onClick = it)
                     },
                 ),
             )

@@ -1,5 +1,6 @@
 package reikai.presentation.browse.catalogue
 
+import androidx.lifecycle.viewModelScope
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -27,7 +28,6 @@ import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.presentation.browse.BulkFavoriteViewModel
 import reikai.presentation.browse.EntryBulkFavoriteViewModel
-import reikai.presentation.migrate.flow.MigrationPickHandoff
 import reikai.presentation.novel.browse.NovelBrowseViewModel
 import reikai.presentation.novel.browse.NovelBulkFavoriteViewModel
 import reikai.presentation.recents.EmittingPreferenceStore
@@ -61,11 +61,12 @@ class BrowseColumnsConformanceTest {
     fun `a column count changed while the catalogue is open reaches its grid`(probe: ColumnsProbe) = runTest {
         val store = EmittingPreferenceStore()
         val behavior = probe.open(store)
-        behavior.columnsWhen { true }
+        val before = behavior.columnsWhen { true }
 
         LibraryPreferences(store).portraitColumns.set(4)
 
-        behavior.columnsWhen { it.portrait == 4 }.portrait shouldBe 4
+        // Waits for any change, so a change that lands wrong fails here rather than hanging.
+        behavior.columnsWhen { it != before } shouldBe before.copy(portrait = 4)
     }
 
     private suspend fun EntryBrowseBehavior.columnsWhen(predicate: (BrowseColumns) -> Boolean): BrowseColumns =
@@ -112,7 +113,7 @@ private class MangaColumnsProbe : ColumnsProbe {
         val bulk = mockk<BulkFavoriteViewModel> {
             every { state } returns MutableStateFlow(EntryBulkFavoriteViewModel.State())
         }
-        return MangaBrowseAdapter(model, bulk)
+        return MangaBrowseAdapter(model, bulk, model.viewModelScope)
     }
 }
 
@@ -136,7 +137,6 @@ private class NovelColumnsProbe : ColumnsProbe {
                 every { getFavoritedKeysAsFlow() } returns flowOf(FavoritedNovels.None)
             },
             libraryAdder = mockk(relaxed = true),
-            pickHandoff = MigrationPickHandoff(),
             reikaiSourcePreferences = ReikaiSourcePreferences(store),
             sourcePreferences = SourcePreferences(store),
             getIncognitoState = mockk(relaxed = true),
@@ -145,6 +145,6 @@ private class NovelColumnsProbe : ColumnsProbe {
         val bulk = mockk<NovelBulkFavoriteViewModel> {
             every { state } returns MutableStateFlow(EntryBulkFavoriteViewModel.State())
         }
-        return NovelBrowseAdapter(model, bulk, "src")
+        return NovelBrowseAdapter(model, bulk, "src", model.viewModelScope)
     }
 }

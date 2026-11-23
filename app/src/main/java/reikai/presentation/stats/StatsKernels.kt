@@ -9,9 +9,9 @@ import kotlinx.datetime.plus
 import kotlinx.datetime.toLocalDateTime
 import reikai.domain.category.orUncategorized
 import reikai.domain.entry.EntryId
+import reikai.domain.library.tagKey
 import reikai.domain.readinglog.EntryReadingSession
 import reikai.domain.recommendation.taste.TrackStatus
-import java.io.Serializable
 import kotlin.math.roundToInt
 import kotlin.time.Instant
 
@@ -97,22 +97,41 @@ enum class StatsDimension { STATUS, SCORE, LENGTH, TRACKER, SOURCE, CATEGORY, TA
 
 /**
  * One details row's identity; a null value is the "none" row (unscored, untracked, unknown). Serializable
- * because the row's series list is a screen that takes one.
+ * because the route of the row's series list carries one.
  */
-sealed interface StatsGroupKey : Serializable {
+@kotlinx.serialization.Serializable
+sealed interface StatsGroupKey {
+    @kotlinx.serialization.Serializable
     data class Status(val code: Long) : StatsGroupKey
+
+    @kotlinx.serialization.Serializable
     data class Score(val bar: Int?) : StatsGroupKey
 
     // Two ends rather than a LongRange, which cannot be saved with a screen.
+    @kotlinx.serialization.Serializable
     data class Length(val first: Long, val last: Long) : StatsGroupKey {
         val chapters: LongRange get() = first..last
     }
+
+    @kotlinx.serialization.Serializable
     data class Tracker(val trackerId: Long?) : StatsGroupKey
+
+    @kotlinx.serialization.Serializable
     data class Source(val key: String, val name: String) : StatsGroupKey
+
+    @kotlinx.serialization.Serializable
     data class Category(val id: Long) : StatsGroupKey
+
+    @kotlinx.serialization.Serializable
     data class Tag(val name: String) : StatsGroupKey
+
+    @kotlinx.serialization.Serializable
     data class Language(val code: String) : StatsGroupKey
+
+    @kotlinx.serialization.Serializable
     data class StartYear(val year: Int?) : StatsGroupKey
+
+    @kotlinx.serialization.Serializable
     data class TrackingStatus(val status: TrackStatus) : StatsGroupKey
 }
 
@@ -184,12 +203,12 @@ private fun List<StatsTitle>.titlesByGroup(
     dimension: StatsDimension,
     timeZone: TimeZone,
 ): Map<StatsGroupKey, List<StatsTitle>> {
-    // Tags differ in case from source to source; library search matches them ignoring it, so rows do too.
-    val tagSpelling = flatMap { it.genres }.map { it.trim() }.reversed().associateBy { it.lowercase() }
+    // Two series can spell one tag apart, as two sources of one series can; the row takes the first spelling.
+    val tagSpelling = flatMap { it.genres }.reversed().associateBy(::tagKey)
     return flatMap { title ->
         title.groupKeys(dimension, timeZone)
             .map { key ->
-                if (key is StatsGroupKey.Tag) StatsGroupKey.Tag(tagSpelling.getValue(key.name.lowercase())) else key
+                if (key is StatsGroupKey.Tag) StatsGroupKey.Tag(tagSpelling.getValue(tagKey(key.name))) else key
             }
             .distinct()
             .map { it to title }
@@ -208,7 +227,7 @@ private fun StatsTitle.groupKeys(dimension: StatsDimension, timeZone: TimeZone):
         StatsDimension.SOURCE -> sources.map { StatsGroupKey.Source(it.key, it.name) }
         // An entry filed nowhere sits in the Default category, id 0.
         StatsDimension.CATEGORY -> categoryIds.orUncategorized().distinct().map { StatsGroupKey.Category(it) }
-        StatsDimension.TAG -> genres.map { StatsGroupKey.Tag(it.trim()) }
+        StatsDimension.TAG -> genres.map { StatsGroupKey.Tag(it) }
         StatsDimension.LANGUAGE -> sources.map { StatsGroupKey.Language(it.language) }.distinct()
         StatsDimension.START_YEAR -> listOf(StatsGroupKey.StartYear(startedAt?.toLocalDateTime(timeZone)?.year))
         // An untracked series has no tracking status, so it sits in no row, as the chart leaves it out.

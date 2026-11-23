@@ -21,12 +21,14 @@ import reikai.domain.novel.LnSourceIdentity
 import reikai.domain.novel.NovelPreferences
 import reikai.novel.host.LnPluginHost
 import reikai.novel.host.LnPluginLoader
+import reikai.novel.host.loggableUrl
 import reikai.novel.registry.LnRegistry
 import reikai.novel.registry.LnRegistryEntry
 import reikai.novel.registry.LnRegistryFetcher
 import reikai.novel.registry.LnRepoResult
 import reikai.novel.registry.byPluginUrl
 import reikai.novel.registry.fetchEach
+import reikai.novel.registry.listedPlugins
 import reikai.novel.registry.pluginRepos
 import reikai.novel.source.LnPluginSource
 import reikai.novel.source.NovelChapterStylesheet
@@ -75,8 +77,15 @@ class LnPluginInstaller(
 
     // Canonical URLs already loaded + registered this process. ensureLoaded retries only the installed
     // URLs NOT in here, so a plugin whose load failed once (a missing script's download hitting a
-    // network blip or Cloudflare) heals on the next novel-screen open instead of needing a cold restart.
+    // network blip or Cloudflare) heals on a later novel-screen open instead of needing a cold restart.
     private val loadedUrls: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    // When each failed URL last failed. Every novel screen waits on the pass, so a plugin that keeps failing
+    // is retried at most once per RETRY_FAILED_AFTER_MS rather than on every open; loadInstalled and retryLoad ignore it.
+    private val failedAt = ConcurrentHashMap<String, Long>()
+
+    // The clock the retry wait reads; a test sets it.
+    internal var now: () -> Long = System::currentTimeMillis
 
     /**
      * Installed plugins whose last load failed, by canonical URL. Kept until a load or install of that
@@ -86,11 +95,11 @@ class LnPluginInstaller(
         field = MutableStateFlow<Map<String, LnPluginLoadFailure>>(emptyMap())
 
     /** Whether a load pass has run this process, whatever it loaded; see [awaitFirstLoad]. */
-    @Volatile
-    private var firstLoadDone = false
+    val firstLoadDone: StateFlow<Boolean>
+        field = MutableStateFlow(false)
 
     /** Load any installed plugins not yet registered this process, in parallel. Retries previously
-     *  failed ones on each call, so navigating to a novel screen self-heals a transient load failure. */
+     *  failed ones once their wait is up, so a novel screen opened later self-heals a transient failure. */
     suspend fun ensureLoaded() {
         loadMutex.withLock { loadPendingLocked() }
     }
@@ -101,14 +110,25 @@ class LnPluginInstaller(
      * loaded again per novel or per chapter; [ensureLoaded] at a screen or run start does the retrying.
      */
     suspend fun awaitFirstLoad() {
-        if (firstLoadDone) return
-        loadMutex.withLock { if (!firstLoadDone) loadPendingLocked() }
+        if (firstLoadDone.value) return
+        loadMutex.withLock { if (!firstLoadDone.value) loadPendingLocked() }
+    }
+
+    /**
+     * A Retry the user pressed on [pluginId]'s failed load: reads that plugin's URLs now, past the wait an
+     * automatic pass keeps, and leaves every other plugin to [ensureLoaded].
+     */
+    suspend fun retryLoad(pluginId: String) {
+        loadMutex.withLock { loadUrlsLocked(urlsOf(pluginId) - loadedUrls) }
     }
 
     // Not marked done when cancelled, so a screen closed mid-load leaves the next lookup to load.
     private suspend fun loadPendingLocked() {
-        loadUrlsLocked(prefs.installedPluginUrls().get() - loadedUrls)
-        firstLoadDone = true
+        val at = now()
+        val due = (prefs.installedPluginUrls().get() - loadedUrls)
+            .filterTo(mutableSetOf()) { url -> failedAt[url]?.let { at - it >= RETRY_FAILED_AFTER_MS } ?: true }
+        loadUrlsLocked(due)
+        firstLoadDone.value = true
     }
 
     suspend fun installFromUrl(
@@ -121,7 +141,12 @@ class LnPluginInstaller(
 
     private suspend fun installLocked(canonical: String, metadata: LnInstalledPluginMetadata?): LnPluginSource {
         val src = loader.download(canonical)
-        val info = host.loadPlugin(scopeIdFromUrl(canonical), src, metadata?.iconUrl, metadata?.lang)
+        // A new script reads its plugin's storage while it is read only when it is an update of the plugin
+        // already installed from this URL; a script declaring anyone else's id reads none.
+        val installedAs = prefs.installedPluginMetadata().get()[canonical]?.pluginId
+        val info = host.inspectPlugin(src, metadata?.iconUrl, metadata?.lang, trustedId = installedAs)
+        // Before storing, so a plugin claiming a built-in's id is refused without leaving a script behind.
+        manager.requireRegistrable(info.id)
         // Stored only once it loads, so a broken new version leaves the installed one in place.
         loader.store(canonical, src)
         val source = LnPluginSource(host, info, refreshStylesheet(canonical, metadata?.customCssUrl))
@@ -133,6 +158,9 @@ class LnPluginInstaller(
         val staleUrls = registryMutex.withLock {
             val currentMetadata = prefs.installedPluginMetadata().get()
             val stale = currentMetadata.filterValues { it.pluginId == info.id }.keys - canonical
+            // The sign-in the old script captured is not this script's; dropped before the script can run.
+            if (stale.isNotEmpty()) host.forgetWebStorage(info.id)
+            host.retainPlugin(info.id, src)
             val record = (metadata ?: LnInstalledPluginMetadata(pluginId = info.id))
                 .copy(
                     pluginId = info.id,
@@ -149,8 +177,6 @@ class LnPluginInstaller(
         }
         rememberSeenSources(listOf(source))
         staleUrls.forEach { loader.delete(it) }
-        // A script from another URL now holds this id, so the site sign-in the old one captured is not its.
-        if (staleUrls.isNotEmpty()) host.forgetWebStorage(info.id)
 
         logcat(LogPriority.INFO) { "installed plugin ${info.id} from $canonical" }
         return source
@@ -170,18 +196,17 @@ class LnPluginInstaller(
 
     /**
      * Load [urls] into the app-scoped host in parallel and register the successes, each from its stored
-     * script. The reads overlap; the JS engine eval serializes safely behind the host's own mutex. Successful URLs are recorded in [loadedUrls]; failures go to [failures] and are left
+     * script. The reads overlap, each script in an engine of its own, as many at once as the host allows. Successful URLs are recorded in [loadedUrls]; failures go to [failures] and are left
      * out so a later [ensureLoaded] retries them. Caller must hold [loadMutex]. Lazily backfills missing
      * iconUrl/lang for legacy installs.
      */
-    private suspend fun loadUrlsLocked(urls: Set<String>): List<LnPluginSource> {
-        if (urls.isEmpty()) return emptyList()
+    private suspend fun loadUrlsLocked(urls: Set<String>) {
+        if (urls.isEmpty()) return
         val metadata = backfillMetadata(urls)
         val loaded = coroutineScope {
             urls.map { url -> async { withUrlLocks(listOf(url)) { loadUrl(url, metadata[url]) } } }.awaitAll()
         }.filterNotNull()
         rememberSeenSources(loaded)
-        return loaded
     }
 
     /**
@@ -195,7 +220,9 @@ class LnPluginInstaller(
         val loaded = runCatchingCancellable {
             val stored = loader.installed(url)
             val src = stored ?: downloadMissingScript(url, metadata)
-            val info = host.loadPlugin(scopeIdFromUrl(url), src, metadata?.iconUrl, metadata?.lang, metadata?.pluginId)
+            val info = host.inspectPlugin(src, metadata?.iconUrl, metadata?.lang, expectedId = metadata?.pluginId)
+            // Recorded as this plugin's load failure rather than thrown from the register below.
+            manager.requireRegistrable(info.id)
             if (stored == null) loader.store(url, src)
             // A missing script means the stylesheet went with it, so it is fetched again with it.
             val stylesheet = if (stored == null) {
@@ -203,16 +230,23 @@ class LnPluginInstaller(
             } else {
                 loader.installedStylesheet(url)?.let(::NovelChapterStylesheet)
             }
-            LnPluginSource(host, info, stylesheet)
-        }.onFailure { logcat(LogPriority.ERROR, it) { "loadInstalled: failed for $url" } }
+            LnPluginSource(host, info, stylesheet) to src
+        }.onFailure { logcat(LogPriority.ERROR, it) { "loadInstalled: failed for ${loggableUrl(url)}" } }
         return registryMutex.withLock {
             if (url !in prefs.installedPluginUrls().get()) return@withLock null
-            loaded.onSuccess { source ->
+            loaded.map { (source, src) ->
+                // Here and not at the read, so a pass for a URL an install replaced meanwhile never
+                // puts the old script back in the host.
+                host.retainPlugin(source.id, src)
+                source
+            }.onSuccess { source ->
                 manager.register(source)
                 loadedUrls += url
+                failedAt -= url
                 failures.update { it - url }
                 recordLoadedVersion(url, source)
             }.onFailure { error ->
+                failedAt[url] = now()
                 val seen = prefs.seenNovelSources().get()[metadata?.pluginId]
                 failures.update { it + (url to LnPluginLoadFailure.of(url, error, metadata, seen)) }
             }.getOrNull()
@@ -261,7 +295,8 @@ class LnPluginInstaller(
             ?: throw LnPluginScriptMissingException(url, IllegalStateException("no installed version recorded"))
         return runCatchingCancellable {
             val script = loader.download(url)
-            val served = host.inspectPlugin(scopeIdFromUrl(url), script, expectedId = metadata.pluginId).version
+            // No trusted id: the version check below may yet reject this script, so it reads no storage.
+            val served = host.inspectPlugin(script, expectedId = metadata.pluginId, trustedId = null).version
             check(served == recorded) { "the repo now serves version $served, installed $recorded" }
             script
         }.getOrElse { throw LnPluginScriptMissingException(url, it) }
@@ -330,7 +365,7 @@ class LnPluginInstaller(
         if (needs.isEmpty()) return current
         val repos = prefs.addedRepoUrls().get()
         if (repos.isEmpty()) return current
-        val entries = fetchEach(repos).values.flatMap { (it as? LnRepoResult.Reached)?.entries.orEmpty() }
+        val entries = fetchEach(repos).listedPlugins()
         if (entries.isEmpty()) return current
         val updated = current.toMutableMap()
         needs.forEach { pluginUrl ->
@@ -342,10 +377,12 @@ class LnPluginInstaller(
         }
         if (updated == current) return current
         // Re-read under the lock rather than writing the snapshot taken before the repo fetch above:
-        // an install can land during it, and only the backfilled keys belong to this pass.
+        // an install can land during it, and only the backfilled keys belong to this pass. A URL an
+        // uninstall or a replacing install removed meanwhile is not written back.
         return registryMutex.withLock {
             val latest = prefs.installedPluginMetadata().get()
-            val merged = latest + needs.mapNotNull { url -> updated[url]?.let { url to it } }
+            val installed = prefs.installedPluginUrls().get()
+            val merged = latest + needs.filter { it in installed }.mapNotNull { url -> updated[url]?.let { url to it } }
             if (merged != latest) prefs.installedPluginMetadata().set(merged)
             merged
         }
@@ -393,14 +430,6 @@ class LnPluginInstaller(
             LnRegistry.parse(res.body.string())
         }
     }
-
-    /**
-     * A per-URL id the host loads a plugin under before it knows the plugin's own. Storage is scoped by
-     * the plugin's own id, which `headless.js` discovers on a first pass; this one scopes it only when
-     * that discovery throws.
-     */
-    private fun scopeIdFromUrl(url: String): String =
-        url.substringAfterLast('/').substringBeforeLast('.')
 }
 
 /**
@@ -412,3 +441,6 @@ class LnPluginInstaller(
  */
 fun canonicalizePluginUrl(url: String): String =
     url.replace("[", "%5B").replace("]", "%5D")
+
+/** How long a failed plugin waits before an on-open pass loads it again. */
+private const val RETRY_FAILED_AFTER_MS = 60_000L

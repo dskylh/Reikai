@@ -5,6 +5,8 @@ import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.ui.library.LibraryItem
 import reikai.domain.entry.EntryId
 import reikai.domain.library.CategorySortOrder
+import reikai.domain.library.TagAliases
+import reikai.domain.library.tagKey
 import reikai.presentation.components.entryStatusRes
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.track.model.Track
@@ -87,8 +89,6 @@ suspend fun libraryDynamicGroupingFeed(
 
 private const val LANG_SPLITTER = "⨼⨦⨠"
 
-private val SEPARATOR_RUN = Regex("[-_\\s]+")
-
 /**
  * Normalized form of a dynamic bucket's key, matching the spelling-merge rule below (case-folded,
  * separator runs unified). This is what [LibraryBucket.Dynamic.key] holds and what is persisted in
@@ -98,7 +98,7 @@ private val SEPARATOR_RUN = Regex("[-_\\s]+")
  */
 fun normalizeDynamicKey(name: String): String =
     (if (LANG_SPLITTER in name) name.substringBefore(LANG_SPLITTER) + LANG_SPLITTER else name)
-        .lowercase().replace(SEPARATOR_RUN, " ").trim()
+        .let(::tagKey)
 
 /** Stored collapse keys in bucket-key form, so a key persisted before normalization still matches. */
 fun Set<String>.normalizedDynamicKeys(): Set<String> = mapTo(HashSet(), ::normalizeDynamicKey)
@@ -140,6 +140,7 @@ object LibraryDynamicGrouping {
         statusNames: Map<EntryId, String> = emptyMap(),
         languageDisplay: (langCode: String) -> String = { it },
         trackingStatusOrder: (statusName: String) -> String = { it },
+        tagAliases: TagAliases = TagAliases.NONE,
     ): Map<LibraryBucket.Dynamic, List<EntryId>> {
         if (items.isEmpty()) return emptyMap()
 
@@ -174,6 +175,7 @@ object LibraryDynamicGrouping {
                 languageCodes = languageCodes,
                 statusNames = statusNames,
                 languageDisplay = languageDisplay,
+                tagAliases = tagAliases,
             )
             for (name in names.distinctBy(::normalizeDynamicKey)) {
                 val key = normalizeDynamicKey(name)
@@ -225,11 +227,13 @@ object LibraryDynamicGrouping {
         languageCodes: Map<EntryId, List<String>>,
         statusNames: Map<EntryId, String>,
         languageDisplay: (langCode: String) -> String,
+        tagAliases: TagAliases,
     ): List<String> {
         val itemId = item.id
         return when (groupType) {
             LibraryGroup.BY_TAG -> {
-                val tags = item.genre.orEmpty().mapNotNull { it.trim().capitalizeWords().ifBlank { null } }
+                val tags = tagAliases.resolveAll(item.genre.orEmpty())
+                    .mapNotNull { it.trim().capitalizeWords().ifBlank { null } }
                 tags.ifEmpty { listOf(unknownLabel) }
             }
             LibraryGroup.BY_SOURCE -> sourceMeta[itemId].orEmpty()

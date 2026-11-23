@@ -13,7 +13,7 @@ Link supported tracking services in <nav to="tracking">.
 
 ## Services
 
-**Reikai** currently supports tracking with [MyAnimeList](https://myanimelist.net/), [AniList](https://anilist.co/), [Kitsu](https://kitsu.app/), [MangaUpdates](https://www.mangaupdates.com/), [Shikimori](https://shikimori.one/), [MangaBaka](https://mangabaka.org/), [Hikka](https://hikka.io/), [Bangumi](https://bangumi.tv/) and the Comick tracker, plus three services built for light novels: [RanobeDB](https://ranobedb.org/), [NovelList](https://www.novellist.co/) and [NovelUpdates](https://www.novelupdates.com/). Signing in to MangaDex adds its own **MDList** tracker.
+**Reikai** currently supports tracking with [MyAnimeList](https://myanimelist.net/), [AniList](https://anilist.co/), [Kitsu](https://kitsu.app/), [MangaUpdates](https://www.mangaupdates.com/), [Shikimori](https://shikimori.one/), [MangaBaka](https://mangabaka.org/), [Hikka](https://hikka.io/), [Bangumi](https://bangumi.tv/) and the Comick tracker, plus three services built for light novels: [RanobeDB](https://ranobedb.org/), [NovelList](https://www.novellist.co/) and [NovelUpdates](https://www.novelupdates.com/). **MDList**, MangaDex's own list, is a tracker too: tap its row in <nav to="tracking"> and sign in with your MangaDex account.
 
 * You must add the desired tracker to each series to begin tracking.
 * Track entries privately with supported tracking services (AniList, Kitsu, MangaBaka, Bangumi).
@@ -60,7 +60,7 @@ Three of the services are built for novels rather than manga. They work like eve
 * **Never move progress back** is on by default: reading an earlier chapter leaves NovelUpdates where it is, as it does every tracker. Turn it off to let NovelUpdates follow rereads.
 * **Move back on unread** is off by default. Turn it on and marking chapters unread moves NovelUpdates back to the highest chapter you still have read.
 
-These three NovelUpdates rows show in <nav to="tracking"> only while you are signed in to it.
+These NovelUpdates rows show in <nav to="tracking"> only while you are signed in to it.
 ::::
 
 **Fill from tracker** works with all three, so a novel bound to any of them can pull its cover, description, author and genres from the service.
@@ -119,8 +119,8 @@ Which login you get depends on the service: most open your browser, a few ask fo
 
 Each tracker you are signed in to with an account, except MDList, has a refresh button in its row, **Refresh tracker profile**. It reloads your account details, such as a changed nickname or score format, without signing out. It does not touch your tracked entries.
 
-### What does Tell source sites about migrations do?
-Some extensions sync your reading to their own site once their own tracking setting is on. **Tell source sites about migrations** in <nav to="tracking">, on by default, also tells those extensions when you migrate an entry, so the site follows the move. It has no effect on any other source.
+### What does Update source sites after migrating do?
+Some extensions sync your reading to their own site once their own tracking setting is on. **Update source sites after migrating** in <nav to="tracking">, on by default, also tells those extensions when you migrate an entry, so the site follows the move. It has no effect on any other source.
 
 ### How do I set up tracking for each series?
 1. Go into the series.

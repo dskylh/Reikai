@@ -1,13 +1,13 @@
 package reikai.novel.download
 
-import android.text.TextUtils
 import com.hippo.unifile.UniFile
 import eu.kanade.tachiyomi.data.download.DownloadProvider
+import eu.kanade.tachiyomi.util.storage.DiskUtil
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
-import io.mockk.mockkStatic
-import io.mockk.unmockkStatic
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import kotlinx.coroutines.flow.MutableSharedFlow
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -15,10 +15,16 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
+import reikai.domain.download.CaseBlindSourceFolder
+import reikai.domain.novel.LnSourceIdentity
+import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.presentation.recents.EmittingPreferenceStore
+import reikai.util.stubUniFileStatics
 import reikai.util.testAppScope
+import reikai.util.unstubUniFileStatics
+import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.storage.service.StorageManager
 import java.io.File
@@ -30,30 +36,93 @@ class NovelDownloadProviderTest {
     @TempDir
     lateinit var root: File
 
-    // UniFile's file-backed implementation asks android.text.TextUtils, which the JVM test jar stubs out.
     @BeforeEach
-    fun stubTextUtils() {
-        mockkStatic(TextUtils::class)
-        every { TextUtils.isEmpty(any()) } answers { firstArg<CharSequence?>().isNullOrEmpty() }
+    fun stubStatics() {
+        stubUniFileStatics()
+        mockkObject(DiskUtil)
+        every { DiskUtil.getAvailableStorageSpace(any<UniFile>()) } returns Long.MAX_VALUE
     }
 
     @AfterEach
-    fun restoreTextUtils() {
-        unmockkStatic(TextUtils::class)
+    fun restoreStatics() {
+        unstubUniFileStatics()
+        unmockkObject(DiskUtil)
     }
 
     private val libraryPreferences = LibraryPreferences(EmittingPreferenceStore())
-
-    private val provider by lazy {
-        NovelDownloadProvider(
-            scope = testAppScope(),
-            storageManager = mockk<StorageManager> {
-                every { getNovelDownloadsDirectory() } returns UniFile.fromFile(root)
-                every { changes } returns MutableSharedFlow()
-            },
-            downloadProvider = DownloadProvider(mockk(), mockk(), libraryPreferences),
-            libraryPreferences = libraryPreferences,
+    private val novelPreferences = NovelPreferences(EmittingPreferenceStore()).apply {
+        seenNovelSources().set(
+            mapOf(
+                "tachiyomi:123" to LnSourceIdentity(name = "Novel Site", lang = "en"),
+                "plugin" to LnSourceIdentity(name = "Plugin Site", lang = "en"),
+            ),
         )
+    }
+
+    private val provider by lazy { provider(UniFile.fromFile(root)) }
+
+    private fun provider(downloads: UniFile?) = NovelDownloadProvider(
+        scope = testAppScope(),
+        context = mockk(),
+        storageManager = mockk<StorageManager> {
+            every { getNovelDownloadsDirectory() } returns downloads
+            every { changes } returns MutableSharedFlow()
+        },
+        downloadProvider = DownloadProvider(mockk(), mockk(), libraryPreferences),
+        libraryPreferences = libraryPreferences,
+        novelPreferences = novelPreferences,
+    )
+
+    @Test
+    fun `an app catalogue's folder is named by its name and language, as manga's is`() {
+        provider.sourceDirName("tachiyomi:123") shouldBe "Novel Site (EN)"
+    }
+
+    /** The id is what a plugin update cannot change; the name beside it tells the folders apart. */
+    @Test
+    fun `a plugin's folder is its id with its name`() {
+        provider.sourceDirName("plugin") shouldBe "plugin (Plugin Site)"
+    }
+
+    @Test
+    fun `a source never recorded keeps its id`() {
+        provider.sourceDirName("unknown") shouldBe "unknown"
+    }
+
+    /** What the upgrade does: a folder named by id moves to the name the source has now, downloads and all. */
+    @Test
+    fun `renaming a source folder moves its downloads`() {
+        File(root, "plugin/Old Title").mkdirs()
+
+        provider.renameSourceFolders(listOf("plugin"), from = { it }, to = provider::sourceFolderLabel)
+
+        File(root, "plugin (Plugin Site)/Old Title").isDirectory shouldBe true
+    }
+
+    /** A case-blind disk finds the folder itself at its new name, which is no reason to leave it. */
+    @Test
+    fun `a source folder whose label changes only in letter case is renamed`() {
+        val disk = CaseBlindSourceFolder("plugin (plugin site)")
+
+        provider(disk.folder).renameSourceFolders(
+            listOf("plugin"),
+            from = { "plugin (plugin site)" },
+            to = provider::sourceFolderLabel,
+        )
+
+        disk.names() shouldBe listOf("plugin (Plugin Site)")
+    }
+
+    /** A title both folders hold is merged on its own; once every title is set aside, so is the old folder. */
+    @Test
+    fun `merging a source folder that shares a title with its new one leaves no visible folder behind`() {
+        File(root, "tachiyomi_123/X/c1.html").apply { parentFile!!.mkdirs() }.writeText("x")
+        File(root, "tachiyomi_123/Y/c2.html").apply { parentFile!!.mkdirs() }.writeText("y")
+        File(root, "Novel Site (EN)/Y").mkdirs()
+
+        provider.mergeSourceFolders(listOf("tachiyomi:123"), from = { it }, to = provider::sourceFolderLabel)
+
+        root.list()!!.filterNot { it.startsWith('.') } shouldBe listOf("Novel Site (EN)")
     }
 
     private val novel = Novel.create().copy(id = 1L, source = "src", url = "/n", title = "Old Title")
@@ -65,6 +134,15 @@ class NovelDownloadProviderTest {
         ),
         dateUpload = null, page = "",
     )
+
+    @Test
+    fun `a chapter downloaded again replaces its earlier file and leaves nothing beside it`() {
+        provider.writeChapter(novel, chapter, "<p>old</p>")
+
+        provider.writeChapter(novel, chapter, "<p>new</p>")
+
+        (provider.readChapter(novel, chapter) to File(root, "src/Old Title").list()!!.size) shouldBe ("<p>new</p>" to 1)
+    }
 
     @Test
     fun `a renamed novel keeps its downloaded chapters`() {

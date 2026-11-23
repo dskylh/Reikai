@@ -1,6 +1,7 @@
 package reikai.presentation.novel.search
 
 import io.kotest.matchers.shouldBe
+import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -12,9 +13,9 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import reikai.novel.download.NovelDownloadedTextsFixture
 import reikai.novel.download.NovelDownloadedTextsFixture.chapter
-import reikai.presentation.novel.search.NovelChapterSearchScreen.Model
-import reikai.presentation.novel.search.NovelChapterSearchScreen.SearchOptions
-import reikai.presentation.novel.search.NovelChapterSearchScreen.State
+import reikai.presentation.novel.search.NovelChapterSearchRoute.Model
+import reikai.presentation.novel.search.NovelChapterSearchRoute.SearchOptions
+import reikai.presentation.novel.search.NovelChapterSearchRoute.State
 
 /** Chapters 10..12 on disk, listed by the source out of order; 11 cannot be read. */
 class NovelChapterSearchModelTest {
@@ -30,7 +31,8 @@ class NovelChapterSearchModelTest {
 
     // The model reads on the IO dispatcher, so each step suspends until the state it waits for arrives.
     private suspend fun searched(query: String, options: SearchOptions = SearchOptions()): State {
-        val model = Model(1L, sourceScoped = false, NovelDownloadedTextsFixture.texts(chapters, stored))
+        val model =
+            Model(1L, sourceScoped = false, NovelDownloadedTextsFixture.texts(chapters, stored), mockk(relaxed = true))
         model.state.first { it.chapters != null }
         model.updateQuery(query)
         model.updateOptions(options)
@@ -51,6 +53,16 @@ class NovelChapterSearchModelTest {
     @Test
     fun `whole words skips a match inside a word`() = runTest {
         searched("tw", SearchOptions(wholeWord = true)).results shouldBe emptyList()
+    }
+
+    @Test
+    fun `a search asked for while the chapters load runs once they arrive`() = runTest {
+        val model =
+            Model(1L, sourceScoped = false, NovelDownloadedTextsFixture.texts(chapters, stored), mockk(relaxed = true))
+        model.updateQuery("two")
+        model.search()
+
+        model.state.first { it.submittedQuery != null && !it.isSearching }.results.size shouldBe 2
     }
 
     @Test

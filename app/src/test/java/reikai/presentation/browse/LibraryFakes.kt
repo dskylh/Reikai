@@ -15,12 +15,14 @@ import reikai.domain.entry.EntryId
 import reikai.domain.library.CategorySortOrder
 import reikai.domain.manga.MangaChapterSettings
 import reikai.domain.manga.MangaMergeManager
+import reikai.domain.manga.MangaViewerFlagSettings
 import reikai.domain.manga.RemoveMangaFromLibrary
 import reikai.domain.merge.EntryMergeManager
 import reikai.domain.novel.NovelChapterSettings
 import reikai.domain.novel.NovelMergeManager
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRepository
+import reikai.domain.novel.NovelViewerFlagSettings
 import reikai.domain.novel.interactor.UpdateNovel
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelUpdate
@@ -80,6 +82,9 @@ class FakeMangaLibrary(
     /** Rows whose favorite write the database refuses, answering false as a failed update does. */
     val refusedFavoriteWrites = mutableSetOf<Long>()
 
+    /** Runs before every category write lands, so a test can hold an add between its favorite and its filing. */
+    var beforeFiling: suspend () -> Unit = {}
+
     /** Stores [id] in or out of the library, filed under [categories], and answers the stored row. */
     fun put(id: Long, favorite: Boolean, categories: List<Long> = emptyList()): Manga {
         filed[id] = categories
@@ -136,7 +141,12 @@ class FakeMangaLibrary(
     val getManga = mockk<GetManga> { coEvery { await(any<Long>()) } answers { rows[firstArg()] } }
 
     val setMangaCategories: SetMangaCategories =
-        mockk { coEvery { await(any(), any()) } answers { filed[firstArg()] = secondArg() } }
+        mockk {
+            coEvery { await(any(), any()) } coAnswers {
+                beforeFiling()
+                filed[firstArg()] = secondArg()
+            }
+        }
 
     val removal = RemoveMangaFromLibrary(
         mergeManager = mergeManager,
@@ -144,6 +154,7 @@ class FakeMangaLibrary(
         getManga = getManga,
         updateManga = updateManga,
         coverCache = mockk(relaxed = true),
+        localVolumes = { mockk(relaxed = true) },
     )
 
     val adder = MangaLibraryAdder(
@@ -169,6 +180,7 @@ class FakeMangaLibrary(
         },
         removeMangaFromLibrary = removal,
         chapterSettings = MangaChapterSettings(mockk(relaxed = true)),
+        viewerFlagSettings = MangaViewerFlagSettings(mockk(relaxed = true)),
     )
 
     companion object {
@@ -192,6 +204,9 @@ class FakeNovelLibrary(
 
     /** Rows whose favorite write the database refuses, answering false as a failed update does. */
     val refusedFavoriteWrites = mutableSetOf<Long>()
+
+    /** Runs before every category write lands, so a test can hold an add between its favorite and its filing. */
+    var beforeFiling: suspend () -> Unit = {}
 
     fun put(id: Long, path: String, favorite: Boolean, categories: List<Long> = emptyList()): Novel {
         val row = Novel.create().copy(
@@ -243,7 +258,12 @@ class FakeNovelLibrary(
             coEvery { await() } returns userCategories
             coEvery { awaitByNovelId(any()) } answers { filed[firstArg()].orEmpty().map(::libraryCategory) }
         },
-        setNovelCategories = mockk { coEvery { await(any(), any()) } answers { filed[firstArg()!!] = secondArg() } },
+        setNovelCategories = mockk {
+            coEvery { await(any(), any()) } coAnswers {
+                beforeFiling()
+                filed[firstArg()!!] = secondArg()
+            }
+        },
         updateNovel = UpdateNovel(novelRepository = repository, sourceTracker = mockk(relaxed = true)),
         novelPreferences = novelPreferences,
         mergeManager = mergeManager,
@@ -259,6 +279,7 @@ class FakeNovelLibrary(
             }
         },
         chapterSettings = NovelChapterSettings(mockk(relaxed = true)),
+        viewerFlagSettings = NovelViewerFlagSettings(mockk(relaxed = true)),
     )
 
     companion object {

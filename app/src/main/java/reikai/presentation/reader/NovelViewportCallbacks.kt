@@ -36,11 +36,19 @@ class NovelViewportCallbacks(
     /** A chapter's last line reached the screen, once its images had landed. The model reads the
      *  novel's last chapter on it, since nothing follows that one to be left into. */
     val onChapterEndSeen: (chapterId: Long) -> Unit,
-    /** A scroll the reader's finger made, in pixels; the provider hides the menu past its threshold.
-     *  The viewport's own scrolls (seek, keys, read aloud, auto-scroll) never report. */
-    val onReaderScrolled: (dyPx: Int) -> Unit,
+    /** Every frame the page scrolled, in pixels, with whether a finger is on it: the viewport's own scrolls
+     *  (seek, keys, read aloud, auto-scroll) are never [touching]. The provider hides the menu by MenuHideOnScroll. */
+    val onScrolled: (dyPx: Int, touching: Boolean) -> Unit,
+    /** The reader asked for a page turn (a tap, a swipe, a key), said before the turn reports where it went.
+     *  Auto-scroll's turns are not the reader's and never say it. */
+    val onReaderTurned: () -> Unit,
     /** A new page is on screen in paged reading, drawn, which is when an e-ink screen is flashed clean. */
     val onPageTurned: () -> Unit,
     /** The page on screen and how many the chapter has, whenever either changes in paged reading. */
     val onPageShown: (page: Int, count: Int) -> Unit,
+    /**
+     * The reader asked to see a chapter's picture full screen ([NovelPictureGesture]); [model] is what coil
+     * loads. [chapterTitle] is the chapter the picture is in, which a window spanning chapters need not have current.
+     */
+    val onPictureOpened: (model: Any, chapterTitle: String?) -> Unit = { _, _ -> },
 )

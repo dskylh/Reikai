@@ -4,6 +4,7 @@ import dev.icerock.moko.resources.StringResource
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import reikai.domain.novel.NovelPreferences
+import reikai.util.inOrderOf
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.i18n.MR
 
@@ -19,7 +20,7 @@ enum class ReaderBottomButton(val value: String, val stringRes: StringResource, 
     WebView("wb", MR.strings.action_open_in_web_view, Scope.Both),
     Browser("br", MR.strings.action_open_in_browser, Scope.Both),
     Share("sh", MR.strings.action_share, Scope.Both),
-    ReadingMode("rm", MR.strings.viewer, Scope.Manga),
+    ReadingMode("rm", MR.strings.viewer, Scope.Both),
     Rotation("rot", MR.strings.rotation_type, Scope.Both),
     CropBorders("cb", MR.strings.pref_crop_borders, Scope.Manga),
     Autoscroll("as", MR.strings.pref_auto_scroll, Scope.Both),
@@ -29,6 +30,7 @@ enum class ReaderBottomButton(val value: String, val stringRes: StringResource, 
     TextSize("ts", MR.strings.pref_reader_text_size, Scope.Novel),
     ReadAloud("ra", MR.strings.pref_category_read_aloud, Scope.Novel),
     ScrollToTop("top", MR.strings.action_scroll_to_top, Scope.Both),
+    Grayscale("gs", MR.strings.pref_grayscale, Scope.Both),
 
     /**
      * The sheet's gear, which is placed like any button but never hidden, since it is the way into the
@@ -39,18 +41,29 @@ enum class ReaderBottomButton(val value: String, val stringRes: StringResource, 
 
     enum class Scope { Manga, Novel, Both }
 
-    /** One reader's selection and order, held with the scope they belong to so no caller can mix readers. */
+    /** One reader's bar settings, held with the scope they belong to so no caller can mix readers. */
     class BarPreferences private constructor(
         val scope: Scope,
         val selection: Preference<Set<String>>,
         val order: Preference<List<String>>,
+        val filled: Preference<Boolean>,
     ) {
         companion object {
             fun manga(preferences: ReaderPreferences) =
-                BarPreferences(Scope.Manga, preferences.readerBottomButtons, preferences.readerBottomButtonOrder)
+                BarPreferences(
+                    Scope.Manga,
+                    preferences.readerBottomButtons,
+                    preferences.readerBottomButtonOrder,
+                    preferences.readerBottomButtonsFilled,
+                )
 
             fun novel(preferences: NovelPreferences) =
-                BarPreferences(Scope.Novel, preferences.readerBottomButtons(), preferences.readerBottomButtonOrder())
+                BarPreferences(
+                    Scope.Novel,
+                    preferences.readerBottomButtons(),
+                    preferences.readerBottomButtonOrder(),
+                    preferences.readerBottomButtonsFilled(),
+                )
 
             fun of(scope: Scope, reader: ReaderPreferences, novel: NovelPreferences) = when (scope) {
                 Scope.Manga -> manga(reader)
@@ -74,12 +87,8 @@ enum class ReaderBottomButton(val value: String, val stringRes: StringResource, 
             arranged(order, scope).filter { it == Settings || it.value in selected }
 
         /** Every button [scope] offers, in the stored [order], so a button switched off keeps its place. */
-        fun arranged(order: List<String>, scope: Scope): List<ReaderBottomButton> {
-            val offered = offeredIn(scope)
-            val byValue = offered.associateBy { it.value }
-            val placed = order.distinct().mapNotNull(byValue::get)
-            return placed + (offered - placed.toSet())
-        }
+        fun arranged(order: List<String>, scope: Scope): List<ReaderBottomButton> =
+            offeredIn(scope).inOrderOf(order) { it.value }
 
         /** [ordered], kept current as either preference changes. Both readers draw their bar through it. */
         fun orderedChanges(preferences: BarPreferences): Flow<List<ReaderBottomButton>> =

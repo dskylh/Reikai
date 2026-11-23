@@ -59,6 +59,7 @@ import mihon.icons.materialsymbols.rounded.BookmarkRemove
 import mihon.icons.materialsymbols.rounded.Delete
 import mihon.icons.materialsymbols.rounded.DoneAll
 import mihon.icons.materialsymbols.rounded.Download
+import mihon.icons.materialsymbols.rounded.LibraryBooks
 import mihon.icons.materialsymbols.rounded.MoreVert
 import mihon.icons.materialsymbols.rounded.RemoveDone
 import mihon.icons.materialsymbols.rounded.SwapCalls
@@ -260,6 +261,12 @@ fun LibraryBottomActionMenu(
     onMergeClicked: (() -> Unit)? = null,
     // RK: split the selected entries out of their merge groups (only when a merged one is selected)
     onUnmergeClicked: (() -> Unit)? = null,
+    // RK: write the selected novels as EPUB files (only when every selected entry is a novel)
+    onExportClicked: (() -> Unit)? = null,
+    // RK: combine local series into one with volumes; takes Merge's place, Merge moving into the overflow
+    onCombineClicked: (() -> Unit)? = null,
+    // RK: hide the selected series from the library view, from the overflow
+    onHideClicked: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     AnimatedVisibility(
@@ -286,7 +293,9 @@ fun LibraryBottomActionMenu(
                     if (isActive) confirm[toConfirmIndex] = false
                 }
             }
-            val itemOverflow = onDownloadClicked != null
+            // RK: Export and Hide live there, and Merge when Combine as volumes takes its place
+            val itemOverflow = onDownloadClicked != null || onExportClicked != null || onCombineClicked != null ||
+                onHideClicked != null
             Row(
                 modifier = Modifier
                     .windowInsetsPadding(
@@ -316,8 +325,17 @@ fun LibraryBottomActionMenu(
                     onLongClick = { onLongClickItem(2) },
                     onClick = onMarkAsUnreadClicked,
                 )
-                // RK: merge the selected entries (shown only when 2+ of one type are selected)
-                if (onMergeClicked != null) {
+                // RK --> Combine as volumes, for an all-local selection, in Merge's place
+                if (onCombineClicked != null) {
+                    Button(
+                        title = stringResource(MR.strings.action_combine_volumes),
+                        icon = MaterialSymbols.Rounded.LibraryBooks,
+                        toConfirm = confirm[6],
+                        onLongClick = { onLongClickItem(6) },
+                        onClick = onCombineClicked,
+                    )
+                } else if (onMergeClicked != null) {
+                    // RK <--
                     Button(
                         title = stringResource(MR.strings.action_merge),
                         icon = ReikaiIcons.Merge,
@@ -386,11 +404,38 @@ fun LibraryBottomActionMenu(
                             onDismissRequest = { overflowMenuOpen = false },
                             offset = BottomBarMenuDpOffset,
                         ) {
-                            // RK --> Migrate hides for a selection mixing manga and novels
+                            // RK --> Migrate hides for a selection mixing manga and novels; Export shows for novels
                             if (onMigrateClicked != null) {
                                 DropdownMenuItem(
                                     text = { Text(stringResource(MR.strings.migrate)) },
                                     onClick = onMigrateClicked,
+                                )
+                            }
+                            if (onCombineClicked != null && onMergeClicked != null) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(MR.strings.action_merge)) },
+                                    onClick = {
+                                        overflowMenuOpen = false
+                                        onMergeClicked()
+                                    },
+                                )
+                            }
+                            if (onExportClicked != null) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(MR.strings.action_export_epub)) },
+                                    onClick = {
+                                        overflowMenuOpen = false
+                                        onExportClicked()
+                                    },
+                                )
+                            }
+                            if (onHideClicked != null) {
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(MR.strings.action_hide)) },
+                                    onClick = {
+                                        overflowMenuOpen = false
+                                        onHideClicked()
+                                    },
                                 )
                             }
                             // RK <--

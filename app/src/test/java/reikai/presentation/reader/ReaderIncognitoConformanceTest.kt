@@ -2,15 +2,9 @@ package reikai.presentation.reader
 
 import eu.kanade.tachiyomi.ui.reader.ReaderViewModel
 import io.kotest.matchers.shouldBe
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import kotlinx.coroutines.withContext
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.params.ParameterizedTest
@@ -19,11 +13,13 @@ import reikai.domain.manga.MergedChapterProvider
 import reikai.domain.merge.ChapterUnit
 import reikai.domain.merge.renderStoredStitch
 import reikai.domain.reader.ChapterProgress
+import reikai.util.resetVirtualDispatchers
+import reikai.util.virtualDispatchers
 
 /**
  * Incognito asked of each written chapter's own source, never of the series the reader was opened
- * from, pinned once over both readers. A series is merged from a public source holding chapter 1 and a
- * private one holding chapter 2, and chapter 2 is opened.
+ * from, pinned once over both readers. A series is merged from a source holding chapter 1 and one holding
+ * chapter 2, exactly one of them private, and chapter 2 is opened.
  */
 class ReaderIncognitoConformanceTest {
 
@@ -32,15 +28,18 @@ class ReaderIncognitoConformanceTest {
          *  opened from the [fromPrivate] series or the public one, with chapter 2's source [private]. */
         suspend fun historyOfOpened(scope: TestScope, fromPrivate: Boolean, private: Boolean): List<Long>
 
-        /** Whether a position saved in chapter 2, opened from the public series, is stored. */
-        suspend fun privateChapterProgressStored(scope: TestScope): Boolean
+        /** Whether a position saved in chapter 2 is stored, opened from the [fromPrivate] series or the public
+         *  one, with chapter 2's source [private]. */
+        suspend fun chapterProgressStored(scope: TestScope, fromPrivate: Boolean, private: Boolean): Boolean
     }
 
     @BeforeEach
-    fun setUp() = Dispatchers.setMain(StandardTestDispatcher())
+    fun setUp() {
+        virtualDispatchers()
+    }
 
     @AfterEach
-    fun tearDown() = Dispatchers.resetMain()
+    fun tearDown() = resetVirtualDispatchers()
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("probes")
@@ -58,7 +57,19 @@ class ReaderIncognitoConformanceTest {
     @ParameterizedTest(name = "{0}")
     @MethodSource("probes")
     fun `a private source's chapter opened from the public series saves no position`(probe: Probe) = runTest {
-        probe.privateChapterProgressStored(this) shouldBe false
+        probe.chapterProgressStored(this, fromPrivate = false, private = true) shouldBe false
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("probes")
+    fun `a public source's chapter opened from the public series saves its position`(probe: Probe) = runTest {
+        probe.chapterProgressStored(this, fromPrivate = false, private = false) shouldBe true
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("probes")
+    fun `a public source's chapter opened from the private series saves its position`(probe: Probe) = runTest {
+        probe.chapterProgressStored(this, fromPrivate = true, private = false) shouldBe true
     }
 
     companion object {
@@ -71,20 +82,15 @@ class ReaderIncognitoConformanceTest {
 
         override suspend fun historyOfOpened(scope: TestScope, fromPrivate: Boolean, private: Boolean): List<Long> =
             openSecond(fromPrivate, private) { harness, model, _ ->
-                model.saveHistory()
-                settle()
+                harness.settle(model) { model.saveHistory() }
                 harness.historyOf(OPENED_OWNER)
             }
 
-        override suspend fun privateChapterProgressStored(scope: TestScope): Boolean =
-            openSecond(fromPrivate = false, private = true) { harness, model, state ->
-                model.onPageSelected(loadedPages(state.viewerChapters!!.currChapter, 5)[3])
-                settle()
+        override suspend fun chapterProgressStored(scope: TestScope, fromPrivate: Boolean, private: Boolean): Boolean =
+            openSecond(fromPrivate, private) { harness, model, state ->
+                harness.settle(model) { model.onPageSelected(loadedPages(state.viewerChapters!!.currChapter, 5)[3]) }
                 harness.stored(OPENED).lastPageRead != 0
             }
-
-        /** The writes run on the app scope's IO threads, which virtual time does not reach. */
-        private suspend fun settle() = withContext(Dispatchers.Default) { delay(500) }
 
         /** Opens chapter 2 from the [fromPrivate] series; [private] says whether chapter 2's source is. */
         private suspend fun <T> openSecond(
@@ -143,17 +149,17 @@ class ReaderIncognitoConformanceTest {
                 harness.historyOf(owner)
             }
 
-        override suspend fun privateChapterProgressStored(scope: TestScope): Boolean =
+        override suspend fun chapterProgressStored(scope: TestScope, fromPrivate: Boolean, private: Boolean): Boolean =
             NovelReaderViewModelHarness.create(scope.testScheduler).use { harness ->
-                val public = harness.source("alpha")
-                val private = harness.source("beta")
-                val host = harness.novel(public)
-                val member = harness.novel(private)
-                harness.chapter(host, 1.0)
-                val opened = harness.chapter(member, 2.0)
-                harness.merge(host, member)
-                harness.incognito(private)
-                val model = harness.open(host, opened.id)
+                val other = harness.source("alpha")
+                val ownerSource = harness.source("beta")
+                val otherNovel = harness.novel(other)
+                val owner = harness.novel(ownerSource)
+                harness.chapter(otherNovel, 1.0)
+                val opened = harness.chapter(owner, 2.0)
+                harness.merge(otherNovel, owner)
+                harness.incognito(if (private) ownerSource else other)
+                val model = harness.open(if (fromPrivate == private) owner else otherNovel, opened.id)
                 scope.advanceUntilIdle()
                 model.rendererLanded(model.window.value.generation)
 

@@ -70,8 +70,6 @@ class NovelLibraryAdapter(
                     ),
                 ),
             categories = model.filterPickerCategories,
-            // Novels have no local sources, so nothing is ever local and the badge would never light up.
-            showLocalBadge = false,
         )
 
     // Shared while subscribed, not eagerly: an eager share here is a permanent subscriber on the model,
@@ -99,6 +97,8 @@ class NovelLibraryAdapter(
     override fun trackerMeans(): Map<Long, Double> = model.state.value.trackerMeans
 
     override fun overlaid(item: LibraryItem): LibraryItem = model.state.value.withOverlay(item)
+
+    override fun seriesTagRows(): List<SeriesTagRow> = model.state.value.seriesTagRows()
 
     override suspend fun dynamicGroupingFeed(groupType: Int): DynamicGroupingFeed {
         val state = model.state.value
@@ -172,10 +172,7 @@ class NovelLibraryAdapter(
     override fun containsMerged(entries: Set<EntryId>) =
         model.state.value.containsMerged(entries.ownIds())
 
-    /** Novels have no local-source concept, so Download applies whenever any are selected. The
-     *  non-empty check matters under All: the engine shows Download if ANY provider can act. */
-    override fun canDownload(entries: Set<EntryId>) = entries.ownIds().isNotEmpty()
-    override fun containsLocal(entries: Set<EntryId>) = false
+    override fun containsLocal(entries: Set<EntryId>) = model.state.value.containsLocal(entries.ownIds())
 
     override fun groupedSourceCount(entries: Set<EntryId>): Int {
         val state = model.state.value

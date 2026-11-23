@@ -1,5 +1,6 @@
 package tachiyomi.domain.manga.model
 
+import reikai.domain.entry.CoverColors
 import kotlin.time.Instant
 
 /**
@@ -14,15 +15,10 @@ data class MangaCover(
 ) { // RK: a body for the cover colour below
     // RK --> vibrant color extracted from the cover, used to seed the reader/details theme.
     var vibrantCoverColor: Int?
-        get() = vibrantCoverColorMap[mangaId]
+        get() = CoverColors[mangaId]
         set(value) {
-            vibrantCoverColorMap[mangaId] = value
+            if (value == null) CoverColors.remove(mangaId) else CoverColors.put(mangaId, value, isMangaFavorite)
         }
-
-    companion object {
-        // Populated as covers are displayed; restored at startup from prefs by MangaCoverMetadata.
-        val vibrantCoverColorMap: HashMap<Long, Int?> = hashMapOf()
-    }
     // RK <--
 }
 

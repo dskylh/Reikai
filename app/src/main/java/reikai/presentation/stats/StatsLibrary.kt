@@ -1,6 +1,8 @@
 package reikai.presentation.stats
 
 import androidx.compose.ui.util.fastFilter
+import dev.zacsweers.metro.AppScope
+import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.data.track.Tracker
 import eu.kanade.tachiyomi.data.track.TrackerManager
@@ -11,7 +13,10 @@ import reikai.domain.entry.EntryId
 import reikai.domain.entry.GetEntryCustomInfo
 import reikai.domain.library.ContentType
 import reikai.domain.library.ReikaiLibraryPreferences
+import reikai.domain.library.currentTagAliases
+import reikai.domain.library.entryLanguage
 import reikai.domain.library.includes
+import reikai.domain.library.localFilesLanguage
 import reikai.domain.library.mangaLibraryRanking
 import reikai.domain.library.novelLibraryRanking
 import reikai.domain.manga.MangaMergeManager
@@ -19,15 +24,23 @@ import reikai.domain.merge.MergedChapterUnitRepository
 import reikai.domain.novel.NovelMergeManager
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.interactor.GetNovelTracks
+import reikai.domain.novel.local.LocalNovelLanguageRepository
 import reikai.domain.novel.model.LibraryNovel
 import reikai.domain.novel.track.toUiTrack
 import reikai.domain.readinglog.EntryReadDuration
 import reikai.domain.readinglog.EntryReadingSession
+import reikai.domain.readinglog.PACE_SAMPLE_LIMIT
+import reikai.domain.readinglog.PaceUnit
 import reikai.domain.readinglog.ReadingLogRepository
+import reikai.domain.readinglog.ReadingPace
+import reikai.domain.readinglog.ReadingPaceRepository
+import reikai.domain.readinglog.learnPace
+import reikai.novel.local.LocalNovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.presentation.library.SourceBadge
 import reikai.presentation.library.badgeSource
 import reikai.presentation.library.installedIconsBySite
+import reikai.presentation.library.mangaSourceBadge
 import reikai.presentation.library.novelSourceBadge
 import reikai.presentation.stats.details.ReadTitle
 import tachiyomi.domain.category.interactor.GetCategories
@@ -36,6 +49,8 @@ import tachiyomi.domain.manga.interactor.GetLibraryManga
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.domain.track.interactor.GetTracksPerManga
 import tachiyomi.domain.track.model.Track
+import tachiyomi.source.local.isLocal
+import kotlin.math.roundToLong
 
 /** Both content types' libraries as Statistics reads them, loaded once per screen. */
 class StatsLibrary(
@@ -58,6 +73,9 @@ class StatsLibrary(
     private val novelSessions: List<EntryReadingSession>,
     private val mangaReadDurations: List<EntryReadDuration>,
     private val novelReadDurations: List<EntryReadDuration>,
+    private val mangaPace: ReadingPace,
+    private val novelPace: ReadingPace,
+    private val novelListeningPace: ReadingPace,
 ) {
     fun titles(type: ContentType): List<StatsTitle> = buildList {
         if (type.includes(ContentType.MANGA)) addAll(mangaTitles)
@@ -74,6 +92,15 @@ class StatsLibrary(
         }
     }
 
+    /** The overall reading pace of each type [type] includes, as the reader learns it for time left. */
+    fun paces(type: ContentType): List<StatsPace> = buildList {
+        if (type.includes(ContentType.MANGA)) add(StatsPace(ContentType.MANGA, mangaPace))
+        if (type.includes(ContentType.NOVELS)) {
+            add(StatsPace(ContentType.NOVELS, novelPace))
+            add(StatsPace(ContentType.NOVELS, novelListeningPace, listening = true))
+        }
+    }
+
     /** Every series read, by lifetime reading time from history, longest first, keyed as [sessions] are. */
     fun mostRead(type: ContentType): List<ReadTitle> = buildList {
         if (type.includes(ContentType.MANGA)) {
@@ -84,6 +111,22 @@ class StatsLibrary(
         }
     }.sortedByDescending { it.readMs }
 }
+
+/** One type's overall pace, read or, for novels, [listening] to read-aloud. */
+data class StatsPace(val contentType: ContentType, val pace: ReadingPace, val listening: Boolean = false) {
+    /** Seconds a page for manga and words a minute for a novel, each at least 1; null while learning. */
+    fun measure(): Long? {
+        val msPerUnit = (pace as? ReadingPace.Known)?.msPerUnit ?: return null
+        val measure = when (contentType) {
+            ContentType.MANGA -> msPerUnit / MS_PER_SECOND
+            ContentType.NOVELS -> MS_PER_MINUTE / msPerUnit
+            ContentType.ALL -> error("ContentType.ALL has no pace")
+        }
+        return measure.roundToLong().coerceAtLeast(1)
+    }
+}
+
+private const val MS_PER_SECOND = 1_000.0
 
 /** A logged session and the series it counts under, named as the library names that series. */
 data class TitleReadingSession(val entryId: EntryId, val name: String, val session: EntryReadingSession)
@@ -132,7 +175,13 @@ private fun titleKeys(
     }
 }
 
+/** Loads [StatsLibrary] afresh on each call; an interface so the screens' reloads can run over a fake. */
+fun interface StatsLibrarySource {
+    suspend fun load(): StatsLibrary
+}
+
 @Inject
+@ContributesBinding(AppScope::class)
 class StatsLibraryLoader(
     private val getLibraryManga: GetLibraryManga,
     private val novelRepository: NovelRepository,
@@ -143,15 +192,17 @@ class StatsLibraryLoader(
     private val getNovelTracks: GetNovelTracks,
     private val trackerManager: TrackerManager,
     private val readingLog: ReadingLogRepository,
+    private val paceRepository: ReadingPaceRepository,
     private val sourceManager: SourceManager,
     private val novelSourceManager: NovelSourceManager,
     private val getEntryCustomInfo: GetEntryCustomInfo,
     private val getCategories: GetCategories,
     private val getNovelCategories: GetNovelCategories,
     private val reikaiLibraryPreferences: ReikaiLibraryPreferences,
-) {
+    private val localNovelLanguages: LocalNovelLanguageRepository,
+) : StatsLibrarySource {
 
-    suspend fun load(): StatsLibrary {
+    override suspend fun load(): StatsLibrary {
         // A series favorited from three sources is three rows here and one card in the library, so
         // StatsSeries counts it once.
         // Each merged series ranked as its library row ranks it, so its status and categories are the lead's.
@@ -187,16 +238,23 @@ class StatsLibraryLoader(
             novelSourceManager.identityOf(id).let { StatsSource(id, it.name, it.lang.orEmpty()) }
         }
         val iconsBySite = installedIconsBySite(novelSourceManager.getAll())
+        val novelLanguages = localNovelLanguages.getAll()
         val sourceBadges = mangaSources.keys.associate { id ->
-            id.toString() to SourceBadge.Manga(sourceManager.badgeSource(id))
+            id.toString() to mangaSourceBadge(sourceManager.badgeSource(id))
         } + novelSources.keys.associateWith { id -> novelSourceBadge(novelSourceManager.get(id), iconsBySite) }
 
+        val tagAliases = reikaiLibraryPreferences.currentTagAliases()
         val mangaTitles = manga.statsTitles(
             StatsTitleFields(
                 entryId = { EntryId.Manga(it.manga.id) },
                 title = { customInfo[EntryId.Manga(it.manga.id)]?.title ?: it.manga.title },
                 status = { it.manga.status },
-                source = { mangaSources.getValue(it.manga.source) },
+                // A local series counts under its own language, as its library row reads it.
+                source = { m ->
+                    mangaSources.getValue(m.manga.source).let {
+                        it.copy(language = entryLanguage(m.manga.isLocal(), m.manga.localFilesLanguage, it.language))
+                    }
+                },
                 genres = { it.manga.genre },
                 customGenres = { customInfo[EntryId.Manga(it.manga.id)]?.genre },
                 categoryIds = { it.categories },
@@ -207,13 +265,19 @@ class StatsLibraryLoader(
             trackers,
             mangaReadDurations.associate { it.entryId to it.duration },
             firstLoggedRead(mangaSessions),
+            tagAliases,
         )
         val novelTitles = novels.statsTitles(
             StatsTitleFields(
                 entryId = { EntryId.Novel(it.novel.id) },
                 title = { customInfo[EntryId.Novel(it.novel.id)]?.title ?: it.novel.title },
                 status = { it.novel.status },
-                source = { novelSources.getValue(it.novel.source) },
+                source = { n ->
+                    novelSources.getValue(n.novel.source).let {
+                        val own = novelLanguages[n.novel.url]
+                        it.copy(language = entryLanguage(LocalNovelSource.isLocal(n.novel.source), own, it.language))
+                    }
+                },
                 genres = { it.novel.genre },
                 customGenres = { customInfo[EntryId.Novel(it.novel.id)]?.genre },
                 categoryIds = { it.categories },
@@ -224,6 +288,7 @@ class StatsLibraryLoader(
             trackers,
             novelReadDurations.associate { it.entryId to it.duration },
             firstLoggedRead(novelSessions),
+            tagAliases,
         )
 
         return StatsLibrary(
@@ -243,7 +308,16 @@ class StatsLibraryLoader(
             novelSessions = novelSessions,
             mangaReadDurations = mangaReadDurations,
             novelReadDurations = novelReadDurations,
+            mangaPace = overallPace(ContentType.MANGA, listened = false),
+            novelPace = overallPace(ContentType.NOVELS, listened = false),
+            novelListeningPace = overallPace(ContentType.NOVELS, listened = true),
         )
+    }
+
+    /** The pace the reader shows for [type], learned from chapters read or, when [listened], read aloud. */
+    private suspend fun overallPace(type: ContentType, listened: Boolean): ReadingPace {
+        val samples = paceRepository.samples(type, PACE_SAMPLE_LIMIT).filter { it.isListened == listened }
+        return learnPace(samples, seriesIds = null, PaceUnit.of(type))
     }
 
     private suspend fun getMangaTrackMap(

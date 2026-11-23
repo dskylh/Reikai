@@ -6,6 +6,8 @@ import dev.zacsweers.metro.SingleIn
 import eu.kanade.domain.source.service.SourcePreferences
 import mihon.domain.extension.model.ContentWarning
 import reikai.domain.library.ContentType
+import reikai.domain.library.ShownContentPreference
+import reikai.domain.library.shownContent
 import reikai.presentation.browse.globalsearch.SearchSourceFilter
 import reikai.presentation.recents.RecentsMode
 import reikai.util.getStringList
@@ -25,12 +27,17 @@ class ReikaiSourcePreferences(
     private val preferenceStore: PreferenceStore,
 ) {
 
+    val shownContent: Preference<ContentType> = preferenceStore.shownContent()
+
+    private fun scoped(key: String) =
+        ShownContentPreference(preferenceStore.getEnum(key, ContentType.ALL), shownContent)
+
     /**
      * Sticky content-type filter on the Browse tabs (Sources + Extensions). Its own key, distinct
      * from the Library filter, so each surface remembers its last type independently.
      */
     val browseContentType: Preference<ContentType> =
-        preferenceStore.getEnum("browse_content_type", ContentType.ALL)
+        scoped("browse_content_type")
 
     /**
      * Whether global search covers pinned sources or all of them, as last chosen. Pinned by default,
@@ -41,7 +48,7 @@ class ReikaiSourcePreferences(
 
     /** The download queue's card order across manga and novels, as card keys joined by commas. */
     val downloadQueueOrder: Preference<String> =
-        preferenceStore.getString("download_queue_order", "")
+        preferenceStore.getString(DOWNLOAD_QUEUE_ORDER_KEY, "")
 
     /** Leave the Latest button off Sources rows, since a catalogue's own chip switches to Latest. */
     val hideSourceLatestButton: Preference<Boolean> =
@@ -127,20 +134,20 @@ class ReikaiSourcePreferences(
     val novelMigrationSources: Preference<List<String>> = preferenceStore.getStringList("ln_migration_sources")
 
     /** Sticky content-type filter on the Updates tab (manga + novels), its own key. */
-    val updatesContentType: Preference<ContentType> =
-        preferenceStore.getEnum("updates_content_type", ContentType.ALL)
+    val updatesContentType: ShownContentPreference =
+        scoped("updates_content_type")
 
     /** Sticky content-type filter on the History tab (manga + novels), its own key. */
     val historyContentType: Preference<ContentType> =
-        preferenceStore.getEnum("history_content_type", ContentType.ALL)
+        scoped("history_content_type")
 
     /**
      * Sticky content-type filter on the combined Recents tab. Its own key rather than a shared one:
      * with that tab off, Updates and History are two independent surfaces and linking their chips
      * would move something for people who never opted in.
      */
-    val recentsContentType: Preference<ContentType> =
-        preferenceStore.getEnum("recents_content_type", ContentType.ALL)
+    val recentsContentType: ShownContentPreference =
+        scoped("recents_content_type")
 
     /**
      * Which mode the combined Recents tab was last showing. One key rather than one per surface: the
@@ -153,7 +160,19 @@ class ReikaiSourcePreferences(
 
     /** Sticky content-type filter on the Stats screen (manga + novels), its own key. */
     val statsContentType: Preference<ContentType> =
-        preferenceStore.getEnum("stats_content_type", ContentType.ALL)
+        scoped("stats_content_type")
+
+    /** The Statistics overview's card order, by `StatsCardKind.key`; unset is the default layout. */
+    val statsCardOrder: Preference<List<String>> = preferenceStore.getStringList("stats_card_order")
+
+    /** The Statistics overview cards the user hid, by `StatsCardKind.key`. */
+    val statsHiddenCards: Preference<Set<String>> = preferenceStore.getStringSet("stats_hidden_cards")
+
+    /** The At a glance figures' order, by `StatsFigureKind.key`; unset is the default order. */
+    val statsFigureOrder: Preference<List<String>> = preferenceStore.getStringList("stats_figure_order")
+
+    /** The At a glance figures the user hid, by `StatsFigureKind.key`. */
+    val statsHiddenFigures: Preference<Set<String>> = preferenceStore.getStringSet("stats_hidden_figures")
 
     /**
      * Display mode (comfortable / compact / list) for the per-source novel browse grid. Its own key,
@@ -237,6 +256,9 @@ class ReikaiSourcePreferences(
     // endregion
 
     companion object {
+        // The queue it orders is never backed up, so a restore leaves the device's own order (AppPreferenceCarry).
+        const val DOWNLOAD_QUEUE_ORDER_KEY = "download_queue_order"
+
         // Retired per-content-type Updates category-filter keys and their master switch: the filter
         // became one selection per rendered surface over the shared category id space. Values dropped,
         // not migrated (a filter is casually re-picked, and the switch defaults off); skipped on

@@ -1,6 +1,7 @@
 package reikai.presentation.library
 
 import android.content.Context
+import androidx.compose.material3.SnackbarHostState
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.zacsweers.metro.AppScope
@@ -11,11 +12,14 @@ import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
 import eu.kanade.core.preference.PreferenceMutableState
-import eu.kanade.core.preference.asState
+import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.manga.DownloadAction
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.ui.library.LibraryItem
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -24,21 +28,41 @@ import kotlinx.coroutines.flow.WhileSubscribed
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import mihon.core.metro.AppCoroutineScope
+import reikai.data.local.CombinableSeries
+import reikai.data.local.CombineLocalVolumes
+import reikai.data.local.LocalVolumeMove
 import reikai.domain.category.categoriesForContentType
 import reikai.domain.category.categoryDiff
 import reikai.domain.entry.EntryId
 import reikai.domain.library.CATEGORY_SORT_CUSTOMIZED
 import reikai.domain.library.CategorySortOrder
 import reikai.domain.library.ContentType
+import reikai.domain.library.HideSeries
+import reikai.domain.library.LibraryManualOrderRepository
 import reikai.domain.library.LibrarySortFields
+import reikai.domain.library.ManualOrderPosition
 import reikai.domain.library.ReikaiLibraryPreferences
+import reikai.domain.library.TagAliases
 import reikai.domain.library.includes
+import reikai.domain.library.isSortOverridden
 import reikai.domain.library.librarySortComparator
+import reikai.domain.library.reorderedPositions
+import reikai.domain.library.singleContentType
+import reikai.domain.library.sortForCategory
+import reikai.domain.library.sortsOnItsOwn
+import reikai.domain.library.tagAliasesFlow
 import reikai.domain.library.toSortMode
+import reikai.domain.library.within
+import reikai.domain.stats.inMenus
 import reikai.presentation.browse.browseLanguageLabel
+import reikai.presentation.components.VolumeMoves
 import reikai.presentation.components.chipUpdating
 import reikai.presentation.selection.EntrySelection
 import reikai.presentation.selection.SelectionState
@@ -47,6 +71,7 @@ import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.util.lang.launchIO
+import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.domain.category.interactor.SetSortModeForCategory
 import tachiyomi.domain.category.model.Category
 import tachiyomi.domain.category.repository.CategoryRepository
@@ -76,10 +101,19 @@ class LibraryEngine(
     private val libraryPreferences: LibraryPreferences,
     private val categoryRepository: CategoryRepository,
     private val setSortModeForCategory: SetSortModeForCategory,
+    private val uiPreferences: UiPreferences,
     // Only the dynamic-grouping assembly needs these: the group labels and the track-status ordering.
     private val context: Context,
     private val trackerManager: TrackerManager,
+    private val manualOrderRepository: LibraryManualOrderRepository,
+    // A stored order must land even when the drop closes the screen, as every library write does.
+    @AppCoroutineScope private val appScope: CoroutineScope,
+    private val combineLocalVolumes: CombineLocalVolumes,
+    private val hideSeries: HideSeries,
 ) : ViewModel() {
+
+    /** The library's snackbar and its local volume moves, kept with the engine so a rotation keeps an Undo. */
+    val volumeMoves = VolumeMoves(viewModelScope, SnackbarHostState())
 
     /**
      * Only the first [viewModel] call for a given store builds the engine; later calls return that
@@ -105,6 +139,18 @@ class LibraryEngine(
         reikaiLibraryPreferences.libraryContentType.changes()
             .stateIn(viewModelScope, SharingStarted.Eagerly, reikaiLibraryPreferences.libraryContentType.get())
     }
+
+    /**
+     * The series hidden from the library view, null until first read. Eager once started, because the
+     * tag picker reads it synchronously when it opens; the assembly waits for it rather than drawing a
+     * hidden series for a frame.
+     */
+    private val hiddenSeries: StateFlow<Set<EntryId>?> by lazy {
+        hideSeries.subscribeAll().stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    }
+
+    /** Whether the overflow menu offers Statistics. */
+    val statsInMenus: StateFlow<Boolean> by lazy { uiPreferences.statsShortcut.inMenus(viewModelScope) }
 
     /**
      * The library-wide display config, hoisted off the manga model because it is one setting for the
@@ -143,6 +189,7 @@ class LibraryEngine(
                 reikaiLibraryPreferences.groupLibraryBy.changes(),
                 reikaiLibraryPreferences.collapsedDynamicCategories.changes(),
                 reikaiLibraryPreferences.collapsedDynamicAtBottom.changes(),
+                reikaiLibraryPreferences.tagAliasesFlow(),
                 ::GroupPrefs,
             ),
         ) { list, group ->
@@ -155,13 +202,20 @@ class LibraryEngine(
                 groupBy = group.groupBy,
                 collapsedDynamic = group.collapsedDynamic,
                 collapsedDynamicAtBottom = group.collapsedDynamicAtBottom,
+                tagAliases = group.tagAliases,
             )
         }
+        val manualFlow = combine(
+            manualOrderRepository.subscribeAll(),
+            manualOrderRepository.subscribeBases(),
+        ) { positions, bases -> ManualOrder(manualPositionsByCategory(positions), bases) }
         combine(
             activeAssemblyInputs(contentType, providers),
             categoryRepository.getUnfilteredAsFlow(),
             prefsFlow,
-        ) { inputs, allCategories, prefs ->
+            manualFlow,
+            hiddenSeries.filterNotNull(),
+        ) { inputs, allCategories, prefs, manual, hidden ->
             // Piggybacked here rather than a collector of its own so it runs exactly when the list
             // changes: a selected entry the assembly dropped must leave the selection too, or the
             // toolbar count promises more than the verbs will touch. Pruned after the assembly, not
@@ -169,7 +223,7 @@ class LibraryEngine(
             // category, an emptied bucket and a lagging dynamic group all do, and those leave the
             // entry in the providers' rows, where the verbs would still find and act on it.
             // No assembly says nothing about what is on screen, so it prunes nothing.
-            assembleFor(inputs, allCategories, prefs)
+            assembleFor(inputs, allCategories, prefs, manual, hidden)
                 ?.also { pruneSelection(it.presentIds) }
         }
             // The transform sorts and buckets the whole library; keep it off the main thread.
@@ -193,6 +247,8 @@ class LibraryEngine(
         inputs: ActiveAssemblyInputs,
         allCategories: List<Category>,
         prefs: AssemblyPrefs,
+        manual: ManualOrder,
+        hidden: Set<EntryId>,
     ): LibraryAssembled? {
         val chip = inputs.chip
         val active = providersFor(chip)
@@ -200,7 +256,9 @@ class LibraryEngine(
         // A provider in the view that has not loaded yet means no assembly, never one without its rows:
         // the tab would draw that as the whole library, short by every entry of that type. One outside
         // the view is not waited for, or the Manga chip would sit behind the novel plugins loading.
-        val rows = shown.flatMap { it.rows ?: return null }
+        // A hidden series leaves here, before bucketing, so every count, selection and pick follows.
+        val (hiddenRows, rows) = shown.flatMap { it.rows ?: return null }
+            .partition { isHiddenFromLibrary(it, hidden) }
         val searchActive = shown.any { !it.searchQuery.isNullOrEmpty() }
         // Lazy per provider, so only a view actually sorting by tracker score pays the computation.
         val means = active.associate { it.contentType to lazy(it::trackerMeans) }
@@ -212,24 +270,27 @@ class LibraryEngine(
                 randomSeed = prefs.seed,
                 showHiddenCategories = prefs.showHidden,
                 categorySortOrder = prefs.categorySortOrder,
+                manualPositions = manual.positions,
+                manualBases = manual.bases,
             )
             assembleLibrary(rows, categories, inputs, fields)
         } else {
             assembleDynamicGroups(active, rows, prefs, fields)
         }
-        val itemsByKey = assembledList.associate { it.first.key to it.second }
         val byType = providers.associateBy { it.contentType }
+        // Here, on Default, rather than at read: the tab reads every bucket's size on Main (row starts,
+        // header indices, the whole-library count), so a lazy overlay ran the whole pass there anyway.
+        val itemsByKey = assembledList.associate { (bucket, items) ->
+            bucket.key to items.map { item -> byType[item.entryId.contentType]?.overlaid(item) ?: item }
+        }
         val showCounts = prefs.showCounts || searchActive
         return LibraryAssembled(
             chip = chip,
             buckets = assembledList.map { it.first },
             presentIds = presentIdsOf(assembledList),
-            items = { bucket ->
-                itemsByKey[bucket.key].orEmpty().map { item ->
-                    byType[item.entryId.contentType]?.overlaid(item) ?: item
-                }
-            },
+            items = { bucket -> itemsByKey[bucket.key].orEmpty() },
             counts = { bucket -> if (showCounts) itemsByKey[bucket.key]?.size else null },
+            isAllHidden = rows.isEmpty() && hiddenRows.isNotEmpty(),
         )
     }
 
@@ -257,6 +318,7 @@ class LibraryEngine(
             notTrackedLabel = context.stringResource(MR.strings.not_tracked),
             ungroupedLabel = context.stringResource(MR.strings.group_ungrouped),
             categorySortOrder = prefs.categorySortOrder,
+            tagAliases = prefs.tagAliases,
             sourceMeta = feeds.fold(emptyMap()) { acc, feed -> acc + feed.sourceMeta },
             trackStatuses = feeds.fold(emptyMap()) { acc, feed -> acc + feed.trackStatuses },
             languageCodes = feeds.fold(emptyMap()) { acc, feed -> acc + feed.languageCodes },
@@ -294,10 +356,13 @@ class LibraryEngine(
         val showCounts: Boolean,
     )
 
+    private data class ManualOrder(val positions: Map<Long, Map<EntryId, Long>>, val bases: Map<Long, Long>)
+
     private data class GroupPrefs(
         val groupBy: Int,
         val collapsedDynamic: Set<String>,
         val collapsedDynamicAtBottom: Boolean,
+        val tagAliases: TagAliases,
     )
 
     private data class AssemblyPrefs(
@@ -309,15 +374,15 @@ class LibraryEngine(
         val groupBy: Int,
         val collapsedDynamic: Set<String>,
         val collapsedDynamicAtBottom: Boolean,
+        val tagAliases: TagAliases,
     )
 
     /** Grid shape, the other half of the display config. Both are library-wide, not per content type. */
     fun displayMode(): PreferenceMutableState<LibraryDisplayMode> =
-        libraryPreferences.displayMode.asState(viewModelScope)
+        libraryPreferences.gridDisplayMode(viewModelScope)
 
     fun columnsForOrientation(isLandscape: Boolean): PreferenceMutableState<Int> =
-        (if (isLandscape) libraryPreferences.landscapeColumns else libraryPreferences.portraitColumns)
-            .asState(viewModelScope)
+        libraryPreferences.gridColumns(viewModelScope, isLandscape)
 
     private val selectionStore = SelectionStore<EntryId>()
     val selection: StateFlow<Set<EntryId>> = selectionStore.selection
@@ -358,6 +423,16 @@ class LibraryEngine(
     }
 
     /**
+     * A search sent from another screen, which lands on the chip of its type, or on the shown type's
+     * while Show hides that one, since a details screen opened by link can ask for either.
+     */
+    fun searchFrom(requested: ContentType, query: String?) {
+        val type = requested.within(reikaiLibraryPreferences.shownContent.get())
+        setContentType(type)
+        search(type, query)
+    }
+
+    /**
      * Persist a chip's settled page, which [initialPageFor] seeds that chip's pager from. Per chip: the
      * three pagers index different category lists, so one shared key meant a swipe under All rewrote
      * the Manga chip's restore point with a foreign index.
@@ -393,9 +468,9 @@ class LibraryEngine(
     fun settingsFor(contentType: ContentType): LibrarySettingsBinding = settingsBindings.getValue(contentType).value
 
     private val settingsBindings: Map<ContentType, Lazy<LibrarySettingsBinding>> =
-        ContentType.entries.associateWith { type -> lazy { settingsBinding(providerSettingsFor(type)) } }
+        ContentType.entries.associateWith { type -> lazy { settingsBinding(type, providerSettingsFor(type)) } }
 
-    private fun settingsBinding(view: LibraryProviderSettings) = LibrarySettingsBinding(
+    private fun settingsBinding(type: ContentType, view: LibraryProviderSettings) = LibrarySettingsBinding(
         filterAxes = view.filterAxes,
         trackerFilter = libraryPreferences::filterTracking,
         categoryFilter = LibraryCategoryFilter(
@@ -403,12 +478,15 @@ class LibraryEngine(
             included = reikaiLibraryPreferences.filterCategoriesInclude,
             excluded = reikaiLibraryPreferences.filterCategoriesExclude,
         ),
+        tagFilter = LibraryTagFilter(reikaiLibraryPreferences) {
+            offeredTags(providersFor(type).flatMap { it.seriesTagRows() }, hiddenSeries.value.orEmpty())
+        },
         categories = view.categories,
         groupMode = reikaiLibraryPreferences.groupLibraryBy,
         globalSort = globalSort,
         setSort = ::setSort,
         resetSort = ::resetSort,
-        showLocalBadge = view.showLocalBadge,
+        resetManualOrder = ::resetManualOrder,
     )
 
     /**
@@ -424,7 +502,79 @@ class LibraryEngine(
     }
 
     private fun setSort(categoryId: Long?, type: LibrarySort.Type, direction: LibrarySort.Direction) {
-        viewModelScope.launchIO { setSortModeForCategory.await(categoryId, type, direction) }
+        viewModelScope.launchIO {
+            if (type == LibrarySort.Type.Manual) recordManualBases(categoryId)
+            setSortModeForCategory.await(categoryId, type, direction)
+        }
+    }
+
+    /**
+     * The categories a sort chosen from [categoryId]'s sheet applies to, by the rule the write uses: that
+     * category alone when it keeps sorts of its own, otherwise every category following the global sort.
+     */
+    private suspend fun sortScope(categoryId: Long?, type: LibrarySort.Type): List<Category> {
+        val all = categoryRepository.getUnfiltered()
+        val category = categoryId?.let { id -> all.find { it.id == id } }
+        if (sortsOnItsOwn(category, type, libraryPreferences.categorizedDisplaySettings.get())) {
+            return listOfNotNull(category)
+        }
+        return all.filterNot(::isSortOverridden)
+    }
+
+    /** Keeps the sort each category shows before it turns Manual, which orders what has no position yet. */
+    private suspend fun recordManualBases(categoryId: Long?) {
+        val global = libraryPreferences.sortingMode.get()
+        sortScope(categoryId, LibrarySort.Type.Manual).forEach { category ->
+            val shown = sortForCategory(category, global)
+            if (shown.type != LibrarySort.Type.Manual) manualOrderRepository.setBase(category.id, shown.flag)
+        }
+    }
+
+    // One write at a time, so a drop reads the order the previous one left; Undo waits on the drop it undoes,
+    // since a tap can land before that drop's write has.
+    private val manualOrderLane = Mutex()
+    private var undoableMove: Pair<Long, Deferred<List<ManualOrderPosition>>>? = null
+
+    /**
+     * Stores [order], the tiles shown of [category], as its Manual order. Under a content-type chip the other
+     * type's tiles are hidden and keep their places ([reorderedPositions]). Each merged series' members share
+     * its position, as its lead can change. The order it replaces is kept for [undoManualMove].
+     */
+    fun moveInCategory(category: Category, order: List<LibraryItem>) {
+        val tiles = order.map { item -> item.memberIds().mapTo(HashSet()) { item.entryId.contentType to it } }
+        val move = appScope.async(Dispatchers.IO) {
+            manualOrderLane.withLock {
+                val previous = manualOrderRepository.getCategory(category.id)
+                manualOrderRepository.replaceCategory(category.id, reorderedPositions(category.id, previous, tiles))
+                previous
+            }
+        }
+        undoableMove = category.id to move
+    }
+
+    /** Puts back the order the last move replaced. */
+    fun undoManualMove() {
+        val (categoryId, move) = undoableMove ?: return
+        undoableMove = null
+        appScope.launchIO {
+            val previous = move.await()
+            manualOrderLane.withLock { manualOrderRepository.replaceCategory(categoryId, previous) }
+        }
+    }
+
+    /**
+     * Drops a stored Manual order, so the category shows its starting sort again: [categoryId]'s alone from
+     * its own sort menu, every Manual category's from the global one (a null [categoryId]).
+     */
+    private fun resetManualOrder(categoryId: Long?) {
+        appScope.launchIO {
+            val global = libraryPreferences.sortingMode.get()
+            categoryRepository.getUnfiltered()
+                .filter { categoryId == null || it.id == categoryId }
+                .filter { sortForCategory(it, global).type == LibrarySort.Type.Manual }
+                .forEach { manualOrderLane.withLock { manualOrderRepository.replaceCategory(it.id, emptyList()) } }
+            undoableMove = null
+        }
     }
 
     private fun resetSort(categoryId: Long) {
@@ -449,6 +599,11 @@ class LibraryEngine(
 
     fun toggleAllCategoriesCollapsed(buckets: List<LibraryBucket>) {
         reikaiLibraryPreferences.toggleAllCategoriesCollapsed(buckets)
+    }
+
+    /** The hopper's resting side, library-wide like the collapse above, so written here and not on a model. */
+    fun setHopperGravity(value: Int) {
+        reikaiLibraryPreferences.hopperGravity.set(value)
     }
 
     /**
@@ -533,17 +688,47 @@ class LibraryEngine(
         dispatchAndClear(contentType) { it.markReadSelection(selection.value, read) }
 
     fun performDownloadAction(contentType: ContentType, action: DownloadAction) {
-        // Skip providers whose part of the selection cannot download (all-local manga): forwarding
-        // anyway would queue downloads for entries the action button was hidden for.
+        // Skip providers whose part of the selection cannot download: forwarding anyway would queue
+        // downloads for entries the action button was hidden for.
         val selection = selection.value
         providersFor(contentType)
-            .filter { it.canDownload(selection) }
+            .downloading(selection)
             .forEach { it.performDownloadAction(selection, action) }
         clearSelection()
     }
 
-    fun mergeSelection(contentType: ContentType) =
+    /** The providers owning part of [entries] with no local entry in it, which has nothing to download. */
+    private fun List<LibraryProvider>.downloading(entries: Set<EntryId>): List<LibraryProvider> =
+        owning(entries).filterNot { it.containsLocal(entries) }
+
+    /** Hides the selection's series from the library view, on the app scope as every library write is. */
+    fun hideSelection() {
+        val entries = selection.value
+        clearSelection()
+        appScope.launchIO { hideSeries.hide(entries) }
+    }
+
+    fun mergeSelection(contentType: ContentType) {
+        if (!canMergeSelection()) return
         dispatchAndClear(contentType) { it.mergeSelection(selection.value) }
+    }
+
+    /**
+     * Whether Merge takes the selection: grouping on, and two or more entries of one type. A merge group
+     * is per content type, so a mixed gesture would silently write two groups; with grouping off the
+     * manager refuses the merge and the collapse never marks a row Unmerge could reach.
+     */
+    fun canMergeSelection(): Boolean {
+        val entries = selection.value
+        return display.value.reikai.seriesMergingEnabled &&
+            entries.size >= 2 &&
+            singleContentType(entries.map { it.contentType }) != null
+    }
+
+    /** Whether Export takes the selection: novels only, and not all of them local, whose files are on the device. */
+    fun canExportSelection(contentType: ContentType): Boolean =
+        singleContentType(selection.value.map { it.contentType }) == ContentType.NOVELS &&
+            !selectionAllLocal(contentType)
 
     fun unmergeSelection(contentType: ContentType) =
         dispatchAndClear(contentType) { it.unmergeSelection(selection.value) }
@@ -638,10 +823,41 @@ class LibraryEngine(
     fun selectionContainsMerged(contentType: ContentType): Boolean =
         providersFor(contentType).any { it.containsMerged(selection.value) }
 
+    /** Whether Combine as volumes takes the selection: two or more local series of one type, none merged. */
+    fun canCombineSelection(contentType: ContentType): Boolean {
+        val entries = selection.value
+        entries.map { it.contentType }.distinct().singleOrNull() ?: return false
+        return entries.size >= 2 && !selectionContainsMerged(contentType) && selectionAllLocal(contentType)
+    }
+
+    /** Whether every selected entry is a local series, whose files are on the device already. */
+    fun selectionAllLocal(contentType: ContentType): Boolean {
+        val entries = selection.value
+        val providers = providersFor(contentType).owning(entries)
+        return entries.isNotEmpty() && entries.all { entry -> providers.any { it.containsLocal(setOf(entry)) } }
+    }
+
+    fun openCombineDialog() {
+        val entries = selection.value
+        val type = entries.map { it.contentType }.distinct().singleOrNull() ?: return
+        appScope.launchIO {
+            val series = combineLocalVolumes.series(type, entries.map { it.rawId })
+            val canOrganize = series.all { combineLocalVolumes.canOrganize(type, it) }
+            withUIContext { mutableDialog.value = LibraryDialog.CombineVolumes(type, entries, series, canOrganize) }
+        }
+    }
+
+    /** Combines the dialog's series into [kept]; the move outlives the screen, as every library write does. */
+    suspend fun combineVolumes(dialog: LibraryDialog.CombineVolumes, kept: CombinableSeries): LocalVolumeMove? {
+        if (stillSelected(dialog.entries).size != dialog.entries.size) return null
+        clearSelection()
+        return combineLocalVolumes.combine(dialog.type, kept, dialog.series - kept)
+    }
+
     /** The bulk Download action applies when ANY provider's part of the selection can download,
      *  so a mixed local-manga + novel selection keeps the action; dispatch skips the rest. */
     fun canDownloadSelection(contentType: ContentType): Boolean =
-        providersFor(contentType).any { it.canDownload(selection.value) }
+        providersFor(contentType).downloading(selection.value).isNotEmpty()
 
     private fun dispatchAndClear(contentType: ContentType, action: (LibraryProvider) -> Unit) {
         providersFor(contentType).forEach(action)
@@ -686,3 +902,14 @@ internal class ProviderAssemblyInputs(val rows: List<LibraryItem>?, val searchQu
 
 /** [perProvider] is aligned with the engine's providers, null for one [chip] hides. */
 internal data class ActiveAssemblyInputs(val chip: ContentType, val perProvider: List<ProviderAssemblyInputs?>)
+
+private fun manualPositionsByCategory(positions: List<ManualOrderPosition>): Map<Long, Map<EntryId, Long>> =
+    positions.groupBy { it.categoryId }.mapValues { (_, rows) ->
+        rows.associate { row ->
+            val id = when (row.contentType) {
+                ContentType.MANGA -> EntryId.Manga(row.entryId)
+                else -> EntryId.Novel(row.entryId)
+            }
+            id to row.position
+        }
+    }

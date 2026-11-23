@@ -16,7 +16,12 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import reikai.data.novel.NovelChapterSyncRules
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstones
+import reikai.domain.entry.EntryId
+import reikai.domain.entry.signedKey
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
@@ -24,6 +29,7 @@ import reikai.domain.novel.model.NovelUpdate
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.host.ChapterItem
 import reikai.novel.host.NovelItem
+import reikai.novel.source.LockedSeriesSource
 import reikai.novel.source.NovelSource
 import reikai.util.idleAppScope
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
@@ -32,6 +38,7 @@ import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
 import tachiyomi.domain.chapter.model.NoChaptersException
 import tachiyomi.domain.library.service.LibraryPreferences
+import tachiyomi.domain.manga.model.MangaCover
 import java.io.File
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.days
@@ -113,17 +120,19 @@ class NovelRefreshTest {
         manualFetch: Boolean = false,
         preferences: LibraryPreferences = libraryPreferences,
         downloadManager: NovelDownloadManager = mockk(relaxed = true),
+        viewedPage: Long? = null,
     ) = refreshNovelFromSource(
         novel,
         source,
         chapters,
         novels,
         preferences,
-        NoChapterNumberOverrides,
+        NovelChapterSyncRules(NoChapterNumberOverrides, InMemoryChapterCopyMarks(), NoChapterTombstones),
         coverCache,
         novelDownloadManager = downloadManager,
         manualFetch = manualFetch,
         fetchWindow = Instant.fromEpochMilliseconds(1_000L)..Instant.fromEpochMilliseconds(2_000L),
+        viewedPage = viewedPage,
     )
 
     /** A refresh writes only what the source owns, so a change made to the novel since the job read it stays. */
@@ -140,6 +149,28 @@ class NovelRefreshTest {
         refresh(novel, PagedSource(oneChapter, summary = "New description"))
 
         novels.getById(novel.id)!!.let { it.favorite to it.notes } shouldBe (false to "x")
+    }
+
+    /** A local series' parse and row sync run inside one hold of its own folder's lock, so no move lands between. */
+    @Test
+    fun `a refresh parses and writes its chapters inside the lock on its own folder`() = runTest {
+        val novel = storedNovel()
+        val source = LockedSource(PagedSource(oneChapter)) { chapters.getByNovelId(novel.id).size }
+
+        refresh(novel, source)
+
+        Triple(source.parsedInside, source.rowsAtRelease, source.lockedPaths) shouldBe Triple(true, 1, listOf("/novel"))
+    }
+
+    /** A relink moves the stored address while the screen still holds the novel it showed before. */
+    @Test
+    fun `a refresh handed the novel from before a relink parses its new address`() = runTest {
+        val novel = storedNovel()
+        val source = LockedSource(PagedSource(oneChapter)) { chapters.getByNovelId(novel.id).size }
+
+        refresh(novel.copy(url = "/old"), source)
+
+        source.parsedPaths shouldBe listOf("/novel")
     }
 
     @Test
@@ -172,7 +203,7 @@ class NovelRefreshTest {
             downloadManager = downloads,
         )
 
-        coVerify { downloads.renameNovel(match { it.title == "Novel" }, "Renamed") }
+        coVerify { downloads.renameNovel(match { it.title == "Novel" }, "Renamed", any()) }
     }
 
     // A plugin fills a name its page lacks with a placeholder (webnovel.ts `'No Title Found'`).
@@ -374,7 +405,7 @@ class NovelRefreshTest {
         chapters,
         novels,
         libraryPreferences,
-        NoChapterNumberOverrides,
+        NovelChapterSyncRules(NoChapterNumberOverrides, InMemoryChapterCopyMarks(), NoChapterTombstones),
         page = page,
     )
 
@@ -414,8 +445,212 @@ class NovelRefreshTest {
             novels,
             chapters,
             libraryPreferences,
-            NoChapterNumberOverrides,
+            NovelChapterSyncRules(NoChapterNumberOverrides, InMemoryChapterCopyMarks(), NoChapterTombstones),
         )!!
+
+    /** A three-page novel stored through its last page, with one chapter per page. */
+    private suspend fun threeStoredPages(): Novel {
+        val novel = storedNovel(totalPages = 3L)
+        (1..3).forEach { storedChapter(novel, "/c/$it", it.toDouble(), read = false, page = "$it") }
+        return novel
+    }
+
+    private fun pagesThrough(last: Int, failingOnce: MutableSet<String> = mutableSetOf()) = PagedSource(
+        listOf(chapter("/c/1", 1.0)),
+        (2..last).associate { "$it" to listOf(chapter("/c/$it", it.toDouble())) },
+        failingOnce = failingOnce,
+    )
+
+    @Test
+    fun `a page that failed during a walk is fetched by the next refresh`() = runTest {
+        val novel = threeStoredPages()
+        val source = pagesThrough(6, failingOnce = mutableSetOf("5"))
+        refresh(novel, source)
+
+        refresh(novels.getById(novel.id)!!, source).newChapters.map { it.url } shouldBe listOf("/c/5")
+    }
+
+    @Test
+    fun `a page the source dropped loses its stored chapters`() = runTest {
+        val novel = threeStoredPages()
+
+        refresh(novel, pagesThrough(2))
+
+        chapters.getByNovelId(novel.id).map { it.url }.sorted() shouldBe listOf("/c/1", "/c/2")
+    }
+
+    /** Page 2 sits below the last page, which a walk would not fetch again, so the chapter moved there unseen. */
+    @Test
+    fun `a chapter moved down from a dropped page keeps its row and read state`() = runTest {
+        val novel = storedNovel(totalPages = 4L)
+        (1..4).forEach { storedChapter(novel, "/c/$it", it.toDouble(), read = it == 4, page = "$it") }
+        val id = rowsFor(novel, "/c/4").single().id
+        val source = PagedSource(
+            listOf(chapter("/c/1", 1.0)),
+            mapOf("2" to listOf(chapter("/c/2", 2.0), chapter("/c/4", 4.0)), "3" to listOf(chapter("/c/3", 3.0))),
+        )
+
+        refresh(novel, source)
+
+        rowsFor(novel, "/c/4").map { Triple(it.id, it.read, it.page) } shouldBe listOf(Triple(id, true, "2"))
+    }
+
+    /** A failed page may be where a dropped page's chapters moved, so nothing past the last page goes this time. */
+    @Test
+    fun `a page that failed to load keeps the chapters of a dropped page`() = runTest {
+        val novel = storedNovel(totalPages = 4L)
+        (1..4).forEach { storedChapter(novel, "/c/$it", it.toDouble(), read = false, page = "$it") }
+
+        refresh(novel, pagesThrough(3, failingOnce = mutableSetOf("2")))
+
+        rowsFor(novel, "/c/4").map { it.page } shouldBe listOf("4")
+    }
+
+    /** A novel stored through page [mark] with one chapter on each of pages 1 to [last], the one on [last] read. */
+    private suspend fun storedPages(mark: Long, last: Int): Novel {
+        val novel = storedNovel(totalPages = mark)
+        (1..last).forEach { storedChapter(novel, "/c/$it", it.toDouble(), read = it == last, page = "$it") }
+        return novel
+    }
+
+    /** A source listing one chapter on each of pages 1 to [last], whose parse reports [reported] pages. */
+    private fun listing(last: Int, reported: Int) = PagedSource(
+        listOf(chapter("/c/1", 1.0)),
+        (2..last).associate { "$it" to listOf(chapter("/c/$it", it.toDouble())) },
+        totalPages = reported,
+    )
+
+    private suspend fun storedUrls(novel: Novel) = chapters.getByNovelId(novel.id).map { it.url }.sorted()
+
+    // Several plugins report 0 pages when their count parse misses, which says nothing about the novel's pages.
+    @Test
+    fun `a parse reporting no page count keeps the rows on later pages`() = runTest {
+        val novel = storedPages(mark = 3L, last = 3)
+        val before = rowsFor(novel, "/c/3").map { it.id to it.read }
+
+        refresh(novel, listing(3, reported = 0))
+
+        rowsFor(novel, "/c/3").map { it.id to it.read } shouldBe before
+    }
+
+    /** The stored count is how far walks got, not the source's count, so rows past it are no page the source dropped. */
+    @Test
+    fun `a parse reporting no page count drops no page past the stored count`() = runTest {
+        val novel = storedPages(mark = 2L, last = 4)
+
+        refresh(novel, listing(4, reported = 0))
+
+        storedUrls(novel) shouldBe listOf("/c/1", "/c/2", "/c/3", "/c/4")
+    }
+
+    /** A challenge page loads without an error yet lists nothing, and it may be where a dropped page's chapters went. */
+    @Test
+    fun `an empty page in a dropping walk keeps the chapters of a dropped page`() = runTest {
+        val novel = storedPages(mark = 4L, last = 4)
+        val source = PagedSource(
+            listOf(chapter("/c/1", 1.0)),
+            mapOf("2" to emptyList(), "3" to listOf(chapter("/c/3", 3.0))),
+        )
+
+        refresh(novel, source)
+
+        rowsFor(novel, "/c/4").map { it.page } shouldBe listOf("4")
+    }
+
+    /** A plugin whose page count parse falls back too low still serves the page after it. */
+    @Test
+    fun `a page count the next page disproves drops no page`() = runTest {
+        val novel = storedPages(mark = 4L, last = 4)
+
+        refresh(novel, listing(4, reported = 2))
+
+        storedUrls(novel) shouldBe listOf("/c/1", "/c/2", "/c/3", "/c/4")
+    }
+
+    @Test
+    fun `a page count the next page disproves keeps the stored count`() = runTest {
+        val novel = storedPages(mark = 4L, last = 4)
+
+        refresh(novel, listing(4, reported = 2))
+
+        novels.getById(novel.id)!!.totalPages shouldBe 4L
+    }
+
+    @Test
+    fun `a single page count the next page disproves keeps the later pages`() = runTest {
+        val novel = storedPages(mark = 3L, last = 3)
+
+        refresh(novel, listing(3, reported = 1))
+
+        storedUrls(novel) shouldBe listOf("/c/1", "/c/2", "/c/3")
+    }
+
+    @Test
+    fun `a novel that shrank to one page loses the rows of its later pages`() = runTest {
+        val novel = storedPages(mark = 3L, last = 3)
+
+        refresh(novel, listing(1, reported = 1))
+
+        storedUrls(novel) shouldBe listOf("/c/1")
+    }
+
+    @Test
+    fun `a refresh that drops nothing fetches no page past the source's last`() = runTest {
+        val novel = threeStoredPages()
+        val source = pagesThrough(3)
+
+        refresh(novel, source)
+
+        source.fetchedPages shouldBe listOf("3")
+    }
+
+    /** A newest-first source: the release that pushes the list onto a second page lands on the first. */
+    @Test
+    fun `a novel that grows a second page reports the new chapter on its first`() = runTest {
+        val novel = storedNovel()
+        storedChapter(novel, "/c/1", 1.0, read = false)
+        storedChapter(novel, "/c/2", 2.0, read = false)
+        val source = PagedSource(
+            listOf(chapter("/c/3", 3.0), chapter("/c/2", 2.0)),
+            mapOf("2" to listOf(chapter("/c/1", 1.0))),
+        )
+
+        refresh(novel, source).newChapters.map { it.url } shouldBe listOf("/c/3")
+    }
+
+    @Test
+    fun `a chapter added to the previously last page is reported with the page that opened after it`() = runTest {
+        val novel = threeStoredPages()
+        val source = PagedSource(
+            listOf(chapter("/c/1", 1.0)),
+            mapOf(
+                "2" to listOf(chapter("/c/2", 2.0)),
+                "3" to listOf(chapter("/c/3", 3.0), chapter("/c/3.5", 3.5)),
+                "4" to listOf(chapter("/c/4", 4.0)),
+            ),
+        )
+
+        refresh(novel, source).newChapters.map { it.url } shouldBe listOf("/c/3.5", "/c/4")
+    }
+
+    @Test
+    fun `the back catalogue on an opened novel's last page is not reported as new`() = runTest {
+        val opened = open(twoPages)
+        novels.update(NovelUpdate(opened.id) { favoriteAt = Instant.fromEpochMilliseconds(0L) })
+
+        refresh(novels.getById(opened.id)!!, twoPages).newChapters shouldBe emptyList()
+    }
+
+    @Test
+    fun `a new chapter on the viewed middle page is reported`() = runTest {
+        val novel = threeStoredPages()
+        val source = PagedSource(
+            listOf(chapter("/c/1", 1.0)),
+            mapOf("2" to listOf(chapter("/c/2", 2.0), chapter("/c/2.5", 2.5)), "3" to listOf(chapter("/c/3", 3.0))),
+        )
+
+        refresh(novel, source, viewedPage = 2L).newChapters.map { it.url } shouldBe listOf("/c/2.5")
+    }
 
     @Test
     fun `an opened novel is stored outside the library`() = runTest {
@@ -461,5 +696,34 @@ class NovelRefreshTest {
             if (update.nextUpdate != null) predictions++
             return real.update(update)
         }
+    }
+}
+
+/** [inner] with its lock hold counted, so a test can tell what ran inside it; [rowsNow] is read as the hold ends. */
+private class LockedSource(
+    private val inner: NovelSource,
+    private val rowsNow: suspend () -> Int,
+) : NovelSource by inner,
+    LockedSeriesSource {
+    var parsedInside = false
+    var rowsAtRelease = -1
+    val parsedPaths = mutableListOf<String>()
+    val lockedPaths = mutableListOf<String>()
+    private var holds = 0
+
+    override suspend fun <T> locked(novelPath: String, block: suspend () -> T): T {
+        holds++
+        lockedPaths += novelPath
+        try {
+            return block()
+        } finally {
+            rowsAtRelease = rowsNow()
+            holds--
+        }
+    }
+
+    override suspend fun parseNovel(novelPath: String) = inner.parseNovel(novelPath).also {
+        parsedInside = holds > 0
+        parsedPaths += novelPath
     }
 }

@@ -1,5 +1,6 @@
 package tachiyomi.data.manga
 
+import app.cash.sqldelight.async.coroutines.awaitAsOneOrNull
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.ContributesBinding
 import dev.zacsweers.metro.Inject
@@ -28,6 +29,9 @@ class CustomMangaInfoRepositoryImpl(
         return database.custom_manga_infoQueries.getAll(::mapCustomMangaInfo).subscribeToList()
     }
 
+    override suspend fun getByMangaId(mangaId: Long): CustomMangaInfo? =
+        database.custom_manga_infoQueries.getByMangaId(mangaId, ::mapCustomMangaInfo).awaitAsOneOrNull()
+
     override suspend fun set(info: CustomMangaInfo) {
         database.custom_manga_infoQueries.insert(
             mangaId = info.mangaId,
@@ -38,6 +42,8 @@ class CustomMangaInfoRepositoryImpl(
             genre = info.genre,
             status = info.status,
             thumbnailUrl = info.thumbnailUrl,
+            // Stored as null when empty, so a row without alternative titles reads as one from before the column.
+            altTitles = info.altTitles.takeIf { it.isNotEmpty() },
         )
     }
 
@@ -54,6 +60,7 @@ class CustomMangaInfoRepositoryImpl(
         genre: List<String>?,
         status: Long?,
         thumbnailUrl: String?,
+        altTitles: List<String>?,
     ): CustomMangaInfo = CustomMangaInfo(
         mangaId = mangaId,
         title = title,
@@ -63,5 +70,6 @@ class CustomMangaInfoRepositoryImpl(
         genre = genre,
         status = status,
         thumbnailUrl = thumbnailUrl,
+        altTitles = altTitles.orEmpty(),
     )
 }

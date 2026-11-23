@@ -8,11 +8,11 @@ test over both content types, mutation checking) are in
 
 ## Unit tests
 
-Five modules carry JVM tests: `:app`, `:core:common`, `:data`, `:domain` and `:source-api` (each under
+Six modules carry JVM tests: `:app`, `:core:common`, `:data`, `:domain`, `:presentation-core` and `:source-api` (each under
 `src/test`). Every one is an Android module, so the tasks are AGP's: `test` runs every variant,
 `testDebugUnitTest` runs only debug. The build logic puts every `Test` task on the JUnit Platform
 (`configureTest` in `gradle/build-logic/src/main/kotlin/mihon/gradle/extensions/Project.kt`). The
-test stack is JUnit 5 (Jupiter), Kotest assertions only (no Kotest specs) and MockK, from the `test`
+test stack is JUnit 6 (Jupiter), Kotest assertions only (no Kotest specs) and MockK, from the `test`
 bundle in `gradle/libs.versions.toml`.
 
 ```powershell
@@ -79,6 +79,11 @@ There is no shared test-fixtures module, so these live beside the tests that use
 - **`EmittingPreferenceStore`** (`app/src/test/java/reikai/presentation/recents/`): a preference store
   whose `changes()` flows actually emit. `InMemoryPreferenceStore` (in `:core:common` main, also used
   by previews) never emits, so code that combines preference flows produces nothing against it.
+- **`TestNavigation.kt`** (`app/src/test/java/reikai/presentation/`): `testNavigator(...)` builds a
+  navigator over given routes for a rule that only reads or edits the stack; `TestNavHost`, inside
+  `ComposeTestHost`, draws real routes with their own ViewModel stores and the result bus, so a test can
+  push, pop and restore; `roundTrip(route)` puts a route through the save path process death takes
+  (`NavKeySerializer` and a `Parcel`). `TestRootRoute` and `OtherTestRoute` are filler pages.
 - **Restore and reader harnesses:** `MangaRestoreHarness.kt` (a `MangaRestorer` over production's
   repositories), `MangaReaderViewModelHarness.kt`, `NovelReaderViewModelHarness.kt`,
   `DownloadWorkerFixture.kt` and `LnPluginHarness.kt`, all under `app/src/test`.
@@ -122,7 +127,7 @@ Screens and components are tested on the JVM, in the module's ordinary unit suit
 - **Host app screens with `ComposeTestHost`** (`app/src/test/java/reikai/presentation/`): the preview theme, the app's text locals, and a view-model factory over the models the test built. `app/src/test/resources/robolectric.properties` runs a plain `Application`, since the app's own builds the whole graph, and turns Robolectric's Conscrypt off, since the app's `conscrypt-android` breaks it.
 - **Assert on the unmerged tree for a child's size.** A `Tab` (and any clickable that merges its children) answers `onNodeWithText` with its own node, so `TabTextTest` reads the label with `useUnmergedTree = true`; on the merged node the zero-width label it guards against passed.
 - **Measure text under native graphics.** Robolectric's default legacy graphics measures text far narrower than it draws, so a test that reads a text's width or position takes `@GraphicsMode(GraphicsMode.Mode.NATIVE)`, as `TabTextTest`'s narrow-tab case does; under legacy graphics it passed with the clause it guards deleted.
-- **A screen that needs the app graph is split, not faked.** Its `Screen.Content()` keeps the graph lookup and the model, and an internal composable takes the state and the model; the test hosts that over a fake adapter (`EntryMigrationListTest`). A private composable a test needs becomes `internal`.
+- **A screen that needs the app graph is split, not faked.** The route's screen function keeps the graph lookup and the model, and an internal composable takes the state and the model; the test hosts that over a fake adapter (`EntryMigrationListTest`). A private composable a test needs becomes `internal`.
 - **Build stateful parameters per test.** `ParameterizedRobolectricTestRunner` hands every test the same parameter objects, so pass a factory, as `EntryAddDialogsTest` does, when a parameter holds state.
 - **Scroll before tapping in a sheet.** Robolectric's default screen is 320x470 dp, so a dialog's buttons can sit below the fold, where a click lands nowhere: `performScrollTo()` first.
 - **Freeze the clock for timing.** With `compose.mainClock.autoAdvance = false`, `advanceTimeBy` steps the frames and the composition's delays together (`LibraryUpdatePullRefreshTest`).
@@ -138,21 +143,50 @@ A screen not listed here can stop rendering, or lose a button's wiring, with the
 |---|---|---|
 | Library category tabs | `TabTextTest` (`presentation-core`) | a label keeps its width and count in a scrollable row, and a long label gives way to its count in a narrow tab |
 | Library pull-to-refresh | `LibraryUpdatePullRefreshTest` | a pull starts an update and holds the spinner until it runs |
+| Library Manual order | `ManualOrderTest` | a drag reorders, a still long press selects, a tap opens |
+| Library tag filter | `TagFilterPickerTest` | a tag cycles through shown and hidden, saved filters apply and delete, a strip chip clears its tag |
+| Toolbar menus | `AppBarActionsTest` | a menu opens from the button that shows it |
+| Details selection | `DetailsShownSelectionTest` | select all acts on the rows the details filters leave on screen |
+| Details scroll actions | `ChapterJumpsTest` | scroll to top, bottom and next unread land on their row, from the top bar and from the menu |
+| Local series dialogs | `AddVolumesDialogTest`, `MissingVolumeDialogTest`, `RelinkSeriesDialogTest`, `UnfinishedOrganizeViewsTest` | add volumes takes every ticked series, a missing volume or renamed folder is linked only once picked, an unfinished organize is forgotten only on Forget |
+| Organize files | `OrganizeTickTest`, `OrganizeUndoHandOverTest` | Also organize files starts unticked and is hidden where storage cannot move files; the opened screen offers the move's Undo |
 | Reader settings sheet | `ReaderSettingsSheetTest` | every tab's rows, for manga and novels |
+| Reader sheet, manga rows | `MangaReaderSheetRowsTest` | each viewer offers only rows that change something |
+| Reader sheet, tap zones | `TapZonesRowsTest` | which rows each tap layout shows, for both readers |
 | Reader error page, failed-chapter Retry | `ReaderErrorPagesTest` | Retry runs and follows the chapter's state |
+| Reader chrome pages | `ReaderChromePagesTest` | capture sizes, Open in WebView's source, a transition keeps its height, the download badge on the first frame |
+| Reader page indicator | `ReaderPageIndicatorTest` | the largest size draws taller, a backed line spans the screen |
+| Reader bar toggles | `ReaderActionRowToggleTest` | an on button says so, and its fill stands out in lightness only when asked |
+| Reader sheet, novel chapter text | `NovelChapterTextRowsTest` | the Chapter text rows follow the novel's renderer and its paged-only rows its reading mode |
+| Space between pages | `SpreadGapRowsTest` | the row shows only while the reader can show two pages, in both Settings screens and the novel sheet |
+| Reader chapter sheet | `ReaderChapterListDialogTest` | long-press selection and the bulk bar, which never deletes the chapter being read |
+| Reader mouse wheel | `MouseWheelConformanceTest` | a notch turns the same way in both readers |
+| Novel renderer host | `ViewportHostTest` | the page filter sits on the view, not on a page turn's copy |
+| Novel chapter seam | `NovelSeamCardTest` | the missing-chapters warning uses the reader's text colour |
+| Settings > Novel reader | `SettingsNovelReaderScreenTest` | Dual page view shows for paged reading only |
+| Edit info dialog | `EntryEditInfoDialogTest` | save, reset tags, case-insensitive tag dedupe, collate, tag drag, for manga and novels |
+| Show setting and type chips | `ShownContentUiTest` | the choices, and the chips, badges and Recents categories a hidden type takes away |
 | Migration list | `EntryMigrationListTest`, `MigrationListDialogsTest` | back and up ask before stopping; each dialog renders |
+| Migration commit bar | `MigrationCommitBarTest` | the Migrate button clears the navigation bar |
 | Browse long-press dialogs | `EntryAddDialogsTest` | remove, categories, add anyway and group add reach the flow, for manga and novels |
+| Browse sources filter | `SourcesFilterContentTest` | hiding novels on the Novels chip shows the manga half |
+| Extension uninstall prompt | `UninstallPromptDialogTest` | a private extension's and an LN plugin's prompt name what they uninstall, and only Uninstall uninstalls |
+| Local catalogue | `CatalogueLocalSourceTest` | an empty listing offers Import and the guide, no retry; a refresh runs on resume |
 | Saved search chips | `SavedSearchChipTest` | a tap applies, a long press offers deletion |
 | Recents selection bar | `RecentsToolbarTest` | select all, inverse and cancel reach their handlers |
+| Local import | `ImportListTest`, `ImportGroupCardTest` | rows that look alike are all listed; type chips keep one line at the largest font |
+| Add repo dialog | `AddRepoDialogTest` | a plain http address is warned about, an https one is not |
+| Restore repo card | `RestoreInstallItemsTest` | a store's signing key shows, or none for a keyless store |
+| Statistics | `StatsStripTest`, `StatsArrangeListTest`, `StatsDonutWidthTest`, `StatsReadingCardTest`, `StatsScoresCardTest`, `StatsPeriodChipsTest` | the strip in its shelf, hiding and dragging while arranging, the pie by shelf width, the reading card's lines, a score row's series, period chips at the largest font |
 
-Not covered yet, among the larger surfaces: details, the library grid and lists, the recents rows, the downloads queue, the browse grids, Statistics, settings, and tracking. The reader's page rendering is View-based and stays on a device.
+Not covered yet, among the larger surfaces: the details header and chapter rows beyond selection and the scroll actions, the library grid and lists, the recents rows, the downloads queue, the browse grids, settings beyond the Novel reader screen, and tracking. The reader's page rendering is View-based and stays on a device.
 
 ### Screenshot tests
 
 `ScreenshotTest` (`app/src/test/java/reikai/presentation/`) captures each covered screen with Roborazzi into `app/src/test/screenshots/`, and CI's `build_check.yml` compares them with `-Proborazzi.test.verify=true`, uploading the actual and diff images as `screenshot-diffs` when one changes. A plain `./gradlew test` renders them without comparing. Robolectric's native graphics bring their own fonts and renderer, so Windows and Linux produce the same pixels and the images can be recorded anywhere.
 
 - **Variants:** a method-level `@Config(qualifiers = "+night")` renders the dark theme, and `TABLET` a 1280x800 landscape screen, where the reader sheet becomes a dialog. Give layout-sensitive screens both.
-- **Add one** as a test in `ScreenshotTest` (or any class under `@GraphicsMode(NATIVE)`) ending in `capture()`, which waits for Compose to settle (the Roborazzi call alone does not, and caught a sheet mid-animation) and then draws every window, dialogs and sheets included.
+- **Add one** as a test in `ScreenshotTest` ending in its private `capture()`, which waits for Compose to settle (the Roborazzi call alone does not, and caught a sheet mid-animation) and then draws every window, dialogs and sheets included.
 - **Record after an intended change:** `./gradlew :app:recordRoborazziDebug --tests "*ScreenshotTest"`, look at the new images, and commit them with the change.
 - **Check locally:** `./gradlew :app:testDebugUnitTest --tests "*ScreenshotTest" -Proborazzi.test.verify=true`; diffs land in `app/build/outputs/roborazzi/`.
 
@@ -176,11 +210,16 @@ library) afterwards and cannot fetch its UTP artifacts offline:
 With an emulator and a phone both attached, set `ANDROID_SERIAL` so the install and the run hit the
 same device.
 
+`reikai.presentation.reader.WebGpuStripMemoryTest` is the bound on the strip's capture buffers, on the
+library's real renderer. Rerun it on every `webgpuviewer` bump: nothing else runs that library's code,
+and the JVM tests only pin the size Reikai asks it for.
+
 ### The headless LN-plugin test
 
 `reikai.novel.host.HeadlessJsIntegrationTest#lnPluginsRunInProductionHeadlessHost` loads LNReader
 plugins in the production QuickJS host (no WebView, no Activity) and runs search, `parseNovel` and
-`parseChapter` on each. It is network-dependent and on demand only.
+`parseChapter` on each. It is network-dependent and on demand only: it skips unless the run passes
+`-e network true`, so a run of the class for its sandbox tests never depends on a site.
 
 - It fetches the **published** registry (`REGISTRY_URL`, the `v3.0.0` plugins branch), so it tests
   plugins as published, not local edits.
@@ -192,7 +231,7 @@ plugins in the production QuickJS host (no WebView, no Activity) and runs search
 
 ```powershell
 & $adb logcat -c
-& $adb shell am instrument -w -e class reikai.novel.host.HeadlessJsIntegrationTest#lnPluginsRunInProductionHeadlessHost app.reikai.dev.test/androidx.test.runner.AndroidJUnitRunner
+& $adb shell am instrument -w -e network true -e class reikai.novel.host.HeadlessJsIntegrationTest#lnPluginsRunInProductionHeadlessHost app.reikai.dev.test/androidx.test.runner.AndroidJUnitRunner
 & $adb logcat -d -s HeadlessJsTest:I
 ```
 
@@ -284,6 +323,14 @@ adb exec-out run-as app.reikai.dev cat databases/tachiyomi.db > local.db
 ```
 
 Novels live in `novels` and `novel_chapters`.
+
+A dev build that dies of running out of memory first writes its heap to `oom.hprof` in its external files
+folder (`dumpHeapOnFatalOom`, dev builds only). Each death overwrites it. Pull it, convert it with the SDK's
+`hprof-conv`, and open it in Android Studio's profiler:
+
+```bash
+adb pull /sdcard/Android/data/app.reikai.dev/files/oom.hprof
+```
 
 ### Logcat for LN plugins
 

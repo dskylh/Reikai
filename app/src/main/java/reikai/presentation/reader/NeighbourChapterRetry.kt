@@ -3,10 +3,13 @@ package reikai.presentation.reader
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import eu.kanade.presentation.reader.ReaderError
 import eu.kanade.presentation.util.formattedMessage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
-import eu.kanade.tachiyomi.ui.reader.viewer.webgpu.ReaderError
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.stringResource
 
@@ -30,4 +33,18 @@ internal fun NeighbourChapterRetry(
         onRetry = { onRetry(failed) },
         onOpenInWebView = null,
     )
+}
+
+/**
+ * Holds the tallest height this has been. A WebGPU transition page measures to fit, and when the Retry
+ * above clears the page shrinks, which the viewer draws cut off, and stays so until it is rebuilt.
+ */
+internal fun Modifier.keepTallestHeight(): Modifier = composed {
+    val tallest = remember { intArrayOf(0) }
+    layout { measurable, constraints ->
+        val minHeight = maxOf(constraints.minHeight, tallest[0].coerceAtMost(constraints.maxHeight))
+        val placeable = measurable.measure(constraints.copy(minHeight = minHeight))
+        tallest[0] = maxOf(tallest[0], placeable.height)
+        layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+    }
 }

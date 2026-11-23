@@ -16,6 +16,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.source.siteHost
+import reikai.novel.local.LocalNovelPicture
+import reikai.novel.local.LocalNovelSource
 import reikai.novel.source.AppNovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.novel.source.isNovelAppSourceId
@@ -37,6 +39,9 @@ class NovelImageClient(
      */
     fun forUrl(url: String): NovelImageClient = if (elsewhere == null || isSameSite(url, site)) this else elsewhere
 
+    /** The headers a WebView opening [url] gets, by the rule [webViewHeadersFor] states. */
+    fun webViewHeaders(url: String): Map<String, String> = headers.webViewHeadersFor(url, site)
+
     /**
      * The call for the picture at [url], for every novel picture fetch. It skips OkHttp's own cache,
      * which keeps a failed answer that a retry, or downloading the chapter again, then reads back.
@@ -47,6 +52,16 @@ class NovelImageClient(
         return picture.client.newCall(request)
     }
 }
+
+/**
+ * A source's headers for a WebView opening [url]. A failed page's address is whatever the site named, so only
+ * the source's own site gets them all, which can carry a login. Any other host gets what proves the app is the
+ * source's reader and nothing more, since a hotlink check still wants the Referer.
+ */
+internal fun Headers.webViewHeadersFor(url: String, site: String?): Map<String, String> =
+    toWebViewHeaders().filterKeys { isSameSite(url, site) || it.lowercase() in ANY_HOST_HEADERS }
+
+private val ANY_HOST_HEADERS = setOf("user-agent", "referer")
 
 private val NO_STORE = CacheControl.Builder().noStore().build()
 
@@ -73,7 +88,15 @@ class NovelImageRequests(
     private val network: NetworkHelper,
     private val novelPreferences: NovelPreferences,
     private val sourceManager: NovelSourceManager,
+    private val localNovels: () -> LocalNovelSource,
 ) {
+
+    /**
+     * The local novel picture at [url], read from its book. Null for a chapter of any other source, so a
+     * source's chapter naming such an address cannot read the user's own books.
+     */
+    suspend fun localPicture(url: String, sourceId: String?): LocalNovelPicture? =
+        if (LocalNovelSource.isLocal(sourceId)) localNovels().picture(url) else null
 
     suspend fun forSource(sourceId: String?): NovelImageClient {
         appImages(sourceId)?.let { return it }
@@ -90,13 +113,16 @@ class NovelImageRequests(
      * IReader source's cover-request ones, and for an LNReader plugin the User-Agent its fetches send.
      * A source whose headers throw gets none, as a manga source's do in the WebView.
      */
-    suspend fun webViewHeaders(sourceId: String?): Map<String, String> =
+    suspend fun webViewHeaders(sourceId: String?, url: String): Map<String, String> =
         runCatchingCancellable {
-            appImages(sourceId)?.headers?.toWebViewHeaders()
-                ?: pluginWebViewHeaders(sourceId) { deviceWebViewUserAgent(context) }
+            appImages(sourceId)?.webViewHeaders(url)
+                ?: pluginWebViewHeaders(sourceId, seenImageHeaders(sourceId)) { deviceWebViewUserAgent(context) }
         }
             .onFailure { logcat(LogPriority.ERROR, it) { "Failed to build headers" } }
             .getOrDefault(emptyMap())
+
+    private fun seenImageHeaders(sourceId: String?): Map<String, String> =
+        sourceId?.let { novelPreferences.seenNovelSources().get()[it] }?.imageHeaders.orEmpty()
 
     // An app's id is checked first, since the registry answers only once the extension scan is done.
     private suspend fun appImages(sourceId: String?): NovelImageClient? {
@@ -131,12 +157,18 @@ internal fun lnImageHeaders(deviceUserAgent: String, site: String?, pluginHeader
 
 /**
  * An LNReader plugin's WebView headers: the User-Agent its fetches send, so a Cloudflare check passed
- * in the WebView leaves a cookie those fetches can use, since the clearance is tied to the agent.
- * An app source's id gets none here, its own headers being the app's to give.
+ * in the WebView leaves a cookie those fetches can use, since the clearance is tied to the agent. That is
+ * the one its [pluginHeaders] set, else the device's. An app source's id gets none here, its own headers
+ * being the app's to give.
  */
-internal fun pluginWebViewHeaders(sourceId: String?, deviceUserAgent: () -> String): Map<String, String> {
+internal fun pluginWebViewHeaders(
+    sourceId: String?,
+    pluginHeaders: Map<String, String>,
+    deviceUserAgent: () -> String,
+): Map<String, String> {
     if (sourceId == null || isNovelAppSourceId(sourceId)) return emptyMap()
-    val agent = deviceUserAgent()
+    val agent = pluginHeaders.entries.firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }?.value
+        ?: deviceUserAgent()
     return if (agent.isBlank()) emptyMap() else mapOf("user-agent" to agent)
 }
 

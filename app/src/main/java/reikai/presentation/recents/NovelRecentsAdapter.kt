@@ -2,7 +2,6 @@ package reikai.presentation.recents
 
 import android.content.Context
 import android.content.Intent
-import cafe.adriel.voyager.core.screen.Screen
 import dev.zacsweers.metro.Assisted
 import dev.zacsweers.metro.AssistedFactory
 import dev.zacsweers.metro.AssistedInject
@@ -30,6 +29,7 @@ import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.interactor.GetCustomNovelInfo
 import reikai.domain.novel.interactor.GetNextNovelChapter
+import reikai.domain.novel.isOnDevice
 import reikai.domain.novel.model.CustomNovelInfo
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
@@ -45,14 +45,16 @@ import reikai.domain.source.isInstalled
 import reikai.novel.download.NovelDownloadCache
 import reikai.novel.download.NovelDownloadManager
 import reikai.novel.download.toDownloadState
+import reikai.novel.local.LocalNovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.presentation.browse.AddDecision
 import reikai.presentation.browse.AddFavoriteResult
+import reikai.presentation.browse.AddOutcome
 import reikai.presentation.browse.components.toDuplicateCard
 import reikai.presentation.browse.decideAdd
+import reikai.presentation.components.DownloadProgress
 import reikai.presentation.history.NovelHistoryViewModel
 import reikai.presentation.novel.browse.NovelLibraryAdder
-import reikai.presentation.novel.details.NovelScreen
 import reikai.presentation.updates.NovelUpdatesItem
 import reikai.presentation.updates.NovelUpdatesViewModel
 import kotlin.time.Instant
@@ -196,10 +198,10 @@ class NovelRecentsAdapter(
 
     override suspend fun targetRow(item: RecentsItem): RecentsTargetRow? {
         val resolved = resolveTarget(item) ?: return null
-        val missing =
-            missingSourcesAmong(novelRepository.ownersOf(resolved.pooled).values.mapTo(HashSet()) { it.source })
+        // Read once: the copies projected below are a subset of the pooled chapters.
+        val ownerOf = novelRepository.ownersOf(resolved.pooled)
+        val missing = missingSourcesAmong(ownerOf.values.mapTo(HashSet()) { it.source })
         return resolved.toTargetRow(id = { it.id }, project = { copies ->
-            val ownerOf = novelRepository.ownersOf(copies)
             copies.mapNotNull { copy ->
                 val owner = ownerOf[copy.novelId] ?: return@mapNotNull null
                 copy.id to RecentsTargetCopy(
@@ -271,13 +273,13 @@ class NovelRecentsAdapter(
         return novelLibraryAdder.addStoredToLibrary(novel.id)
     }
 
-    override suspend fun applyAddCategories(entry: EntryId, categoryIds: List<Long>) {
-        val novel = novelOf(entry) ?: return
-        novelLibraryAdder.confirmAddCategories(novel.id, categoryIds)
+    override suspend fun applyAddCategories(entry: EntryId, categoryIds: List<Long>): AddOutcome {
+        val novel = novelOf(entry) ?: return AddOutcome.Failed
+        return novelLibraryAdder.confirmAddCategories(novel.id, categoryIds)
     }
 
-    override suspend fun addToGroup(entry: EntryId, duplicates: List<EntryId>): AddFavoriteResult {
-        val novel = novelOf(entry) ?: return AddFavoriteResult.Failed
+    override suspend fun addToGroup(entry: EntryId, duplicates: List<EntryId>): AddOutcome {
+        val novel = novelOf(entry) ?: return AddOutcome.Failed
         return novelLibraryAdder.addToExistingGroup(novel.id, duplicates.map { it.rawId })
     }
 
@@ -286,12 +288,6 @@ class NovelRecentsAdapter(
     // Straight to the job, as the manga adapter goes and for the same two reasons.
     override suspend fun refresh(): Boolean = NovelUpdateWorker.startNow(application.workManager)
 
-    override suspend fun detailsScreen(entry: EntryId): Screen? {
-        val novelId = (entry as? EntryId.Novel)?.rawId ?: return null
-        return NovelScreen.forStored(novelId, novelRepository)
-    }
-
-    // No lookup, unlike detailsScreen: the novel reader is keyed by id, not by source and url.
     override fun open(item: RecentsItem, chapter: ChapterRef): Intent = ReaderActivity.newNovelIntent(
         application,
         item.entryId.rawId,
@@ -308,9 +304,11 @@ class NovelRecentsAdapter(
 
     /** Over the row's copies loaded with the lane ([readCopies]); the Downloaded filter asks this too. */
     private fun historyDownloadUi(payload: NovelHistoryWithRelations) =
-        copiesDownloadUi(payload.chapterId, copies = {
-            with(payload) { readCopies.copiesOf(chapterId, storedTitle, source, chapterName, null, chapterUrl) }
-        }, isInstalled = readCopies::isInstalled)
+        recentsDownloadUi(LocalNovelSource.isLocal(payload.source)) {
+            copiesDownloadUi(payload.chapterId, copies = {
+                with(payload) { readCopies.copiesOf(chapterId, storedTitle, source, chapterName, null, chapterUrl) }
+            }, isInstalled = readCopies::isInstalled)
+        }
 
     private fun copiesDownloadUi(
         chapterId: Long,
@@ -327,7 +325,7 @@ class NovelRecentsAdapter(
         progress = null,
         isInstalled = isInstalled,
     ) { copy ->
-        novelDownloadCacheProvider().isChapterDownloaded(
+        novelDownloadCacheProvider().isOnDevice(
             copy.ownerSource,
             copy.ownerTitle,
             copy.chapterName,
@@ -342,10 +340,12 @@ class NovelRecentsAdapter(
  * renderer could not tell from a download that has genuinely started.
  */
 internal fun novelDownloadUi(item: RecentsItem): RecentsDownloadUi? = when (val payload = item.payload) {
-    is NovelUpdatesItem -> RecentsDownloadUi(
-        state = { payload.downloadState },
-        progress = RecentsDownloadProgress.Unsupported,
-    )
+    is NovelUpdatesItem -> recentsDownloadUi(LocalNovelSource.isLocal(payload.update.source)) {
+        RecentsDownloadUi(
+            state = { payload.downloadState },
+            progress = DownloadProgress.Unsupported,
+        )
+    }
     else -> null
 }
 

@@ -1,5 +1,5 @@
 // Net-new. Streams a backup's top-level protobuf fields one at a time so a large backup is
-// never fully materialised in memory (the read counterpart to BackupCreator.writeProtoField). Used
+// never fully materialised in memory (the read counterpart to BackupProtoWriter.writeField). Used
 // by BackupFileValidator and BackupRestorer to replace the whole-file decodeFromByteArray, which
 // OOMs on large libraries. Generic proto framing, no content-type coupling.
 package eu.kanade.tachiyomi.data.backup
@@ -44,12 +44,18 @@ class BackupProtoReader(
                     val tag = orInvalid { readVarint(payloadSource) } ?: break
                     val wireType = (tag and 0x07).toInt()
                     val fieldNumber = (tag ushr 3).toInt()
+                    // No message has a field 0, so the file is not one; Mihon's whole-file decoder refused it too.
+                    if (fieldNumber ==
+                        0
+                    ) {
+                        throw IOException(context.stringResource(MR.strings.invalid_backup_file_unknown))
+                    }
 
                     when (wireType) {
                         WIRE_TYPE_LENGTH_DELIMITED -> {
                             val length = orInvalid { readVarint(payloadSource) }
                                 ?: throw IOException(context.stringResource(MR.strings.invalid_backup_file_unknown))
-                            if (length > Int.MAX_VALUE) {
+                            if (length !in 0..MAX_FIELD_BYTES) {
                                 throw IOException(context.stringResource(MR.strings.invalid_backup_file_unknown))
                             }
                             val bytes = orInvalid { payloadSource.readByteArray(length) }
@@ -100,6 +106,11 @@ class BackupProtoReader(
     }
 
     companion object {
+        // One field is one entry (a series with its chapters, history and tracks, or one setting),
+        // which runs to a few MB at most. A crafted file can declare and inflate a field past the heap,
+        // and the out-of-memory error buffering it raises is no Exception, so no caller reports it.
+        internal const val MAX_FIELD_BYTES = 64L shl 20
+
         private const val WIRE_TYPE_VARINT = 0
         private const val WIRE_TYPE_64BIT = 1
         private const val WIRE_TYPE_LENGTH_DELIMITED = 2

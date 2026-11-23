@@ -1,10 +1,15 @@
 package reikai.presentation.reader
 
+import android.content.res.Resources
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.View
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
+import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
 import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
+import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation
+import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation.Action
 import eu.kanade.tachiyomi.ui.reader.viewer.pager.PagerViewer
 import eu.kanade.tachiyomi.ui.reader.viewer.pager.R2LPagerViewer
 import eu.kanade.tachiyomi.ui.reader.viewer.webgpu.WebGpuViewer
@@ -14,7 +19,6 @@ import kotlinx.coroutines.flow.Flow
 import reikai.domain.reader.ChapterProgress
 import reikai.domain.reader.pageIndex
 import tachiyomi.core.common.preference.Preference
-import kotlin.math.min
 
 /**
  * The manga adapter under [ReaderViewport], over whatever `ReadingMode.toViewer` built; the novel
@@ -36,10 +40,11 @@ class MangaViewport(
     private val interval: Preference<Int>,
     private val speed: Preference<Float>,
     private val shownPage: Flow<ShownPage>,
+    private val input: MangaViewportInput,
 ) : ReaderViewport {
 
-    override val view: View
-        get() = viewer.getView()
+    @Composable
+    override fun Content(modifier: Modifier) = viewer.Content(modifier)
 
     override fun seekTo(progress: ChapterProgress) {
         val page = progress.pageIndex?.let { visibleChapter()?.pages?.getOrNull(it) } ?: return
@@ -52,14 +57,25 @@ class MangaViewport(
         activeChapter()?.pages?.firstOrNull()?.let(viewer::moveToPage)
     }
 
-    // A picked chapter resumes where it was left, which is what the arriving chapter's requestedPage
-    // says. The pager and the webtoon recycler read that field only on their own first layout, and the
-    // WebGPU viewer only when the reader did not scroll into the chapter, so the seek is issued
-    // from out here rather than by diverging the three viewers.
+    // The page the chapter last handed over asked for, read before the viewer has it: a pager left on its
+    // old index selects one of the new chapter's pages as it rebuilds, and that overwrites requestedPage.
+    private var delivered: Pair<ReaderChapter, Int>? = null
+
+    /** Hands [chapters] to the viewer, the one way the host delivers them. */
+    fun setChapters(chapters: ViewerChapters) {
+        delivered = chapters.currChapter to chapters.currChapter.requestedPage
+        viewer.setChapters(chapters)
+    }
+
+    // A picked or reloaded chapter resumes where it was left, which is what the arriving chapter's
+    // requestedPage says. The pager and the webtoon recycler read that field only on their own first
+    // layout, and the WebGPU viewer only when the reader did not scroll into the chapter, so the seek is
+    // issued from out here rather than by diverging the three viewers.
     override fun onChapterOpened() {
         val chapter = activeChapter() ?: return
         val pages = chapter.pages?.takeIf { it.isNotEmpty() } ?: return
-        viewer.moveToPage(pages[min(chapter.requestedPage, pages.lastIndex)])
+        val requested = delivered?.takeIf { it.first === chapter }?.second ?: chapter.requestedPage
+        viewer.moveToPage(pages[requested.coerceIn(0, pages.lastIndex)])
     }
 
     // The two viewer families spell right-to-left differently, and this is the one place that knows.
@@ -72,20 +88,56 @@ class MangaViewport(
         when (viewer) {
             is WebtoonViewer -> continuous(viewer::autoScrollBy)
             is WebGpuViewerContinuous -> continuous(viewer::autoScrollBy)
-            is PagerViewer -> ViewportAutoScroll.Stepped(interval, shownPage, viewer::moveToNext)
-            is WebGpuViewer -> ViewportAutoScroll.Stepped(interval, shownPage, viewer::moveToNext)
+            is PagerViewer -> ViewportAutoScroll.Stepped(interval, shownPage, viewer::moveForward)
+            is WebGpuViewer -> ViewportAutoScroll.Stepped(interval, shownPage, viewer::moveForward)
             else -> error("No auto-scroll for ${viewer::class}")
         }
     }
 
     private fun continuous(scrollBy: (Int) -> Boolean): ViewportAutoScroll {
-        val scroller = FrameScroller(viewer.getView().resources.displayMetrics.density, scrollBy)
+        val scroller = FrameScroller(Resources.getSystem().displayMetrics.density, scrollBy)
         return ViewportAutoScroll.Continuous(speed, scroller::run)
     }
 
     override fun destroy() = viewer.destroy()
 
-    override fun handleKeyEvent(event: KeyEvent): Boolean = viewer.handleKeyEvent(event)
+    // Kept at the Activity's dispatch so it works while anything holds focus. Movement is on key up.
+    override fun handleKeyEvent(event: KeyEvent): Boolean {
+        val navigation = input.navigation ?: return false
+        val isUp = event.action == KeyEvent.ACTION_UP
+        val action = when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_UP -> {
+                if (!volumeKeysActive(input.volumeKeysEnabled, input.menuVisible)) return false
+                val forward = volumeKeyReadsOn(event.keyCode, input.volumeKeysInverted)
+                if (viewer is WebtoonViewer) {
+                    if (isUp) viewer.moveByVolumeKey(forward)
+                    return true
+                }
+                if (forward) Action.FORWARD else Action.BACKWARD
+            }
+            else -> return handleReaderKey(event, navigation.isReversed, held = false, ::perform)
+        }
+        if (isUp) perform(action)
+        return true
+    }
 
-    override fun handleGenericMotionEvent(event: MotionEvent): Boolean = viewer.handleGenericMotionEvent(event)
+    /** What a tap or a key asked for. */
+    fun perform(action: Action) = when (action) {
+        Action.MENU -> input.toggleMenu()
+        Action.FORWARD -> viewer.moveForward()
+        Action.BACKWARD -> viewer.moveBackward()
+    }
+
+    // The viewers take the wheel in Compose, through `mouseWheelPaging`.
+    override fun handleGenericMotionEvent(event: MotionEvent): Boolean = false
+}
+
+/** What a key needs of the reader around the viewer. */
+interface MangaViewportInput {
+    val navigation: ViewerNavigation?
+    val volumeKeysEnabled: Boolean
+    val volumeKeysInverted: Boolean
+    val menuVisible: Boolean
+
+    fun toggleMenu()
 }

@@ -7,12 +7,18 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.unmockkAll
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import mihon.core.common.extensions.toEpochMillisOrZero
 import mihon.core.common.extensions.toInstantOrNull
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import reikai.data.novel.NovelChapterSyncRules
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstones
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.model.Novel
@@ -49,8 +55,9 @@ class NovelChapterSyncTest {
         id: Long = 1L,
         dateUpload: Long = 0L,
         scanlator: String? = null,
+        name: String = "name",
     ) = NovelChapter(
-        id = id, novelId = 1L, url = url, name = "name", read = read, bookmark = bookmark,
+        id = id, novelId = 1L, url = url, name = name, read = read, bookmark = bookmark,
         lastTextProgress = 0L, chapterNumber = number, sourceOrder = 0L,
         dateFetch = Instant.fromEpochMilliseconds(dateFetch), dateUpload = dateUpload.toInstantOrNull(),
         page = "", scanlator = scanlator, rawChapterNumber = number,
@@ -111,7 +118,7 @@ class NovelChapterSyncTest {
                     sequenceOf(InMemoryPreference("mark_duplicate_read_chapter_read", markDuplicates, emptySet())),
                 ),
             ),
-            NoChapterNumberOverrides,
+            NovelChapterSyncRules(NoChapterNumberOverrides, InMemoryChapterCopyMarks(), NoChapterTombstones),
             novelDownloadManager = downloadManager,
         )
         return Synced(result, inserted, changed)
@@ -170,8 +177,12 @@ class NovelChapterSyncTest {
 
     @Test
     fun `a new chapter matching a read chapter's number is marked read`() = runTest {
-        val db = listOf(dbChapter("/c/5-a", number = 5.0, read = true))
-        val source = listOf(srcItem("/c/5-a", number = 5.0), srcItem("/c/5-b", number = 5.0))
+        val db = listOf(dbChapter("/c/5-a", number = 5.0, read = true, name = "Chapter 5"))
+        val source =
+            listOf(
+                srcItem("/c/5-a", number = 5.0, name = "Chapter 5"),
+                srcItem("/c/5-b", number = 5.0, name = "Chapter 5"),
+            )
 
         sync(db, source).inserted.single().read shouldBe true
     }
@@ -248,6 +259,30 @@ class NovelChapterSyncTest {
                 match { it.url == "/c/5" && it.name == "Renamed" },
             )
         }
+    }
+
+    /** The rows are committed by then, so a later sync sees no change of name and would never move the rest. */
+    @Test
+    fun `a sync cancelled during its renames still finishes them`() = runTest {
+        val source =
+            listOf(srcItem("/c/5", number = 5.0, name = "New 5"), srcItem("/c/4", number = 4.0, name = "New 4"))
+        val moved = mutableListOf<String>()
+        var job: Job? = null
+        val downloadManager = mockk<NovelDownloadManager>(relaxed = true) {
+            coEvery { renameChapter(any(), any(), any()) } coAnswers {
+                moved += thirdArg<NovelChapter>().name
+                job?.cancel()
+                yield()
+            }
+        }
+
+        job =
+            launch {
+                sync(listOf(dbChapter("/c/5", number = 5.0), dbChapter("/c/4", number = 4.0)), source, downloadManager)
+            }
+        job.join()
+
+        moved.size shouldBe 2
     }
 
     @Test

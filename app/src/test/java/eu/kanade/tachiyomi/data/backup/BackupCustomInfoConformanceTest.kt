@@ -24,22 +24,31 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkStatic
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.protobuf.ProtoBuf
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.MethodSource
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
 import reikai.domain.db.PassThroughTransactions
+import reikai.domain.library.FakeLibraryHiddenRepository
+import reikai.domain.library.FakeLibraryManualOrderRepository
 import reikai.domain.merge.RestoreMergeGroups
 import reikai.domain.novel.LnSourceIdentity
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.interactor.SetCustomNovelInfo
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.novel.model.CustomNovelInfo
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.repository.CustomNovelInfoRepository
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import reikai.novel.source.NovelSourceManager
 import reikai.util.testAppScope
 import tachiyomi.domain.manga.interactor.SetCustomMangaInfo
@@ -87,6 +96,29 @@ class BackupCustomInfoConformanceTest {
     @MethodSource("restorers")
     fun `an entry without custom info leaves the device's own untouched`(restorer: CustomInfoRestorer) = runTest {
         restorer.restore() shouldBe emptyList()
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("restorers")
+    fun `a backup without alternative titles keeps the device's and replaces the rest`(restorer: CustomInfoRestorer) =
+        runTest {
+            restorer.restore(onEntry = EVERY_FIELD, deviceAltTitles = DEVICE_ALTS) shouldBe
+                listOf(LOCAL_ID to EVERY_FIELD.copy(altTitles = DEVICE_ALTS))
+        }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("restorers")
+    fun `an older Reikai root list keeps the device's alternative titles`(restorer: CustomInfoRestorer) = runTest {
+        restorer.restore(inRootList = EVERY_FIELD, listed = false, deviceAltTitles = DEVICE_ALTS) shouldBe
+            listOf(LOCAL_ID to EVERY_FIELD.copy(altTitles = DEVICE_ALTS))
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("restorers")
+    fun `a backup carrying alternative titles replaces the device's`(restorer: CustomInfoRestorer) = runTest {
+        val backup = EVERY_FIELD.copy(altTitles = listOf("Backup alt"))
+
+        restorer.restore(onEntry = backup, deviceAltTitles = DEVICE_ALTS) shouldBe listOf(LOCAL_ID to backup)
     }
 
     @Test
@@ -143,10 +175,10 @@ class BackupCustomInfoConformanceTest {
                 every { this@mockk.uri } returns uri
             }
             val mangaCustomInfo = mockk<CustomMangaInfoRepository> {
-                every { getByMangaIdAsFlow(7) } returns flowOf(EVERY_FIELD.toManga(7))
+                every { getAllAsFlow() } returns flowOf(listOf(EVERY_FIELD.toManga(7)))
             }
             val novelCustomInfo = mockk<CustomNovelInfoRepository> {
-                every { getByNovelIdAsFlow(7) } returns flowOf(EVERY_FIELD.toNovel(7))
+                every { getAllAsFlow() } returns flowOf(listOf(EVERY_FIELD.toNovel(7)))
             }
             val creator = BackupCreator(
                 isAutoBackup = false,
@@ -157,6 +189,9 @@ class BackupCustomInfoConformanceTest {
                 mergeGroupRepository = mockk { coEvery { getAllMemberships(any()) } returns emptyMap() },
                 categoriesBackupCreator = mockk(relaxed = true),
                 mangaBackupCreator = MangaBackupCreator(
+                    libraryHides = FakeLibraryHiddenRepository(),
+                    tombstones = NoChapterTombstoneRepository,
+                    manualOrder = FakeLibraryManualOrderRepository(),
                     mangaRepository = mockk {
                         coEvery { getExcludedScanlatorsByMangaIds(listOf(7)) } returns emptyMap()
                     },
@@ -172,6 +207,9 @@ class BackupCustomInfoConformanceTest {
                     getManga = mockk(),
                     mergeGroupRepository = mockk { coEvery { getAllMemberships(any()) } returns emptyMap() },
                     chapterNumberOverrides = NoChapterNumberOverrides,
+                    copyMarks = InMemoryChapterCopyMarks(),
+                    localVolumes = NoLocalVolumes,
+                    volumePicks = NoVolumePicks,
                     readingLog = NoReadingLog,
                 ),
                 preferenceBackupCreator = mockk(relaxed = true),
@@ -179,6 +217,9 @@ class BackupCustomInfoConformanceTest {
                 sourcesBackupCreator = mockk { coEvery { forSourceIds(any()) } returns emptyList() },
                 backupFileValidator = mockk(relaxed = true),
                 novelBackupCreator = NovelBackupCreator(
+                    libraryHides = FakeLibraryHiddenRepository(),
+                    tombstones = NoChapterTombstoneRepository,
+                    manualOrder = FakeLibraryManualOrderRepository(),
                     novelRepository = mockk {
                         coEvery { getFavorites() } returns
                             listOf(
@@ -208,10 +249,17 @@ class BackupCustomInfoConformanceTest {
                         },
                     ),
                     chapterNumberOverrides = NoChapterNumberOverrides,
+                    copyMarks = InMemoryChapterCopyMarks(),
+                    localVolumes = NoLocalVolumes,
+                    volumePicks = NoVolumePicks,
                     readingLog = NoReadingLog,
+                    readingPace = NoReadingPace,
+                    localNovelLanguages = NoLocalNovelLanguages,
                 ),
                 extensionBackupCreator = mockk(relaxed = true),
                 feedBackupCreator = mockk(relaxed = true),
+                novelPreferences = mockk(relaxed = true),
+                novelFonts = mockk { every { backedUp() } returns emptyFlow() },
             )
 
             creator.backup(uri, options)
@@ -224,6 +272,7 @@ class BackupCustomInfoConformanceTest {
 
     companion object {
         const val LOCAL_ID = 10L
+        val DEVICE_ALTS = listOf("Device alt")
 
         val EVERY_FIELD = BackupCustomInfo(
             title = "My title",
@@ -269,12 +318,13 @@ interface CustomInfoRestorer {
      * Restores the entry with [onEntry] on its own fields and [inRootList] in an older backup's root list,
      * through the real BackupRestorer over the encoded file, and returns what was written as (local id,
      * custom info). An entry not [listed] in the backup is only on the device, as a 0.3.x novel out of the
-     * library was.
+     * library was. [deviceAltTitles] are the alternative titles the device row already holds.
      */
     suspend fun restore(
         onEntry: BackupCustomInfo? = null,
         inRootList: BackupCustomInfo? = null,
         listed: Boolean = true,
+        deviceAltTitles: List<String> = emptyList(),
     ): List<Pair<Long, BackupCustomInfo>>
 }
 
@@ -286,6 +336,7 @@ class MangaCustomInfoRestorer : CustomInfoRestorer {
         onEntry: BackupCustomInfo?,
         inRootList: BackupCustomInfo?,
         listed: Boolean,
+        deviceAltTitles: List<String>,
     ): List<Pair<Long, BackupCustomInfo>> {
         val backup = Backup(
             backupManga = listOf(
@@ -298,6 +349,9 @@ class MangaCustomInfoRestorer : CustomInfoRestorer {
 
         val written = mutableListOf<Pair<Long, BackupCustomInfo>>()
         val repository = mockk<CustomMangaInfoRepository> {
+            coEvery { getByMangaId(any()) } answers {
+                deviceAltTitles.takeIf { it.isNotEmpty() }?.let { CustomMangaInfo(firstArg(), altTitles = it) }
+            }
             coEvery { set(any()) } answers {
                 val info = firstArg<CustomMangaInfo>()
                 written += info.mangaId to info.toBackupCustomInfo()
@@ -322,6 +376,7 @@ class NovelCustomInfoRestorer : CustomInfoRestorer {
         onEntry: BackupCustomInfo?,
         inRootList: BackupCustomInfo?,
         listed: Boolean,
+        deviceAltTitles: List<String>,
     ): List<Pair<Long, BackupCustomInfo>> {
         val backup = Backup(
             backupManga = emptyList(),
@@ -335,6 +390,9 @@ class NovelCustomInfoRestorer : CustomInfoRestorer {
 
         val written = mutableListOf<Pair<Long, BackupCustomInfo>>()
         val repository = mockk<CustomNovelInfoRepository> {
+            coEvery { getByNovelId(any()) } answers {
+                deviceAltTitles.takeIf { it.isNotEmpty() }?.let { CustomNovelInfo(firstArg(), altTitles = it) }
+            }
             coEvery { set(any()) } answers {
                 val info = firstArg<CustomNovelInfo>()
                 written += info.novelId to info.toBackupCustomInfo()
@@ -347,6 +405,8 @@ class NovelCustomInfoRestorer : CustomInfoRestorer {
             coEvery { update(any<Novel>()) } returns true
         }
         val restorer = NovelRestorer(
+            tombstones = NoChapterTombstoneRepository,
+            manualOrder = FakeLibraryManualOrderRepository(),
             novelRepository = novels,
             novelChapterRepository = mockk(relaxed = true),
             categoryRepository = mockk(relaxed = true),
@@ -355,7 +415,12 @@ class NovelCustomInfoRestorer : CustomInfoRestorer {
             setCustomNovelInfo = SetCustomNovelInfo(repository),
             novelHistoryRepository = mockk(relaxed = true),
             chapterNumberOverrides = NoChapterNumberOverrides,
+            copyMarks = InMemoryChapterCopyMarks(),
+            localVolumes = NoLocalVolumes,
+            volumePicks = NoVolumePicks,
             readingLog = NoReadingLog,
+            readingPace = NoReadingPace,
+            localNovelLanguages = NoLocalNovelLanguages,
         )
         restoreEncoded(backup, ENTRIES_ONLY, novelRestorer = restorer)
         return written

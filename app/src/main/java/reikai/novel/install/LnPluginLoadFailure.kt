@@ -1,11 +1,14 @@
 package reikai.novel.install
 
+import android.content.Context
 import dev.icerock.moko.resources.StringResource
 import kotlinx.serialization.SerializationException
 import reikai.domain.novel.LnInstalledPluginMetadata
 import reikai.domain.novel.LnSourceIdentity
 import reikai.util.firstCause
 import reikai.util.rootMessage
+import tachiyomi.core.common.i18n.stringResource
+import tachiyomi.domain.source.model.SourceNotInstalledException
 import tachiyomi.i18n.MR
 
 /**
@@ -81,6 +84,19 @@ val LnPluginLoadFailure.Reason.description: StringResource
         LnPluginLoadFailure.Reason.Malformed -> MR.strings.ext_malformed_message
         is LnPluginLoadFailure.Reason.Failed -> MR.strings.ext_load_failed_message
     }
+
+/**
+ * Why the plugin behind [sourceId] is installed but not running, its reason and root cause, or null when
+ * no load failed for it. Shown where a screen would otherwise call the plugin not installed.
+ */
+fun Map<String, LnPluginLoadFailure>.describing(sourceId: String, context: Context): String? =
+    values.firstOrNull { it.pluginId == sourceId }?.let { failure ->
+        listOfNotNull(context.stringResource(failure.reason.description), failure.reason.message).joinToString("\n\n")
+    }
+
+/** Why a run with no Retry to offer cannot reach [sourceId]: its plugin's failed load, else that it is not installed. */
+fun Map<String, LnPluginLoadFailure>.unreachable(sourceId: String, context: Context): Exception =
+    describing(sourceId, context)?.let(::IllegalStateException) ?: SourceNotInstalledException()
 
 /** An installed plugin whose script is not stored and could not be fetched again at its installed version. */
 class LnPluginScriptMissingException(url: String, cause: Throwable) :

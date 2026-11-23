@@ -6,8 +6,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import eu.kanade.domain.ui.model.setAppCompatDelegateThemeMode
+import eu.kanade.domain.ui.model.shownWith
 import eu.kanade.presentation.more.settings.widget.AppThemeModePreferenceWidget
 import eu.kanade.presentation.more.settings.widget.AppThemePreferenceWidget
+import eu.kanade.presentation.more.settings.widget.ShownContentPreferenceWidget
 import mihon.app.di.appGraph
 import tachiyomi.presentation.core.util.collectAsState
 
@@ -29,20 +31,31 @@ internal class ThemeStep : OnboardingStep {
         val amoledPref = uiPreferences.themeDarkAmoled
         val amoled by amoledPref.collectAsState()
 
+        // RK -->
+        val shownContentPref = remember { context.appGraph.reikaiLibraryPreferences.shownContent }
+        val shownContent by shownContentPref.collectAsState()
+        // RK <--
+
         Column {
             AppThemeModePreferenceWidget(
                 value = themeMode,
                 onItemClick = {
                     themeModePref.set(it)
-                    setAppCompatDelegateThemeMode(it)
+                    setAppCompatDelegateThemeMode(it.shownWith(appTheme)) // RK
                 },
             )
 
             AppThemePreferenceWidget(
                 value = appTheme,
                 amoled = amoled,
-                onItemClick = { appThemePref.set(it) },
+                // RK: picking or leaving Doki changes the night mode
+                onItemClick = {
+                    appThemePref.set(it)
+                    setAppCompatDelegateThemeMode(themeMode.shownWith(it))
+                },
             )
+
+            ShownContentPreferenceWidget(value = shownContent, onItemClick = shownContentPref::set) // RK
         }
     }
 }

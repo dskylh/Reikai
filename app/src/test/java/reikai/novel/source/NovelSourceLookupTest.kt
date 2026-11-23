@@ -10,8 +10,8 @@ import reikai.novel.install.LnPluginHarness
 
 /**
  * A lookup awaits one first load, as Mihon's source manager awaits its first extension scan. Only a
- * novel screen opening, or an update or download run starting, retries a plugin that failed, so a
- * broken plugin costs one load per screen or run rather than one per novel or chapter.
+ * novel screen opening, or an update or download run starting, retries a plugin that failed, once its
+ * wait is up, so a broken plugin costs one load a minute rather than one per novel or chapter.
  */
 class NovelSourceLookupTest {
 
@@ -21,7 +21,7 @@ class NovelSourceLookupTest {
     private val manager = harness.manager
 
     private fun failEveryLoad() {
-        coEvery { harness.host.loadPlugin(any(), any(), any(), any(), any()) } answers {
+        coEvery { harness.host.inspectPlugin(any(), any(), any(), any(), any()) } answers {
             loads++
             throw LnPluginException("broken plugin")
         }
@@ -38,10 +38,14 @@ class NovelSourceLookupTest {
     }
 
     @Test
-    fun `a screen opening retries a plugin whose first load failed`() = runTest {
+    fun `a screen opening a minute later retries a plugin whose first load failed`() = runTest {
         failEveryLoad()
 
+        var clock = 0L
+        harness.installer.now = { clock }
         manager.get("broken")
+        clock += 60_000L
+
         manager.ensureLoaded()
 
         loads shouldBe 2
@@ -50,7 +54,7 @@ class NovelSourceLookupTest {
     /** The raw registry starts empty, which a screen showing install state reads as every plugin missing. */
     @Test
     fun `the loaded sources hold the installed plugins from their first emission`() = runTest {
-        coEvery { harness.host.loadPlugin(any(), any(), any(), any(), any()) } returns LnPluginHarness.info("broken")
+        coEvery { harness.host.inspectPlugin(any(), any(), any(), any(), any()) } returns LnPluginHarness.info("broken")
 
         manager.loadedSources().first().map { it.id } shouldBe listOf("broken")
     }

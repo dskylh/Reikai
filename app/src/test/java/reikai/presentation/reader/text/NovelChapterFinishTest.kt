@@ -17,6 +17,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import org.junit.jupiter.api.Test
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.merge.ChapterUnit
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.interactor.DeleteNovelChaptersAfterRead
@@ -40,7 +41,7 @@ import kotlin.time.Instant
 class NovelChapterFinishTest {
 
     private fun chapter(id: Long, novelId: Long, number: Double) = NovelChapter(
-        id = id, novelId = novelId, url = "/$id", name = "", read = false, bookmark = false,
+        id = id, novelId = novelId, url = "/$id", name = "Chapter $number", read = false, bookmark = false,
         lastTextProgress = 0L, chapterNumber = number, sourceOrder = id, dateFetch = Instant.fromEpochMilliseconds(0L),
         dateUpload = null, page = "",
     )
@@ -48,6 +49,7 @@ class NovelChapterFinishTest {
     private val finished = chapter(5L, novelId = 1L, number = 5.0)
     private val stitch = listOf(ChapterUnit(5L, 0, 0), ChapterUnit(205L, 0, 1), ChapterUnit(206L, 1, 1))
     private val repo = mockk<NovelChapterRepository>(relaxed = true).also {
+        coEvery { it.setReadBulk(any(), any()) } returns true
         coEvery { it.getByNovelId(1L) } returns listOf(finished, chapter(55L, novelId = 1L, number = 5.0))
         coEvery { it.getByNovelId(2L) } returns
             listOf(chapter(205L, novelId = 2L, number = 4.0), chapter(206L, novelId = 2L, number = 5.0))
@@ -74,6 +76,7 @@ class NovelChapterFinishTest {
         trackNovelChapter = trackNovelChapter,
         trackedChapterNumber = trackedChapterNumber,
         incognito = ChapterIncognito(sourceOf = { null }, isIncognito = { false }),
+        copyMarks = InMemoryChapterCopyMarks(),
         scope = backgroundScope,
         context = mockk(relaxed = true),
     )
@@ -140,7 +143,10 @@ class NovelChapterFinishTest {
     fun `a refused push of a sibling's copy queues the trunk's number`() = runTest {
         val store = mockk<NovelDelayedTrackingStore>(relaxed = true)
         val refusing = TrackNovelChapter(
-            getNovelTracks = mockk { coEvery { awaitGroup(2L) } returns listOf(novelTrack()) },
+            getNovelTracks = mockk {
+                coEvery { groupIds(any()) } answers { listOf(firstArg()) }
+                coEvery { awaitGroup(2L) } returns listOf(novelTrack())
+            },
             trackerManager = refusingTracker(),
             upsertNovelTrack = mockk(relaxed = true),
             delayedTrackingStore = store,

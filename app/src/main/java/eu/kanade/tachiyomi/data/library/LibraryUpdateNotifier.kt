@@ -2,19 +2,16 @@ package eu.kanade.tachiyomi.data.library
 
 import android.app.Notification
 import android.content.Context
-import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import dev.zacsweers.metro.Inject
-import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.core.security.SecurityPreferences
 import eu.kanade.tachiyomi.data.download.Downloader
 import eu.kanade.tachiyomi.data.notification.NotificationHandler
 import eu.kanade.tachiyomi.data.notification.NotificationReceiver
 import eu.kanade.tachiyomi.data.notification.Notifications
 import eu.kanade.tachiyomi.source.UnmeteredSource
-import eu.kanade.tachiyomi.util.lang.chop
 import eu.kanade.tachiyomi.util.system.cancelNotification
 import eu.kanade.tachiyomi.util.system.notificationBuilder
 import eu.kanade.tachiyomi.util.system.notify
@@ -29,6 +26,7 @@ import reikai.data.notification.postedEntries
 import reikai.data.notification.setNewChaptersEntry
 import reikai.data.notification.setNewChaptersSummary
 import reikai.data.notification.updateProgressPercent
+import reikai.data.notification.updatingText
 import reikai.data.updateerror.setUpdateErrorContent
 import reikai.data.updateerror.updateErrorPendingIntent
 import reikai.domain.entry.EntryId
@@ -36,6 +34,7 @@ import reikai.domain.entry.GetEntryCustomInfo
 import reikai.domain.entry.withCustomInfo
 import reikai.domain.library.ContentType
 import reikai.domain.manga.AdultContentChecker
+import reikai.util.notificationIcon
 import tachiyomi.core.common.Constants
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.domain.chapter.model.Chapter
@@ -83,20 +82,12 @@ class LibraryUpdateNotifier(
     }
 
     /**
-     * Bitmap of the app for notifications.
-     */
-    private val notificationBitmap by lazy {
-        BitmapFactory.decodeResource(context.resources, R.mipmap.ic_launcher)
-    }
-
-    /**
      * Cached progress notification to avoid creating a lot.
      */
     val progressNotificationBuilder by lazy {
         context.notificationBuilder(Notifications.CHANNEL_LIBRARY_PROGRESS) {
             setContentTitle(context.stringResource(MR.strings.app_name))
             setSmallIcon(MaterialSymbolsR.drawable.rounded_refresh)
-            setLargeIcon(notificationBitmap)
             setOngoing(true)
             setOnlyAlertOnce(true)
             addAction(
@@ -134,9 +125,9 @@ class LibraryUpdateNotifier(
         if (!securityPreferences.hideNotificationContent.get()) {
             // RK -->
             val hidden = hiddenContentIds(manga)
-            val updatingText = manga.filterNot { it.id in hidden }.shown().joinToString("\n") { it.title.chop(40) }
+            val titles = manga.filterNot { it.id in hidden }.shown().map { it.title }
+            progressNotificationBuilder.setStyle(NotificationCompat.BigTextStyle().bigText(updatingText(titles)))
             // RK <--
-            progressNotificationBuilder.setStyle(NotificationCompat.BigTextStyle().bigText(updatingText))
         }
 
         context.notify(
@@ -146,6 +137,28 @@ class LibraryUpdateNotifier(
                 .build(),
         )
     }
+
+    // RK --> Refresh library covers' novel pass, reporting on this notice, whose Cancel stops the whole worker.
+    // The titles are looked up only for a tick the throttle lets through.
+    suspend fun showProgressTitles(titles: suspend () -> List<String>, current: Int, total: Int) {
+        if (!progressThrottle.tryPass(isFinal = current >= total)) return
+        progressNotificationBuilder
+            .setContentTitle(
+                context.stringResource(
+                    MR.strings.notification_updating_progress,
+                    updateProgressPercent(current, total),
+                ),
+            )
+        val shown = titles()
+        progressNotificationBuilder.setStyle(
+            NotificationCompat.BigTextStyle().bigText(updatingText(shown)).takeIf { shown.isNotEmpty() },
+        )
+        context.notify(
+            Notifications.ID_LIBRARY_PROGRESS,
+            progressNotificationBuilder.setProgress(total, current, false).build(),
+        )
+    }
+    // RK <--
 
     /**
      * Warn when excessively checking any single source.
@@ -221,8 +234,7 @@ class LibraryUpdateNotifier(
                 ),
             )
 
-            setSmallIcon(R.drawable.ic_reikai) // RK: Reikai icon
-            setLargeIcon(notificationBitmap)
+            setSmallIcon(context.notificationIcon) // RK: the shown app icon's logo
 
             setGroup(Notifications.GROUP_NEW_CHAPTERS)
             setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_SUMMARY)
@@ -269,7 +281,7 @@ class LibraryUpdateNotifier(
                 ),
             )
 
-            setSmallIcon(R.drawable.ic_reikai) // RK: Reikai icon
+            setSmallIcon(context.notificationIcon) // RK: the shown app icon's logo
 
             if (icon != null) {
                 setLargeIcon(icon)

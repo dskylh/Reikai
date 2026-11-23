@@ -5,29 +5,30 @@
 // plugins expect (see refs/lnreader-main/src/plugins/pluginManager.ts) and bridges fetch / storage /
 // log to Kotlin through host functions bound by LnPluginHost.kt:
 //   __lnLog(level, message)            -- sync
-//   __lnGetStorage(pluginId, key)      -- sync, returns string|null (runtime only, see below)
-//   __lnSetStorage(pluginId, key, val) -- sync, val null deletes (runtime only, see below)
+//   __lnGetStorage(key)                -- sync, returns string|null (runtime only, see below)
+//   __lnSetStorage(key, val)           -- sync, val null deletes (runtime only, see below)
 //   __lnFetch(url, optsJson)           -- async, returns a JSON FetchResponse string
+//   __lnFetchViaWebview(url, optsJson) -- async, returns LNReader's {ok, url, html, title} as JSON;
+//                                         Kotlin refuses an address off the plugin's own site
 //
 // Plugin source is downloaded by Kotlin (LnPluginLoader) and passed into __lnLoadPlugin. All HTTP
 // routes through Kotlin OkHttp (so the CloudflareInterceptor / Flaresolverr keep applying); native
 // fetch is deliberately never exposed to plugins.
+//
+// One engine holds one plugin. Kotlin binds the storage functions to that engine's plugin id when it
+// creates the engine, so nothing here, and nothing a plugin passes, can name another plugin's storage.
 
 (function () {
   "use strict";
 
-  // The storage bridge reads whatever plugin id it is handed, and plugin code runs in this global
-  // scope, so a plugin calling it directly could read another plugin's settings and captured site
-  // sign-in. The runtime keeps private references and removes the globals; plugins reach storage only
-  // through their own scoped @libs/storage.
+  // Plugins reach storage through @libs/storage's envelope, not the raw key-value functions.
   var hostGetStorage = globalThis.__lnGetStorage;
   var hostSetStorage = globalThis.__lnSetStorage;
   delete globalThis.__lnGetStorage;
   delete globalThis.__lnSetStorage;
 
-  // QuickJS has no browser globals; plugins (and the cheerio/dayjs bundles) expect a handful.
-  globalThis.window = globalThis;
-  globalThis.self = globalThis;
+  // QuickJS has no browser globals; plugins (and the vendor bundles) expect a handful. window and self are
+  // seeded by the host before the vendors load, since a UMD bundle looks for them as it loads.
 
   if (typeof globalThis.console === "undefined") {
     var mkLog = function (level) {
@@ -57,6 +58,21 @@
     // construct it from a record (`new URLSearchParams({novelId: id})`) or pairs, not just a
     // string, so a string-only shim silently drops every param (novelbin's chapter URL 400s,
     // search 404s). Mirror the WHATWG init types and the method surface plugins use.
+    // A browser percent-decodes to bytes and reads them as UTF-8 with U+FFFD for bad input, leaving a
+    // stray `%` as it is; decodeURIComponent throws on both (`?q=100%`, GBK bytes such as `%B0%A1`).
+    var decodeQueryPart = function (s) {
+      s = s.replace(/\+/g, " ");
+      try {
+        return decodeURIComponent(s);
+      } catch (_) {
+        return s.replace(/(?:%[0-9a-fA-F]{2})+/g, function (run) {
+          var bytes = new Uint8Array(run.length / 3);
+          for (var b = 0; b < bytes.length; b++)
+            bytes[b] = parseInt(run.substr(b * 3 + 1, 2), 16);
+          return new TextDecoder().decode(bytes);
+        });
+      }
+    };
     var USP = function (init) {
       this._p = [];
       if (typeof init === "string") {
@@ -69,10 +85,7 @@
             var i = kv.indexOf("=");
             var k = i < 0 ? kv : kv.slice(0, i);
             var v = i < 0 ? "" : kv.slice(i + 1);
-            self._p.push([
-              decodeURIComponent(k.replace(/\+/g, " ")),
-              decodeURIComponent(v.replace(/\+/g, " ")),
-            ]);
+            self._p.push([decodeQueryPart(k), decodeQueryPart(v)]);
           });
       } else if (Array.isArray(init)) {
         for (var j = 0; j < init.length; j++)
@@ -623,14 +636,12 @@
 
   // -- @libs/fetch shim -------------------------------------------------------
   // Plugins expect a Response-like object. We synthesize the methods plugins actually use.
-  // No .blob(): QuickJS has no Blob and novel sources are text-only; a plugin calling .blob()
-  // would throw (surfaced by the Phase 0 compatibility sweep).
 
   function makeResponse(payload) {
     var headersObj = payload.headers || {};
-    // arrayBuffer / blob read bytes: an explicit binary body (bodyBase64, e.g. fetchProto) if present,
-    // else the UTF-8 bytes of the text body. Text sources still read through the charset-aware text()
-    // path, so this never disturbs them (no charset-guessing binary fetch; that is deliberately parked).
+    // arrayBuffer / blob read the real bytes when Kotlin sent them (a binary request, or a reply that is
+    // not a text type), else the UTF-8 bytes of the text body. text() always reads the charset-aware
+    // text Kotlin decoded, so a text source is never re-decoded by guessing.
     function bodyBytes() {
       if (payload.bodyBase64 != null) return base64ToBytes(payload.bodyBase64);
       return new TextEncoder().encode(payload.body || "");
@@ -642,35 +653,8 @@
       status: payload.status,
       statusText: payload.statusText || "",
       ok: payload.status >= 200 && payload.status < 300,
-      headers: {
-        get: function (name) {
-          return headersObj[name.toLowerCase()] || null;
-        },
-        has: function (name) {
-          return Object.prototype.hasOwnProperty.call(
-            headersObj,
-            name.toLowerCase(),
-          );
-        },
-        forEach: function (fn) {
-          Object.keys(headersObj).forEach(function (k) {
-            fn(headersObj[k], k);
-          });
-        },
-        keys: function () {
-          return Object.keys(headersObj);
-        },
-        values: function () {
-          return Object.keys(headersObj).map(function (k) {
-            return headersObj[k];
-          });
-        },
-        entries: function () {
-          return Object.keys(headersObj).map(function (k) {
-            return [k, headersObj[k]];
-          });
-        },
-      },
+      // The shim's own Headers, so a reply's headers behave as one a plugin builds (an empty value included).
+      headers: new globalThis.Headers(headersObj),
       text: function () {
         return Promise.resolve(payload.body);
       },
@@ -693,7 +677,8 @@
   // lnreader's makeInit defaults (refs/lnreader-main/src/plugins/helpers/fetch.ts). Sending these
   // browser-like headers is the difference between many servers answering and stonewalling a
   // non-browser request, which is why sources that work in the lnreader app failed here. User-Agent
-  // is supplied by the app's UserAgentInterceptor; Accept-Encoding is left to OkHttp (transparent gzip).
+  // is set by LnHostBridge (the device WebView's, unless the plugin sets one, with the client's
+  // UserAgentInterceptor as the fallback); Accept-Encoding is left to OkHttp (transparent gzip).
   var DEFAULT_HEADERS = {
     Accept: "*/*",
     "Accept-Language": "*",
@@ -702,8 +687,15 @@
     Connection: "keep-alive",
   };
 
-  async function fetchApi(url, init) {
+  function fetchApi(url, init) {
+    return request(url, init, undefined);
+  }
+
+  // `encoding` is LNReader's fetchText override of the response charset (a GBK site labelled gb2312);
+  // Kotlin decodes the body with it.
+  async function request(url, init, encoding) {
     var normalized = init ? Object.assign({}, init) : {};
+    if (encoding) normalized.encoding = String(encoding);
     // Merge the defaults under the plugin's headers (plugin wins, case-insensitively).
     var merged = Object.assign({}, DEFAULT_HEADERS);
     var provided = normalized.headers || {};
@@ -742,16 +734,36 @@
       if (!hasCT)
         normalized.headers["Content-Type"] =
           "application/x-www-form-urlencoded";
+    } else if (
+      normalized.body instanceof ArrayBuffer ||
+      ArrayBuffer.isView(normalized.body)
+    ) {
+      // A binary body (WuxiaWorld's gRPC-web frame) crosses the string bridge as base64, and asks for
+      // the reply as bytes too; JSON.stringify would have sent a typed array as {"0":0,...}.
+      var view = normalized.body;
+      normalized.bodyBase64 = bytesToBase64(
+        view instanceof ArrayBuffer
+          ? new Uint8Array(view)
+          : new Uint8Array(view.buffer, view.byteOffset, view.byteLength),
+      );
+      normalized.binary = true;
+      delete normalized.body;
     }
     var raw = JSON.parse(await __lnFetch(url, JSON.stringify(normalized)));
     if (raw && raw.error) throw new Error(raw.error);
     return makeResponse(raw);
   }
 
-  async function fetchText(url, init) {
-    var res = await fetchApi(url, init);
+  async function fetchText(url, init, encoding) {
+    var res = await request(url, init, encoding);
     if (!res.ok) return "";
     return await res.text();
+  }
+
+  // LNReader's fetchViaWebview (lnreader/lnreader PR 2128): the page as a browser shows it once its own
+  // script has run, for a site that checks the visitor before its text exists.
+  async function fetchViaWebview(url, options) {
+    return JSON.parse(await __lnFetchViaWebview(String(url), JSON.stringify(options || {})));
   }
 
   // Some plugins (ixdzs8, rainofsnow) call the global fetch() directly instead of @libs/fetch. Route
@@ -760,12 +772,11 @@
   globalThis.fetch = fetchApi;
 
   // gRPC-web client. protobufjs (vendored) parses the plugin's .proto string and encodes/decodes
-  // messages; we add the 5-byte gRPC-web frame and round-trip the binary through the Kotlin bridge
-  // as base64 (QuickJS has no Blob/FileReader, so we can't use lnreader's transport). WuxiaWorld.
+  // messages; we add the 5-byte gRPC-web frame, which request() carries over the Kotlin bridge as
+  // bytes (QuickJS has no Blob/FileReader, so we can't use lnreader's transport).
   async function fetchProto(protoInit, url, init) {
     var pb = globalThis.protobuf;
     if (!pb) throw new Error("protobufjs not loaded");
-    var b64 = pb.util.base64;
     var root = pb.parse(protoInit.proto).root;
     var ReqT = root.lookupType(protoInit.requestType);
     var verr = ReqT.verify(protoInit.requestData || {});
@@ -779,17 +790,14 @@
     framed[4] = msg.length & 0xff;
     framed.set(msg, 5);
 
-    var normalized = init ? Object.assign({}, init) : {};
-    normalized.method = "POST";
-    normalized.binary = true;
-    normalized.bodyBase64 = b64.encode(framed, 0, framed.length);
-    delete normalized.body;
-
-    var raw = JSON.parse(await __lnFetch(url, JSON.stringify(normalized)));
-    if (raw && raw.error) throw new Error(raw.error);
-    var enc = raw.bodyBase64 || "";
-    var resp = new Uint8Array(b64.length(enc));
-    b64.decode(enc, resp, 0);
+    // Through request(), as LNReader's fetchProto goes through its fetch: the default headers apply,
+    // and the typed-array body carries the frame as bytes both ways.
+    var res = await request(
+      url,
+      Object.assign({}, init || {}, { method: "POST", body: framed }),
+      undefined,
+    );
+    var resp = new Uint8Array(await res.arrayBuffer());
     return decodeGrpcWebBody(root.lookupType(protoInit.responseType), resp);
   }
 
@@ -803,11 +811,11 @@
 
   // -- @libs/storage shim -----------------------------------------------------
   // `storage` maps to the Kotlin preference store under a key prefix, backed by
-  // __lnGetStorage/__lnSetStorage. Values are stored as lnreader's StoredItem envelope
-  // ({created, value, expires}, JSON-encoded) so booleans / arrays / objects round-trip with their
-  // type (refs/lnreader-main/src/plugins/helpers/storage.ts) instead of stringifying.
+  // __lnGetStorage/__lnSetStorage, which Kotlin scopes to this engine's plugin. Values are stored as
+  // lnreader's StoredItem envelope ({created, value, expires}, JSON-encoded) so booleans / arrays /
+  // objects round-trip with their type (refs/lnreader-main/src/plugins/helpers/storage.ts).
 
-  function makeStorage(pluginId, kind) {
+  function makeStorage(kind) {
     var prefix = kind + ":";
     return {
       set: function (key, value, expires) {
@@ -816,10 +824,10 @@
           value: value,
           expires: expires instanceof Date ? expires.getTime() : expires,
         };
-        hostSetStorage(pluginId, prefix + key, JSON.stringify(item));
+        hostSetStorage(prefix + key, JSON.stringify(item));
       },
       get: function (key, raw) {
-        var stored = hostGetStorage(pluginId, prefix + key);
+        var stored = hostGetStorage(prefix + key);
         if (stored === null || stored === undefined) return undefined;
         var item;
         try {
@@ -831,7 +839,7 @@
         // returns as undefined (item.value), not as the envelope.
         if (item && typeof item === "object" && ("value" in item || "created" in item)) {
           if (item.expires && Date.now() > item.expires) {
-            hostSetStorage(pluginId, prefix + key, null);
+            hostSetStorage(prefix + key, null);
             return undefined;
           }
           return raw ? item : item.value;
@@ -839,7 +847,7 @@
         return item;
       },
       delete: function (key) {
-        hostSetStorage(pluginId, prefix + key, null);
+        hostSetStorage(prefix + key, null);
       },
     };
   }
@@ -848,10 +856,10 @@
   // own storage as it stood when its WebView last closed, an object of item strings, or undefined.
   // Kotlin writes it under this key (LnPluginHost.storeWebStorage, from WEB_STORAGE_KEY_PREFIX in
   // PluginStorageKeys.kt), so the two spellings must agree.
-  function makeWebStorage(pluginId, kind) {
+  function makeWebStorage(kind) {
     return {
       get: function () {
-        var stored = hostGetStorage(pluginId, "webview:" + kind);
+        var stored = hostGetStorage("webview:" + kind);
         if (stored === null || stored === undefined) return undefined;
         try {
           return JSON.parse(stored);
@@ -878,8 +886,8 @@
   });
   // Member NAMES must mirror LNReader's FilterTypes enum: compiled plugins look a type up by name
   // (`i.FilterTypes.CheckboxGroup`), so a missing/renamed member resolves to undefined and that filter
-  // silently never renders. The string VALUES are Reikai's own convention, matched by the value branches
-  // in NovelSourceFilterSheet, so they must stay in sync with that sheet, not with upstream's values.
+  // silently never renders. The string VALUES are Reikai's own convention, matched by LnFilterType, so they
+  // must stay in sync with it (LnFilterTypeTest pins that), not with upstream's values.
   var FilterTypes = Object.freeze({
     TextInput: "TextInput",
     Picker: "Picker",
@@ -887,6 +895,7 @@
     Switch: "Switch",
     XCheckbox: "XCheckbox",
     ExcludableCheckboxGroup: "ExcludableCheckboxGroup",
+    MultiText: "MultiText",
   });
   var defaultCover =
     "https://github.com/LNReader/lnreader-sources/blob/main/icons/no-cover.jpg?raw=true";
@@ -919,27 +928,114 @@
       return decodeURIComponent(String(s));
     },
   };
-  // @libs/aes is backed by the @noble/ciphers vendor bundle (globalThis.nobleCiphers). The stub is
-  // a fallback that throws a clear error if the bundle somehow didn't load.
-  var aesStub = new Proxy(
-    {},
-    {
-      get: function (_t, prop) {
-        return function () {
-          throw new Error("@libs/aes not available (" + String(prop) + ")");
-        };
-      },
-    },
-  );
-  var aesLib =
-    typeof globalThis.nobleCiphers !== "undefined" &&
-    globalThis.nobleCiphers.gcm
-      ? { gcm: globalThis.nobleCiphers.gcm }
-      : aesStub;
+  // @libs/aes is the @noble/ciphers vendor bundle, which loads before this runtime or the engine fails to start.
+  var aesLib = { gcm: globalThis.nobleCiphers.gcm };
+
+  // -- @libs/pluginError ------------------------------------------------------
+  // LNReader's src/plugins/helpers/pluginError.ts (lnreader c14bd4f0). Each code IS its user-facing message,
+  // as upstream's string enum, so a plugin's thrown error reads the same in the download queue's failure.
+  var PluginError = Object.freeze({
+    Captcha: "Captcha error, please open in webview",
+    Cloudflare: "Cloudflare is blocking requests. Try again later.",
+    RateLimited: "Too many requests (429). Please try again later.",
+    NotFound: "Content not found (404), it may have been removed from this source.",
+    NovelNotFound: "Novel not found (404), it may have been removed from this source.",
+    ChapterNotFound: "Chapter not found (404), it may have been removed from this source.",
+    AuthRequired: "Authentication required. Please log in via WebView.",
+    EmptyContent: "No readable content was found.",
+    InvalidResponse: "Invalid response from source.",
+    NetworkError: "Could not reach site, please try to open in webview.",
+  });
+  var PLUGIN_ERROR_CODES = Object.keys(PluginError).map(function (k) {
+    return PluginError[k];
+  });
+  var STATUS_TO_CODE = {
+    401: PluginError.AuthRequired,
+    403: PluginError.Cloudflare,
+    404: PluginError.NotFound,
+    429: PluginError.RateLimited,
+    503: PluginError.Cloudflare,
+  };
+  var CHALLENGE_TITLES = [
+    "bot verification",
+    "you are being redirected...",
+    "un instant...",
+    "one moment...",
+    "just a moment...",
+    "redirecting...",
+    "attention required! | cloudflare",
+  ];
+  function hostnameBase(url) {
+    var match = url.match(/^https?:\/\/([^/?#]+)/i);
+    var host = (match ? match[1] : "").toLowerCase().replace(/^www\./, "");
+    if (!host) return "";
+    var parts = host.split(".");
+    if (parts.length > 1) parts.pop();
+    return parts.join(".");
+  }
+  function createPluginError(code, options) {
+    var error = new Error((options && options.message) || code);
+    error.name = "PluginError";
+    error.code = code;
+    if (options && options.status !== undefined) error.status = options.status;
+    if (options && options.url) error.url = options.url;
+    return error;
+  }
+  function httpError(status, message, url) {
+    var code = STATUS_TO_CODE[status] || PluginError.NetworkError;
+    var fallback =
+      code === PluginError.NetworkError && status
+        ? "Could not reach site (" + status + "), please try to open in webview."
+        : code;
+    return createPluginError(code, { status: status, message: message || fallback, url: url });
+  }
+  function checkResponse(response, options) {
+    if (response.ok || (options && options.search && response.status === 404)) return response;
+    if (response.status === 404 && options && options.notFoundCode) {
+      throw createPluginError(options.notFoundCode, {
+        status: response.status,
+        message: options.message,
+        url: response.url || undefined,
+      });
+    }
+    throw httpError(response.status, options && options.message, response.url || undefined);
+  }
+  function isChallengeHtml(html, requestUrl, responseUrl) {
+    if (requestUrl && responseUrl) {
+      var reqHost = hostnameBase(requestUrl);
+      var resHost = hostnameBase(responseUrl);
+      if (reqHost && resHost && reqHost !== resHost) return true;
+    }
+    var titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+    var title = titleMatch ? titleMatch[1].trim().toLowerCase() : "";
+    if (!title) return false;
+    return CHALLENGE_TITLES.indexOf(title) !== -1 || /\bcloudflare\b/i.test(title);
+  }
+  function assertNoChallenge(html, requestUrl, responseUrl, message) {
+    if (isChallengeHtml(html, requestUrl, responseUrl)) {
+      throw createPluginError(PluginError.Captcha, {
+        status: 403,
+        message: message,
+        url: responseUrl || requestUrl,
+      });
+    }
+  }
+  function isPluginError(error) {
+    return error instanceof Error && typeof error.code === "string" && PLUGIN_ERROR_CODES.indexOf(error.code) !== -1;
+  }
+  var pluginErrorLib = {
+    PluginError: PluginError,
+    createPluginError: createPluginError,
+    httpError: httpError,
+    checkResponse: checkResponse,
+    isChallengeHtml: isChallengeHtml,
+    assertNoChallenge: assertNoChallenge,
+    isPluginError: isPluginError,
+  };
 
   // -- the require() resolver -------------------------------------------------
 
-  function makeRequire(pluginId) {
+  function makeRequire(storageModule) {
     var packages = {
       cheerio: globalThis.cheerio,
       htmlparser2: globalThis.htmlparser2,
@@ -952,6 +1048,7 @@
         fetchApi: fetchApi,
         fetchText: fetchText,
         fetchProto: fetchProto,
+        fetchViaWebview: fetchViaWebview,
       },
       "@libs/isAbsoluteUrl": { isUrlAbsolute: isUrlAbsolute },
       "@libs/filterInputs": { FilterTypes: FilterTypes },
@@ -965,36 +1062,29 @@
       },
       "@libs/aes": aesLib,
       "@libs/utils": { utf8ToBytes: utf8ToBytes, bytesToUtf8: bytesToUtf8 },
+      "@libs/pluginError": pluginErrorLib,
     };
     return function _require(name) {
-      if (name === "@libs/storage") {
-        return {
-          storage: makeStorage(pluginId, "storage"),
-          localStorage: makeWebStorage(pluginId, "local"),
-          sessionStorage: makeWebStorage(pluginId, "session"),
-        };
-      }
+      if (name === "@libs/storage") return storageModule();
       var pkg = packages[name];
       if (pkg === undefined) {
-        log(
-          "warn",
-          'require: unknown module "' +
-            name +
-            '" requested by plugin ' +
-            pluginId,
-        );
+        log("warn", 'require: unknown module "' + name + '"');
         return undefined;
       }
       return pkg;
     };
   }
 
-  // -- plugin registry --------------------------------------------------------
+  function realStorage() {
+    return {
+      storage: makeStorage("storage"),
+      localStorage: makeWebStorage("local"),
+      sessionStorage: makeWebStorage("session"),
+    };
+  }
 
-  var plugins = new Map(); // pluginId -> Plugin instance
-
-  // No-op storage trio for the discovery pass: doesn't touch Kotlin so no SharedPreferences file is
-  // allocated for a scope we'd abandon.
+  // No-op storage trio for the discovery pass, which runs before Kotlin has decided whose storage, if
+  // any, the script may reach.
   var NOOP = {
     get: function () {
       return null;
@@ -1002,75 +1092,64 @@
     set: function () {},
     delete: function () {},
   };
-  var NOOP_STORAGE = {
-    storage: NOOP,
-    localStorage: NOOP,
-    sessionStorage: NOOP,
-  };
+  function noopStorage() {
+    return { storage: NOOP, localStorage: NOOP, sessionStorage: NOOP };
+  }
 
-  function loadPlugin(pluginId, rawCode, iconUrl, lang) {
+  function runPlugin(rawCode, storageModule) {
+    var m = { exports: {} };
+    var fn = new Function(
+      "require",
+      "module",
+      "exports",
+      rawCode + "\nreturn module.exports.default || module.exports;",
+    );
+    return fn(makeRequire(storageModule), m, m.exports);
+  }
+
+  // -- the engine's one plugin ------------------------------------------------
+
+  var plugin = null;
+  // Kotlin loads once per engine, so a second call is plugin code reaching for the loader.
+  var loadStarted = false;
+
+  // The id a script declares, read with storage shadowed by no-ops, so Kotlin can refuse a script
+  // that names another plugin before any of its code meets real storage. Null when it throws.
+  function discoverId(rawCode) {
+    if (loadStarted) throw new Error("discovery after load");
     try {
-      // Pass 1: discover the plugin's intrinsic id with @libs/storage shadowed by no-ops, so plugins
-      // that read storage at load time (royalroad, webnovel) don't write to a temporary scope.
-      var canonicalId = pluginId;
-      try {
-        var baseReq = makeRequire(pluginId);
-        var discoverReq = function (name) {
-          return name === "@libs/storage" ? NOOP_STORAGE : baseReq(name);
-        };
-        var dm = { exports: {} };
-        var df = new Function(
-          "require",
-          "module",
-          "exports",
-          rawCode + "\nreturn module.exports.default || module.exports;",
-        );
-        var discovered = df(discoverReq, dm, dm.exports);
-        if (discovered && discovered.id) canonicalId = discovered.id;
-      } catch (e) {
-        log(
-          "warn",
-          "plugin id discovery failed for " +
-            pluginId +
-            ": " +
-            ((e && e.message) || e),
-        );
-      }
+      var discovered = runPlugin(rawCode, noopStorage);
+      return discovered && discovered.id ? String(discovered.id) : null;
+    } catch (e) {
+      log("warn", "plugin id discovery failed: " + ((e && e.message) || e));
+      return null;
+    }
+  }
 
-      // Pass 2: real load. Storage scope is canonicalId; registry key is always plugin.id.
-      var req = makeRequire(canonicalId);
-      var m = { exports: {} };
-      var fn = new Function(
-        "require",
-        "module",
-        "exports",
-        rawCode + "\nreturn module.exports.default || module.exports;",
-      );
-      var plugin = fn(req, m, m.exports);
-      if (!plugin || !plugin.id)
+  function loadPlugin(rawCode) {
+    if (loadStarted) throw new Error("a plugin is already loaded in this engine");
+    loadStarted = true;
+    try {
+      var loaded = runPlugin(rawCode, realStorage);
+      if (!loaded || !loaded.id)
         throw new Error("plugin did not export a default with .id");
-      plugins.set(plugin.id, plugin);
-      log(
-        "info",
-        "loaded plugin " + plugin.id + " v" + (plugin.version || "?"),
-      );
+      plugin = loaded;
+      log("info", "loaded plugin " + loaded.id + " v" + (loaded.version || "?"));
       return {
-        id: plugin.id,
-        name: plugin.name,
-        version: plugin.version,
-        site: plugin.site,
-        // lang and iconUrl are injected from Kotlin (lnreader registry); plugin.* is a cheap fallback.
-        lang: lang || plugin.lang || null,
-        iconUrl: iconUrl || null,
+        id: loaded.id,
+        name: loaded.name,
+        version: loaded.version,
+        site: loaded.site,
+        lang: loaded.lang || null,
         // Pass the plugin's filter schema through unmodified; the host doesn't interpret it.
-        filters: plugin.filters || null,
+        filters: loaded.filters || null,
         // Per-plugin settings schema (login/base-url/toggles). Plugins read the saved values via
         // @libs/storage; the Kotlin side renders this and writes values back into that scope.
-        pluginSettings: plugin.pluginSettings || null,
+        pluginSettings: loaded.pluginSettings || null,
         // Only the headers: the one plugin that sets a method sets GET, and none sends a body.
-        imageHeaders: (plugin.imageRequestInit && plugin.imageRequestInit.headers) || null,
+        imageHeaders: (loaded.imageRequestInit && loaded.imageRequestInit.headers) || null,
         // LNReader's opt-in to the in-app browser's storage; a plugin without it is handed none.
-        webStorageUtilized: plugin.webStorageUtilized === true,
+        webStorageUtilized: loaded.webStorageUtilized === true,
       };
     } catch (e) {
       log("error", "loadPlugin failed: " + (e && e.stack ? e.stack : e));
@@ -1081,12 +1160,11 @@
   // -- method dispatch --------------------------------------------------------
   // Returns the result envelope as a JSON string (resolved by LnPluginHost.callMethod via a global).
 
-  async function callMethod(pluginId, method, argsJson) {
+  async function callMethod(method, argsJson) {
     try {
-      var plugin = plugins.get(pluginId);
-      if (!plugin) throw new Error("plugin not loaded: " + pluginId);
+      if (!plugin) throw new Error("plugin not loaded");
       if (typeof plugin[method] !== "function")
-        throw new Error("method " + method + " missing on " + pluginId);
+        throw new Error("method " + method + " missing on " + plugin.id);
       var args = JSON.parse(argsJson || "[]");
       var result = await plugin[method].apply(plugin, args);
       return JSON.stringify({
@@ -1100,7 +1178,7 @@
         "callMethod " +
           method +
           " on " +
-          pluginId +
+          (plugin && plugin.id) +
           " failed: " +
           (e && e.stack ? e.stack : msg),
       );
@@ -1108,8 +1186,10 @@
     }
   }
 
+
   // -- expose to Kotlin -------------------------------------------------------
 
+  globalThis.__lnDiscoverId = discoverId;
   globalThis.__lnLoadPlugin = loadPlugin;
   globalThis.__lnCallMethod = callMethod;
   // Reached only by HeadlessJsIntegrationTest, which has no gRPC-web server to fetch from.

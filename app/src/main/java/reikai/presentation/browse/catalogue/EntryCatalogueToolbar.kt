@@ -45,6 +45,8 @@ fun EntryCatalogueToolbar(
     onToggleSelectionMode: (() -> Unit)? = null,
     /** Null when the listing on screen holds nothing worth saving, which hides the action. */
     onSaveSearchClick: (() -> Unit)? = null,
+    /** A local source's way to add files to it; null for every other source. */
+    onImportClick: (() -> Unit)? = null,
 ) {
     var selectingDisplayMode by remember { mutableStateOf(false) }
 
@@ -72,6 +74,57 @@ fun EntryCatalogueToolbar(
                                     -> MaterialSymbols.RoundedFilled.ViewCompact
                                 },
                                 onClick = { selectingDisplayMode = true },
+                                menu = {
+                                    DropdownMenu(
+                                        expanded = selectingDisplayMode,
+                                        onDismissRequest = { selectingDisplayMode = false },
+                                    ) {
+                                        RadioMenuItem(
+                                            text = {
+                                                Text(text = stringResource(MR.strings.action_display_comfortable_grid))
+                                            },
+                                            isChecked = displayMode == LibraryDisplayMode.ComfortableGrid,
+                                        ) {
+                                            selectingDisplayMode = false
+                                            onDisplayModeChange(LibraryDisplayMode.ComfortableGrid)
+                                        }
+                                        RadioMenuItem(
+                                            text = {
+                                                Text(
+                                                    text = stringResource(
+                                                        MR.strings.action_display_comfortable_grid_panorama,
+                                                    ),
+                                                )
+                                            },
+                                            isChecked = displayMode == LibraryDisplayMode.ComfortableGridPanorama,
+                                        ) {
+                                            selectingDisplayMode = false
+                                            onDisplayModeChange(LibraryDisplayMode.ComfortableGridPanorama)
+                                        }
+                                        RadioMenuItem(
+                                            text = { Text(text = stringResource(MR.strings.action_display_grid)) },
+                                            isChecked = displayMode == LibraryDisplayMode.CompactGrid,
+                                        ) {
+                                            selectingDisplayMode = false
+                                            onDisplayModeChange(LibraryDisplayMode.CompactGrid)
+                                        }
+                                        RadioMenuItem(
+                                            text = { Text(text = stringResource(MR.strings.action_display_list)) },
+                                            isChecked = displayMode == LibraryDisplayMode.List,
+                                        ) {
+                                            selectingDisplayMode = false
+                                            onDisplayModeChange(LibraryDisplayMode.List)
+                                        }
+                                    }
+                                },
+                            ),
+                        )
+                    }
+                    if (onImportClick != null) {
+                        add(
+                            AppBar.OverflowAction(
+                                title = stringResource(MR.strings.local_import_title),
+                                onClick = onImportClick,
                             ),
                         )
                     }
@@ -118,40 +171,6 @@ fun EntryCatalogueToolbar(
                     }
                 },
             )
-
-            DropdownMenu(
-                expanded = selectingDisplayMode && displayMode != null,
-                onDismissRequest = { selectingDisplayMode = false },
-            ) {
-                RadioMenuItem(
-                    text = { Text(text = stringResource(MR.strings.action_display_comfortable_grid)) },
-                    isChecked = displayMode == LibraryDisplayMode.ComfortableGrid,
-                ) {
-                    selectingDisplayMode = false
-                    onDisplayModeChange(LibraryDisplayMode.ComfortableGrid)
-                }
-                RadioMenuItem(
-                    text = { Text(text = stringResource(MR.strings.action_display_comfortable_grid_panorama)) },
-                    isChecked = displayMode == LibraryDisplayMode.ComfortableGridPanorama,
-                ) {
-                    selectingDisplayMode = false
-                    onDisplayModeChange(LibraryDisplayMode.ComfortableGridPanorama)
-                }
-                RadioMenuItem(
-                    text = { Text(text = stringResource(MR.strings.action_display_grid)) },
-                    isChecked = displayMode == LibraryDisplayMode.CompactGrid,
-                ) {
-                    selectingDisplayMode = false
-                    onDisplayModeChange(LibraryDisplayMode.CompactGrid)
-                }
-                RadioMenuItem(
-                    text = { Text(text = stringResource(MR.strings.action_display_list)) },
-                    isChecked = displayMode == LibraryDisplayMode.List,
-                ) {
-                    selectingDisplayMode = false
-                    onDisplayModeChange(LibraryDisplayMode.List)
-                }
-            }
         },
         scrollBehavior = scrollBehavior,
     )

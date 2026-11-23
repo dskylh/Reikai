@@ -4,6 +4,7 @@ import android.content.Context
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
 import eu.kanade.domain.chapter.interactor.GetAvailableScanlators
 import eu.kanade.domain.manga.interactor.GetExcludedScanlators
+import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.domain.track.service.TrackPreferences
 import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.tachiyomi.data.download.DownloadCache
@@ -21,7 +22,9 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import mihon.domain.chapter.interactor.FilterChaptersForDownload
 import mihon.domain.source.interactor.UpdateMangaFromRemote
+import reikai.data.local.LocalSeriesRelink
 import reikai.domain.chapter.EditChapterNumber
+import reikai.domain.download.SourceContacts
 import reikai.domain.manga.MangaChapterSettings
 import reikai.domain.manga.MangaMergeManager
 import reikai.domain.manga.MangaPreferences
@@ -36,6 +39,7 @@ import reikai.domain.recommendation.RelatedMangaCache
 import reikai.domain.track.EntryTrackPort
 import reikai.domain.track.EntryTrackPorts
 import reikai.domain.track.ownChapterNumbers
+import reikai.util.restubDefaultDispatcher
 import reikai.util.testAppScope
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.core.common.preference.PreferenceStore
@@ -45,6 +49,7 @@ import tachiyomi.domain.manga.interactor.GetCustomMangaInfo
 import tachiyomi.domain.manga.interactor.GetFlatMetadataById
 import tachiyomi.domain.manga.interactor.GetMangaWithChapters
 import tachiyomi.domain.manga.interactor.SetMangaChapterFlags
+import tachiyomi.domain.manga.model.CustomMangaInfo
 import tachiyomi.domain.manga.repository.MangaRepository
 import tachiyomi.domain.source.service.SourceManager
 
@@ -70,7 +75,10 @@ internal fun mangaDetailsModel(
     prefs: PreferenceStore = InMemoryPreferenceStore(),
     editChapterNumber: EditChapterNumber = mockk(relaxed = true),
     removeMangaFromLibrary: RemoveMangaFromLibrary = mockk(relaxed = true),
-    beforeModel: () -> Unit = {},
+    sourceContacts: SourceContacts = SourceContacts { 0L },
+    localSeriesRelink: LocalSeriesRelink = mockk(),
+    customInfo: Map<Long, CustomMangaInfo> = emptyMap(),
+    beforeModel: () -> Unit = ::restubDefaultDispatcher,
 ): MangaViewModel {
     // Built ahead of the hook: recording a coEvery reads Dispatchers.Default, which undoes a static stub of it
     val mergeManager = mockk<MangaMergeManager> {
@@ -95,6 +103,9 @@ internal fun mangaDetailsModel(
         context = mockk<Context>(relaxed = true),
         mangaId = mangaId,
         isFromSource = false,
+        // The real class reads the installer default through Android at construction.
+        basePreferences = mockk { every { downloadedOnly } returns prefs.getBoolean("downloaded_only", false) },
+        sourcePreferences = SourcePreferences(prefs),
         libraryPreferences = LibraryPreferences(prefs),
         trackPreferences = TrackPreferences(prefs),
         readerPreferences = ReaderPreferences(prefs),
@@ -122,6 +133,7 @@ internal fun mangaDetailsModel(
         mergeManager = mergeManager,
         mangaLibraryAdder = mockk(relaxed = true),
         removeMangaFromLibrary = removeMangaFromLibrary,
+        combineLocalVolumes = mockk(relaxed = true),
         mergedChapterProvider = mergedChapterProvider,
         mangaPreferences = MangaPreferences(prefs),
         relatedMangasLoader = mockk(relaxed = true),
@@ -134,7 +146,9 @@ internal fun mangaDetailsModel(
         uiPreferences = UiPreferences(prefs),
         getFlatMetadataById = getFlatMetadataById,
         getPagePreviews = mockk(relaxed = true),
-        getCustomMangaInfo = mockk<GetCustomMangaInfo> { every { subscribe(any()) } returns flowOf(null) },
+        getCustomMangaInfo = mockk<GetCustomMangaInfo> {
+            every { subscribe(any()) } answers { flowOf(customInfo[firstArg()]) }
+        },
         setCustomMangaInfo = mockk(relaxed = true),
         sourceManager = sourceManager,
         exhPreferences = mockk(relaxed = true),
@@ -148,6 +162,8 @@ internal fun mangaDetailsModel(
         remoteFirstRemoval = mockk(relaxed = true),
         editChapterNumber = editChapterNumber,
         chapterSettings = MangaChapterSettings(mangas),
+        sourceContacts = sourceContacts,
+        localSeriesRelink = localSeriesRelink,
     )
 }
 

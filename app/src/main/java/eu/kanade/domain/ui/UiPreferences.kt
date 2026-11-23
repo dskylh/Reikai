@@ -12,6 +12,8 @@ import eu.kanade.domain.ui.model.TimeFormat
 import eu.kanade.tachiyomi.util.system.DeviceUtil
 import eu.kanade.tachiyomi.util.system.isDynamicColorAvailable
 import logcat.LogPriority
+import reikai.domain.details.ReadButtonSide
+import reikai.domain.stats.StatsShortcut
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.preference.getEnum
@@ -40,6 +42,13 @@ class UiPreferences(
 
     val themeDarkAmoled: Preference<Boolean> = preferenceStore.getBoolean("pref_theme_dark_amoled_key", false)
 
+    // RK --> the Custom theme's seed color and palette style, under Komikku's keys
+    val customThemeSeed: Preference<Int> = preferenceStore.getInt("pref_color_theme", 0xFFDF0090.toInt())
+
+    val customThemeStyle: Preference<PaletteStyle> =
+        preferenceStore.getEnum("pref_custom_theme_style_key", PaletteStyle.Fidelity)
+    // RK <--
+
     val relativeTime: Preference<Boolean> = preferenceStore.getBoolean("relative_time_v2", true)
 
     val dateFormat: Preference<String> = preferenceStore.getString("app_date_format", "")
@@ -52,6 +61,15 @@ class UiPreferences(
 
     // RK --> Updates and History as one Recents tab, off so nothing moves until it is asked for
     val combinedRecentsTab: Preference<Boolean> = preferenceStore.getBoolean("pref_combined_recents_tab", false)
+
+    val statsShortcut: Preference<StatsShortcut> = preferenceStore.getEnum("pref_stats_shortcut", StatsShortcut.OFF)
+
+    // The details screen's scroll actions, as top bar icons until moved to the menu.
+    val detailsScrollActionsInMenu: Preference<Boolean> =
+        preferenceStore.getBoolean("pref_details_scroll_actions_in_menu", false)
+
+    val readButtonSide: Preference<ReadButtonSide> =
+        preferenceStore.getEnum("pref_read_button_side", ReadButtonSide.RIGHT)
     // RK <--
 
     // RK --> cover-based theming

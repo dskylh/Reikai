@@ -19,21 +19,55 @@ inputs:
       build still runs, the action just declines to save that half of the cache.
     required: false
     default: ''
+  robolectric-cache:
+    description: >
+      Set true on a job that runs the unit tests, and save after them with the job's own
+      "Save Robolectric's Android SDK jars" step. Robolectric downloads its Android SDK jars from
+      Maven Central into ~/.m2 when the tests start, outside the Gradle cache, so without this every
+      run fetches them again and one failed download fails the job.
+    required: false
+    default: 'false'
 
 runs:
   using: composite
   steps:
     - name: Set up JDK
-      uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
       with:
         java-version-file: .github/.java-version
         distribution: temurin
 
     - name: Set up Gradle
-      uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+      uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
       with:
         cache-read-only: ${{ inputs.cache-read-only }}
         cache-encryption-key: ${{ inputs.cache-encryption-key }}
+
+    # Keyed by the Robolectric version, which decides the jar names; an SDK level added later
+    # restores the older entry through the prefix and is saved under the next version's key.
+    - name: Read the Robolectric version
+      if: inputs.robolectric-cache == 'true'
+      id: robolectric
+      shell: bash
+      run: echo "version=$(sed -n 's/^robolectric = "\([^"]*\)".*/\1/p' gradle/libs.versions.toml)" >> "$GITHUB_OUTPUT"
+
+    # Restored here and saved by the job's own step after its tests, even when they fail: a combined
+    # cache step only saves on success, and the job whose download it would keep is a failing one.
+    - name: Restore Robolectric's Android SDK jars
+      if: inputs.robolectric-cache == 'true'
+      id: robolectric-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.m2/repository/org/robolectric
+        key: robolectric-${{ steps.robolectric.outputs.version }}
+        restore-keys: robolectric-
+
+    - name: Hand the Robolectric cache key to the save step
+      if: inputs.robolectric-cache == 'true'
+      shell: bash
+      run: |
+        echo "ROBOLECTRIC_CACHE_KEY=robolectric-${{ steps.robolectric.outputs.version }}" >> "$GITHUB_ENV"
+        echo "ROBOLECTRIC_CACHE_HIT=${{ steps.robolectric-cache.outputs.cache-hit }}" >> "$GITHUB_ENV"
 
     - name: Copy CI gradle.properties
       shell: bash

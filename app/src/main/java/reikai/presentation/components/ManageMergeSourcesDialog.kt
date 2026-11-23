@@ -65,6 +65,8 @@ fun ManageMergeSourcesDialog(
     onSplit: (List<Long>) -> Unit,
     onRemoveFromLibrary: (List<Long>) -> Unit,
     onRemoveAll: () -> Unit,
+    // Only for a merge of local series, which can become one series with volumes.
+    onCombineVolumes: (() -> Unit)? = null,
 ) {
     val items = remember { sources.toMutableStateList() }
     val listState = rememberLazyListState()
@@ -181,12 +183,17 @@ fun ManageMergeSourcesDialog(
                             Text(stringResource(MR.strings.merge_sources_split_action))
                         }
                         TextButton(onClick = { onRemoveFromLibrary(selection.toList()) }) {
-                            Text(stringResource(MR.strings.merge_sources_remove_action))
+                            Text(stringResource(MR.strings.remove_from_library))
                         }
                     } else {
                         if (overridden) {
                             TextButton(onClick = onResetOrder) {
                                 Text(stringResource(MR.strings.merge_sources_reset_order_action))
+                            }
+                        }
+                        if (onCombineVolumes != null) {
+                            TextButton(onClick = onCombineVolumes) {
+                                Text(stringResource(MR.strings.action_combine_volumes))
                             }
                         }
                         TextButton(onClick = onRemoveAll) {
@@ -265,7 +272,7 @@ private fun ReorderableCollectionItemScope.SourceRow(
             IconButton(onClick = onRemove) {
                 Icon(
                     imageVector = MaterialSymbols.Rounded.Close,
-                    contentDescription = stringResource(MR.strings.merge_sources_remove_action),
+                    contentDescription = stringResource(MR.strings.remove_from_library),
                 )
             }
         }

@@ -15,13 +15,18 @@ To address this, simply exit and re-enter the reader, often resolving the issue.
 Open the reader's top menu (the three dots) and tap **Reload chapter**, which reads the chapter again where you are, from its downloaded copy if it has one. **Reload chapter from source** skips a downloaded copy and fetches the chapter fresh from the source, including any pages or chapter text the app had cached. The downloaded copy itself is left as it is; delete and download the chapter again to replace it.
 
 ## Can I see two pages at once?
-Yes, in the two horizontal paged modes with the high quality renderer on. Open a chapter, tap the middle of the screen, press the gear icon, and set **Dual page view**:
+Yes. For manga, in the three paged modes with the high quality renderer on; for light novels, whenever you read a page at a time. Open a chapter, tap the middle of the screen, press the gear icon, and set **Dual page view**:
 
 * **Never** keeps one page at a time.
 * **Always** pairs pages up, which suits a tablet or an unfolded foldable.
 * **When wide** only pairs them when the screen is wider than it is tall, so turning the device sideways is what switches it on.
 
-The option only appears in **Paged (left to right)** and **Paged (right to left)**. Pairing is side by side, so the vertical and long strip modes do not offer it. It also needs **Use high quality renderer**, in <nav to="advanced">: the standard renderer has no dual page view.
+For manga, the option only appears in the three **Paged** modes, and pages pair side by side in each, so the long strip modes do not offer it. It also needs **Use high quality renderer**, in <nav to="advanced">: the standard renderer has no dual page view.
+
+Light novels offer it whenever the chapter is read a page at a time, with no renderer setting needed. See the [novel reader guide](/docs/novel-reader).
+
+## Can I mark chapters read without leaving the reader?
+Yes, for manga and light novels alike. Open a chapter, tap the middle of the screen, and press the chapters button in the bottom bar. Swipe a chapter to run your chapter swipe action, or long-press one to select it, tap others to add them, and pick from the bar at the bottom: bookmark, mark as read or unread, download, or delete. With one chapter selected, **Mark previous as read** marks every chapter above it read. The chapter you are reading is left out of a delete, and marking it read keeps its download even when **After manually marked as read** is on under **Delete chapters** in <nav to="downloads">.
 
 ## What do all the settings do?
 See [manga reader settings](/docs/guides/reader-settings) and [novel reader settings](/docs/guides/novel-reader-settings).

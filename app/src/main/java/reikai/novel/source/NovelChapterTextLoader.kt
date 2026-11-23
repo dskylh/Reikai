@@ -1,8 +1,11 @@
 package reikai.novel.source
 
 import android.content.Context
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.isActive
 import reikai.domain.novel.NovelPreferences
+import reikai.domain.novel.NovelRenderingMode
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
@@ -10,6 +13,8 @@ import reikai.novel.content.NovelContentConfig
 import reikai.novel.content.NovelContentPipeline
 import reikai.novel.content.NovelHtmlUtils
 import reikai.novel.install.LnPluginInstaller
+import reikai.novel.install.describing
+import reikai.novel.local.LocalNovelSource
 import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
@@ -38,6 +43,10 @@ class NovelChapterTextLoader(
      */
     val settingsChanged: Flow<Unit> = NovelContentConfig.changes(preferences)
 
+    /** The mode this session's novel keeps for itself, which wins over the setting; null follows it. */
+    @Volatile
+    var renderingMode: NovelRenderingMode? = null
+
     private val sourcesByNovel: MutableMap<Long, NovelSource> =
         Collections.synchronizedMap(HashMap())
 
@@ -45,6 +54,14 @@ class NovelChapterTextLoader(
      *  runs [LnPluginInstaller.ensureLoaded] once before its first source resolve. */
     @Volatile
     private var pluginsLoaded = false
+
+    /** Set by the user's Retry: the next lookup of a source that is not there loads its plugin again. */
+    @Volatile
+    private var retryMissingPlugin = false
+
+    fun retryFailedPlugin() {
+        retryMissingPlugin = true
+    }
 
     /** The source resolved for [novelId] so far, if a chapter of it has already loaded. */
     fun cachedSource(novelId: Long): NovelSource? = sourcesByNovel[novelId]
@@ -58,8 +75,11 @@ class NovelChapterTextLoader(
      */
     suspend fun load(chapter: NovelChapter, fromSource: Boolean = false): Pair<String, String?> {
         val (raw, baseUrl) = fetch(chapter, fromSource)
-        val config = NovelContentConfig.from(preferences, chapterUrl = chapter.url, chapterName = chapter.name)
-        val processed = NovelContentPipeline.process(raw, config)
+        val config = renderingMode
+            ?.let { NovelContentConfig.from(preferences, chapter.url, chapter.name, renderingMode = it) }
+            ?: NovelContentConfig.from(preferences, chapterUrl = chapter.url, chapterName = chapter.name)
+        val coroutine = currentCoroutineContext()
+        val processed = NovelContentPipeline.process(raw, config) { coroutine.isActive }
         // A plain-text chapter leaves the pipeline unescaped and unsanitised, because a text renderer
         // takes it verbatim. Both readers are HTML sinks, so it is escaped here or a `.txt` chapter's
         // markup becomes live document.
@@ -74,10 +94,13 @@ class NovelChapterTextLoader(
 
     /** A copy on disk when there is one, unless [fromSource] asks the source regardless and drops the cached text. */
     private suspend fun fetch(chapter: NovelChapter, fromSource: Boolean): Pair<String, String?> {
+        val novel = novelRepo.getById(chapter.novelId)
+        // A local book is read from a file that can be replaced under the same path, and the cache would keep
+        // its old text, inlined pictures and all, so a local chapter is always read from the file, as manga's is.
+        val cacheable = novel?.source != LocalNovelSource.ID
         if (!fromSource) {
-            val novel = novelRepo.getById(chapter.novelId)
             if (novel != null) readDownloaded(novel, chapter)?.let { return it to null }
-            textCache.get(chapter)?.let { return it.text to it.baseUrl }
+            if (cacheable) textCache.get(chapter)?.let { return it.text to it.baseUrl }
         } else {
             // Dropped before anything can fail, so a bad answer cached earlier is not served after a failed reload.
             textCache.remove(chapter)
@@ -86,7 +109,7 @@ class NovelChapterTextLoader(
         // A blank page reads as the reader failing to draw, so an empty answer fails the load instead.
         val text = src.parseChapter(chapter.url).ifBlank { throw EmptyChapterException() }
         val baseUrl = src.site.ifBlank { null }
-        textCache.put(chapter, CachedChapterText(text, baseUrl))
+        if (cacheable) textCache.put(chapter, CachedChapterText(text, baseUrl))
         return text to baseUrl
     }
 
@@ -101,9 +124,21 @@ class NovelChapterTextLoader(
         }
         val sourceId = novelRepo.getById(forNovelId)?.source ?: error("Novel not found")
         val resolved = sourceManager.get(sourceId)
-            ?: error(context.stringResource(MR.strings.source_not_installed, sourceManager.nameOf(sourceId)))
+            ?: retriedSource(sourceId)
+            ?: error(
+                installer.failures.value.describing(sourceId, context)
+                    ?: context.stringResource(MR.strings.source_not_installed, sourceManager.nameOf(sourceId)),
+            )
         sourcesByNovel[forNovelId] = resolved
         return resolved
+    }
+
+    // The details and catalogue Retry go through the same installer call.
+    private suspend fun retriedSource(sourceId: String): NovelSource? {
+        if (!retryMissingPlugin) return null
+        retryMissingPlugin = false
+        runCatchingCancellable { installer.retryLoad(sourceId) }
+        return sourceManager.get(sourceId)
     }
 }
 

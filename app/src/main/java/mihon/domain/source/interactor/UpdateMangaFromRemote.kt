@@ -11,6 +11,10 @@ import eu.kanade.tachiyomi.source.Source
 import eu.kanade.tachiyomi.source.model.SManga
 import logcat.LogPriority
 import mihon.domain.source.models.RemoteMangaUpdate
+import reikai.domain.library.ContentType
+import reikai.domain.local.LocalSeriesBlockedException
+import reikai.domain.local.LocalSeriesLocks
+import reikai.domain.local.lockedAtCurrentAddress
 import reikai.domain.source.keptCover
 import reikai.domain.source.keptDetail
 import reikai.domain.source.keptGenres
@@ -39,6 +43,7 @@ class UpdateMangaFromRemote(
     private val coverCache: CoverCache,
     private val libraryPreferences: LibraryPreferences,
     private val downloadManager: DownloadManager,
+    private val seriesLocks: LocalSeriesLocks, // RK
 ) {
     suspend operator fun invoke(
         manga: Manga,
@@ -64,7 +69,22 @@ class UpdateMangaFromRemote(
         fetchChapters: Boolean = false,
         manualFetch: Boolean = false,
         fetchWindow: ClosedRange<Instant>? = null,
+        // RK --> a local series' listing and its row sync run under the series' lock as one, so a move of its
+        // files cannot land between them and have the sync write rows for files that moved; the body below is
+        // upstream's, untouched
+    ): Result<RemoteMangaUpdate> = underSeriesLock(source, manga) { current ->
+        refresh(source, current, fetchDetails, fetchChapters, manualFetch, fetchWindow)
+    }
+
+    private suspend fun refresh(
+        source: Source,
+        manga: Manga,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+        manualFetch: Boolean,
+        fetchWindow: ClosedRange<Instant>?,
     ): Result<RemoteMangaUpdate> = withIOContext {
+        // RK <--
         try {
             val chapters = chapterRepository.getChapterByMangaId(manga.id)
                 .sortedBy { it.sourceOrder }
@@ -96,6 +116,33 @@ class UpdateMangaFromRemote(
             Result.failure(Exception(e.toString(), e))
         }
     }
+
+    // RK --> the series is the folder the manga's url names, its address read again once its lock is held, since an
+    // organize or relink it waited behind may have moved it; any other source holds nothing on disk. A series waiting for an
+    // organize's repair fails its refresh, as an unreadable folder does.
+    private suspend fun underSeriesLock(
+        source: Source,
+        manga: Manga,
+        refresh: suspend (Manga) -> Result<RemoteMangaUpdate>,
+    ): Result<RemoteMangaUpdate> = if (source.isLocal()) {
+        try {
+            lockedAtCurrentAddress(
+                manga,
+                Manga::url,
+                { held ->
+                    mangaRepository.getMangaById(held.id).url.takeIf { it != held.url }?.let { held.copy(url = it) }
+                        ?: held
+                },
+                { url, block -> seriesLocks.withSeries(ContentType.MANGA, url, block) },
+                refresh,
+            )
+        } catch (e: LocalSeriesBlockedException) {
+            Result.failure(e)
+        }
+    } else {
+        refresh(manga)
+    }
+    // RK <--
 
     private suspend fun awaitUpdateFromSource(
         localManga: Manga,

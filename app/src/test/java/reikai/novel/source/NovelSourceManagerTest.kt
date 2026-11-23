@@ -2,7 +2,6 @@ package reikai.novel.source
 
 import eu.kanade.tachiyomi.extension.ExtensionManager
 import eu.kanade.tachiyomi.extension.model.Extension
-import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeSameInstanceAs
 import io.mockk.every
@@ -20,7 +19,6 @@ import reikai.novel.install.LnPluginInstaller
 import reikai.novel.source.ireader.IReaderSourceHolder
 import reikai.util.testAppScope
 import tachiyomi.core.common.preference.Preference
-import tachiyomi.domain.source.model.SourceNotInstalledException
 import ireader.core.source.CatalogSource as IReaderCatalogSource
 
 /** The registry follows the installed novel extension apps as the manga registry follows its extensions. */
@@ -62,6 +60,26 @@ class NovelSourceManagerTest {
         manager.sources.first { it.isEmpty() } shouldBe emptyList()
     }
 
+    /** The startup and restore load paths register whatever a stored plugin says it is, so the guard is here. */
+    @Test
+    fun `a plugin claiming a built-in source's id leaves the built-in in place`() = runTest {
+        val local = mockk<NovelSource> { every { id } returns "local" }
+        val withLocal = NovelSourceManager(
+            scope = testAppScope(),
+            installer = { mockk<LnPluginInstaller>(relaxed = true) },
+            extensionManager = mockk<ExtensionManager> {
+                every { loadedNovelExtensionsFlow } returns flowOf(emptyList())
+            },
+            prefs = mockk<NovelPreferences> { every { seenNovelSources() } returns seen },
+            builtIn = listOf(local),
+        )
+
+        runCatching { withLocal.register(mockk { every { id } returns "local" }) }
+        withLocal.unregister("local")
+
+        withLocal.sources.first().single() shouldBeSameInstanceAs local
+    }
+
     @Test
     fun `a plugin stays registered while the apps change`() = runTest {
         val plugin = mockk<NovelSource> { every { id } returns "plugin" }
@@ -97,12 +115,6 @@ class NovelSourceManagerTest {
         loaded.value = listOf(iReader, novelApp(novelCatalogue(8L)))
 
         manager.sources.first { it.size == 2 }.first { it.id == "ireader:7" } shouldBeSameInstanceAs before
-    }
-
-    /** Manga's stub source throws this same exception from every call; this pins the novel half to it. */
-    @Test
-    fun `a novel source that is not installed resolves to SourceNotInstalledException`() = runTest {
-        shouldThrow<SourceNotInstalledException> { manager.getOrThrow("gone") }
     }
 
     @Test

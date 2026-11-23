@@ -43,7 +43,6 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.serialization.jsonOkio)
     implementation(libs.kotlinx.serialization.protobuf)
-    implementation(libs.injekt)
 
     implementation(libs.kotlinx.datetime)
 
@@ -58,7 +57,7 @@ dependencies {
     testRuntimeOnly(libs.junit.platform.launcher)
     // The production driver's foreign-key enforcement, checked on a device (ForeignKeyEnforcementTest).
     androidTestImplementation(libs.androidx.test.junit)
-    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.kotlinx.coroutines.core)
     // RK <--
 }

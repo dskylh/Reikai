@@ -8,7 +8,8 @@ package reikai.presentation.reader
 fun readerColorOrNull(value: String): Int? {
     if (!value.startsWith("#")) return null
     val digits = value.substring(1)
-    if (digits.any { Character.digit(it, 16) < 0 }) return null
+    // ASCII only, as CSS reads a hex colour: Character.digit also takes other scripts' digits.
+    if (digits.any { it !in '0'..'9' && it !in 'a'..'f' && it !in 'A'..'F' }) return null
     val full = when (digits.length) {
         3, 4 -> digits.flatMap { listOf(it, it) }.joinToString("")
         6, 8 -> digits
@@ -19,9 +20,16 @@ fun readerColorOrNull(value: String): Int? {
     return ((alpha shl 24) or rgb).toInt()
 }
 
-/** The page background [value] names, or the reader's own dark default when it names none. */
-fun readerBackgroundColorInt(value: String): Int =
-    readerColorOrNull(value) ?: readerColorOrNull(readerDarkPreset.background)!!
+/** The page background [value] names, or the reader's own dark default when it names none, for both renderers. */
+fun readerBackgroundOrDefault(value: String): String =
+    value.takeIf { readerColorOrNull(it) != null } ?: readerDarkPreset.background
 
-/** The text colour [value] names, or the reader's own dark default when it names none. */
-fun readerTextColorInt(value: String): Int = readerColorOrNull(value) ?: readerColorOrNull(readerDarkPreset.textColor)!!
+/** The text colour [value] names, or the reader's own dark default when it names none, for both renderers. */
+fun readerTextColorOrDefault(value: String): String =
+    value.takeIf { readerColorOrNull(it) != null } ?: readerDarkPreset.textColor
+
+/** [readerBackgroundOrDefault] as an ARGB int. */
+fun readerBackgroundColorInt(value: String): Int = readerColorOrNull(readerBackgroundOrDefault(value))!!
+
+/** [readerTextColorOrDefault] as an ARGB int. */
+fun readerTextColorInt(value: String): Int = readerColorOrNull(readerTextColorOrDefault(value))!!

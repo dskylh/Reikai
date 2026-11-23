@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.data.track.myanimelist
 
 import android.net.Uri
 import androidx.core.net.toUri
+import eu.kanade.domain.track.service.TrackPreferences
 import eu.kanade.tachiyomi.data.database.models.Track
 import eu.kanade.tachiyomi.data.track.model.TrackMangaMetadata
 import eu.kanade.tachiyomi.data.track.model.TrackSearch
@@ -21,7 +22,6 @@ import eu.kanade.tachiyomi.network.POST
 import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.network.awaitSuccess
 import eu.kanade.tachiyomi.network.parseAs
-import eu.kanade.tachiyomi.util.PkceUtil
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.Headers
@@ -29,8 +29,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import reikai.data.track.isMyAnimeListNovel
+import reikai.data.track.newLoginPkce
 import tachiyomi.core.common.util.lang.withIOContext
-import uy.kohesive.injekt.injectLazy
 import java.text.SimpleDateFormat
 import java.util.Locale
 import tachiyomi.domain.track.model.Track as DomainTrack
@@ -39,13 +39,12 @@ class MyAnimeListApi(
     private val trackerId: Long,
     private val client: OkHttpClient,
     interceptor: MyAnimeListInterceptor,
+    private val json: Json,
 ) {
-
-    private val json: Json by injectLazy()
 
     private val authClient = client.newBuilder().addInterceptor(interceptor).build()
 
-    suspend fun getAccessToken(authCode: String): MALOAuth {
+    suspend fun getAccessToken(authCode: String, codeVerifier: String): MALOAuth { // RK: stored verifier
         return withIOContext {
             val formBody: RequestBody = FormBody.Builder()
                 .add("client_id", CLIENT_ID)
@@ -365,13 +364,15 @@ class MyAnimeListApi(
 
         private const val LIST_PAGINATION_AMOUNT = 250
 
-        private var codeVerifier: String = ""
-
-        fun authUrl(): Uri = "$BASE_OAUTH_URL/authorize".toUri().buildUpon()
-            .appendQueryParameter("client_id", CLIENT_ID)
-            .appendQueryParameter("code_challenge", getPkceChallengeCode())
-            .appendQueryParameter("response_type", "code")
-            .build()
+        // RK --> the verifier is stored rather than held here (TrackerLoginPkce.kt), so the login survives
+        // the process being killed. MAL takes plain PKCE only, so the challenge is the verifier itself.
+        fun authUrl(trackPreferences: TrackPreferences, tracker: MyAnimeList): Uri =
+            "$BASE_OAUTH_URL/authorize".toUri().buildUpon()
+                .appendQueryParameter("client_id", CLIENT_ID)
+                .appendQueryParameter("code_challenge", trackPreferences.newLoginPkce(tracker).codeVerifier)
+                .appendQueryParameter("response_type", "code")
+                .build()
+        // RK <--
 
         fun mangaUrl(id: Long): Uri = "$BASE_API_URL/manga".toUri().buildUpon()
             .appendPath(id.toString())
@@ -395,9 +396,6 @@ class MyAnimeListApi(
             return POST("$BASE_OAUTH_URL/token", body = formBody, headers = headers)
         }
 
-        private fun getPkceChallengeCode(): String {
-            codeVerifier = PkceUtil.generateCodeVerifier()
-            return codeVerifier
-        }
+        // RK: getPkceChallengeCode replaced by TrackPreferences.newLoginPkce, which stores the verifier
     }
 }

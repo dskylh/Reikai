@@ -1,8 +1,9 @@
 name: Fork update channel
 
-# A fork's own update channel. Every day it merges unseensnick/Reikai's main into this fork's main, and
-# whenever main has something new it builds a signed nightly whose in-app updater checks THIS repo, then
-# publishes it here as release r<commit count>. Never runs on unseensnick/Reikai itself.
+# A fork's own update channel. Every day it merges unseensnick/Reikai's working branch (whichever of
+# main, feat/* and release/* moved last, the one upstream's own nightlies build) into this fork's main,
+# and whenever main has something new it builds a signed nightly whose in-app updater checks THIS repo,
+# then publishes it here as release r<commit count>. Never runs on unseensnick/Reikai itself.
 #
 # One-time setup, as repository secrets: SIGNING_KEY (the keystore, base64) and SIGNING_PASSWORD (its
 # password, also the key's). The key must never change, or Android refuses to install an update over the
@@ -53,14 +54,24 @@ jobs:
           done
 
       - name: Merge upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch --no-tags "https://github.com/$UPSTREAM.git" main
+          branch=main
+          newest=""
+          for candidate in $(gh api "repos/$UPSTREAM/branches" --paginate -q '.[].name' | grep -E '^(main|feat/.+|release/.+)$'); do
+            date=$(gh api "repos/$UPSTREAM/commits/$candidate" -q .commit.committer.date)
+            if [[ "$date" > "$newest" ]]; then newest=$date; branch=$candidate; fi
+          done
+          echo "Following $UPSTREAM $branch"
+          echo "UPSTREAM_BRANCH=$branch" >> "$GITHUB_ENV"
+          git fetch --no-tags "https://github.com/$UPSTREAM.git" "$branch"
           before=$(git rev-parse HEAD)
-          if ! git merge --no-edit -m "chore: merge $UPSTREAM main" FETCH_HEAD; then
+          if ! git merge --no-edit -m "chore: merge $UPSTREAM $branch" FETCH_HEAD; then
             git merge --abort
-            echo "::error::$UPSTREAM main conflicts with this fork's main. Merge it by hand, then re-run."
+            echo "::error::$UPSTREAM $branch conflicts with this fork's main. Merge it by hand, then re-run."
             exit 1
           fi
           if [ "$(git rev-parse HEAD)" != "$before" ]; then
@@ -124,7 +135,7 @@ jobs:
           cp "$dir/app-universal-nightly.apk" "reikai-r$COUNT.apk"
           previous=$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName')
           {
-            echo "Built from $(git rev-parse --short HEAD), with $UPSTREAM main merged in."
+            echo "Built from $(git rev-parse --short HEAD), with $UPSTREAM $UPSTREAM_BRANCH merged in."
             echo
             if [ -n "$previous" ] && git fetch --quiet origin "refs/tags/$previous:refs/tags/$previous"; then
               git log --no-merges --format='- %s' "$previous..HEAD" | head -40

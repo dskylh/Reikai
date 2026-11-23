@@ -22,7 +22,8 @@ import kotlin.time.Instant
 sealed interface EntryDetailsScreenState {
     data object Loading : EntryDetailsScreenState
 
-    data class Failed(val message: String) : EntryDetailsScreenState
+    /** The page's id has no stored row: the entry was deleted after the link to it was made. */
+    data object NotFound : EntryDetailsScreenState
 
     @Immutable
     data class Loaded(
@@ -58,12 +59,21 @@ sealed interface EntryDetailsScreenState {
         val webPage: EntryWebPage?,
         /** The copy each row's download fetches, which the All view moves off a member whose source is gone. */
         val downloadTargets: DownloadTargets,
+        /** The list as shown, built with this state ([withVolumeViews]); empty until the adapter's inputs fill it. */
+        val volumeViews: DetailsVolumeViews = DetailsVolumeViews(),
     ) : EntryDetailsScreenState {
         val selectionMode: Boolean get() = selection.isNotEmpty()
         val isMerged: Boolean get() = mergeSources.size > 1
 
+        /** A local series of its own, not one source of a merge, whose files it can move and rename. */
+        val ownsLocalFiles: Boolean get() = details.header.sourceState == EntrySourceState.Local && !isMerged
+
         /** Downloads go through the viewed member's own source, so only an installed one gates them on. */
         val chaptersDownloadable: Boolean get() = details.header.sourceState == EntrySourceState.Installed
+
+        /** Chapter text to search or count is on the device: downloads, or a local series' own files. */
+        val textOnDevice: Boolean
+            get() = details.header.sourceState == EntrySourceState.Local || (chaptersDownloadable && hasViewedDownloads)
 
         /**
          * Whether a chapter row in [downloadState] draws its download indicator and takes a download swipe.
@@ -98,7 +108,7 @@ sealed interface EntryDetailsScreenState {
 enum class EntrySourceState {
     Installed,
 
-    /** Manga's local source, whose files are the series itself. Novels have no local source. */
+    /** A local source, whose files are the series itself: nothing to download, and nothing to browse. */
     Local,
 
     /** Uninstalled: a manga stub source, or a novel whose plugin or extension is gone. */
@@ -128,6 +138,12 @@ data class EntryChapterListUiState(
     val hiddenChapterIds: Set<Long>,
     /** How a chapter the source dated nothing reads; see [UndatedChapterDate]. */
     val undatedChapterDate: UndatedChapterDate,
+    /** What the reader's skip-duplicate rule folds and the user's own marks on it; null unless both that
+     *  rule and "Show duplicate chapters the reader skips" are on. */
+    val duplicates: DuplicateMarks? = null,
+    /** A local series' volumes over every chapter the viewed list holds before its filters, in list
+     *  order, so the volume dialogs reach a volume the filter hides ([inVolumes]). */
+    val volumes: List<ChapterVolume> = emptyList(),
 )
 
 /**
@@ -153,10 +169,24 @@ sealed interface EntryChapterListItem {
         val downloadState: Download.State,
         /** The number is out of line with its source's list ([reikai.domain.chapter.ChapterNumberHint]). */
         val numberHinted: Boolean,
+        /** The volume of a local series split into volumes; null elsewhere. */
+        val volume: ChapterVolume? = null,
     ) : EntryChapterListItem, ChapterMarks
 
     @Immutable
     data class Missing(val id: String, val count: Int) : EntryChapterListItem
+
+    /** The header over one volume of a local series split into volumes ([inVolumes]). */
+    @Immutable
+    data class Volume(
+        val series: String,
+        val key: String,
+        val label: VolumeLabel,
+        val chapterIds: List<Long>,
+        val readCount: Int,
+        // 0, or 1 and up for each later volume showing the same label, which then reads "Vol. 3 (2)".
+        val duplicate: Int = 0,
+    ) : EntryChapterListItem
 }
 
 /**

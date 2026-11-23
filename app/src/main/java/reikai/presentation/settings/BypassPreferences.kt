@@ -20,6 +20,7 @@ import eu.kanade.tachiyomi.data.library.LibraryUpdateWorker
 import eu.kanade.tachiyomi.network.NetworkPreferences
 import eu.kanade.tachiyomi.network.interceptor.FlareSolverrTestFailure
 import eu.kanade.tachiyomi.network.interceptor.FlareSolverrTestResult
+import eu.kanade.tachiyomi.network.interceptor.TurnstileBench
 import eu.kanade.tachiyomi.network.interceptor.TurnstileSolver
 import eu.kanade.tachiyomi.network.interceptor.isPrivateChannel
 import eu.kanade.tachiyomi.network.interceptor.splitFlareSolverrUserInfo
@@ -47,13 +48,18 @@ fun bypassPreferenceItems(networkPreferences: NetworkPreferences): List<Preferen
     val flareSolverrUsername by networkPreferences.flareSolverrUsername.collectAsState()
     val flareSolverrPassword by networkPreferences.flareSolverrPassword.collectAsState()
     var flareSolverrTesting by remember { mutableStateOf(false) }
-    var flareSolverrTestResult by remember { mutableStateOf<FlareSolverrTestResult?>(null) }
+    // Keyed to what was tested, so a changed address or sign-in reads as untested, and a test still running
+    // against the old one lands in a state nothing shows.
+    var flareSolverrTestResult by remember(flareSolverrUrl, flareSolverrUsername, flareSolverrPassword) {
+        mutableStateOf<FlareSolverrTestResult?>(null)
+    }
     var flareSolverrTestFailure by remember { mutableStateOf<FlareSolverrTestResult.Failure?>(null) }
     var showFlareSolverrLogin by remember { mutableStateOf(false) }
     val turnstileSolverEnabled by networkPreferences.enableTurnstileSolver.collectAsState()
     // Spike state, debug only: mirrors the solver's own flag so the row can show it.
     var forceHeadlessSolver by remember { mutableStateOf(TurnstileSolver.forceHeadless) }
     var forceNoWatchSolver by remember { mutableStateOf(TurnstileSolver.forceNoWatch) }
+    var benchBlocks by remember { mutableStateOf(false) }
 
     // A local copy, so the row below can tell the two outcomes apart.
     val lastTest = flareSolverrTestResult
@@ -122,6 +128,30 @@ fun bypassPreferenceItems(networkPreferences: NetworkPreferences): List<Preferen
             onClick = {
                 LibraryUpdateWorker.startDelayed(context.workManager, delaySeconds = 60)
                 context.toast("Library update queued for 60s, kill the app now")
+            },
+        ),
+        Preference.PreferenceItem.TextPreference(
+            title = "Turnstile: run the solver on a test widget (spike)",
+            subtitle = "Next: ${if (benchBlocks) "always refuses" else "asks once"}. Arms the real solver on " +
+                "Cloudflare's test widget for 35 seconds and logs focus, events and the token under " +
+                "TurnstileBench, alternating keys. The two force rows below apply",
+            visible = BuildConfig.DEBUG,
+            onClick = {
+                TurnstileBench.run(
+                    context,
+                    if (benchBlocks) TurnstileBench.REFUSING_SITEKEY else TurnstileBench.INTERACTIVE_SITEKEY,
+                )
+                benchBlocks = !benchBlocks
+                context.toast("Test widget running for 35s")
+            },
+        ),
+        Preference.PreferenceItem.TextPreference(
+            title = "Turnstile: run the solver on a real site (spike)",
+            subtitle = "Loads the next address in bench-urls.txt in the app's external files folder, " +
+                "after dropping its clearance, and logs it the same way",
+            visible = BuildConfig.DEBUG,
+            onClick = {
+                context.toast(TurnstileBench.runOnNextSite(context) ?: "No addresses in bench-urls.txt")
             },
         ),
         Preference.PreferenceItem.TextPreference(

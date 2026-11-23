@@ -5,7 +5,6 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import cafe.adriel.voyager.core.screen.Screen
 import dev.zacsweers.metro.AppScope
 import dev.zacsweers.metro.Assisted
 import dev.zacsweers.metro.AssistedFactory
@@ -13,13 +12,17 @@ import dev.zacsweers.metro.AssistedInject
 import dev.zacsweers.metro.ContributesIntoMap
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactory
 import dev.zacsweers.metrox.viewmodel.ManualViewModelAssistedFactoryKey
+import eu.kanade.domain.ui.UiPreferences
 import eu.kanade.presentation.manga.components.ChapterDownloadAction
 import eu.kanade.tachiyomi.data.download.model.Download
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.WhileSubscribed
@@ -38,7 +41,7 @@ import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import mihon.core.metro.AppCoroutineScope
 import reikai.data.coil.withCoverFallbacks
 import reikai.domain.category.RecentsSurface
 import reikai.domain.category.recentsCategoryFilterFlow
@@ -50,18 +53,18 @@ import reikai.domain.library.chapterSwipeActionsChanges
 import reikai.domain.library.includes
 import reikai.domain.merge.MergeScope
 import reikai.domain.source.ReikaiSourcePreferences
-import reikai.presentation.browse.AddDecision
-import reikai.presentation.browse.AddFavoriteResult
+import reikai.domain.stats.inMenus
+import reikai.presentation.components.DownloadProgress
 import reikai.presentation.components.chipUpdating
 import reikai.presentation.selection.EntrySelection
 import reikai.presentation.selection.SelectionStore
 import tachiyomi.core.common.preference.Preference
 import tachiyomi.core.common.preference.TriState
-import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.domain.library.service.LibraryPreferences
 import tachiyomi.domain.updates.service.UpdatesPreferences
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -83,6 +86,9 @@ class RecentsEngine(
     private val sourcePreferences: ReikaiSourcePreferences,
     private val updatesPreferences: UpdatesPreferences,
     private val libraryPreferences: LibraryPreferences,
+    private val uiPreferences: UiPreferences,
+    // The verbs' writes, which a closed screen or a dismissed dialog must not cut off.
+    @AppCoroutineScope private val appScope: CoroutineScope,
 ) : ViewModel() {
 
     /**
@@ -108,6 +114,12 @@ class RecentsEngine(
          * A value a verb reads synchronously stays eager instead: unsubscribed, `value` is the seed.
          */
         private val OVER_PROVIDERS = SharingStarted.WhileSubscribed(5.seconds)
+
+        /** The first input passes at once, since the assembly waits on it; later ones wait for this much quiet. */
+        private val TARGET_INPUTS_QUIET = 500.milliseconds
+
+        /** The longest a steady run of inputs holds a clear back, so rows do not name stale targets for minutes. */
+        private val TARGET_INPUTS_LONGEST = 5.seconds
     }
 
     init {
@@ -151,6 +163,9 @@ class RecentsEngine(
         chipPreference.changes().stateIn(viewModelScope, SharingStarted.Eagerly, chipPreference.get())
     }
 
+    /** Whether the overflow menu offers Statistics. */
+    val statsInMenus: StateFlow<Boolean> by lazy { uiPreferences.statsShortcut.inMenus(viewModelScope) }
+
     /** Flipping the chip drops the selection through [EntrySelection.afterChipFlip]. */
     fun setContentType(type: ContentType) {
         // The preference rather than [contentType], whose change event lags the write.
@@ -177,10 +192,13 @@ class RecentsEngine(
             // The memo is emptied when a target's input changes, since the target a row resolved to may
             // now be read, re-sorted or hidden. Not on a lane emission, which a download tick causes too,
             // and not on a keystroke. A write re-sends the same lanes, which the distinct check drops, so
-            // it costs no assembly pass.
+            // it costs no assembly pass. A library update writes once per entry, and each clear sends every
+            // drawn row back to loading its whole chapter list, so a burst clears once it goes quiet, or every
+            // few seconds while it lasts.
             combine(
                 combine(providers.map(::collectedLanes)) { it.toList() },
                 merge(*providers.map { it.targetInputs }.toTypedArray())
+                    .settled(TARGET_INPUTS_QUIET, TARGET_INPUTS_LONGEST)
                     .onEach { clearTargets() },
             ) { lanes, _ -> lanes }
                 .distinctUntilChanged(),
@@ -426,9 +444,29 @@ class RecentsEngine(
     fun setBookmarkSelection(chapters: Set<ChapterRef>, bookmarked: Boolean) =
         dispatchAndClear { it.setBookmark(chapters, bookmarked) }
 
-    /** Each scope's chapters fetch the copies that scope reaches, see [actingChaptersByScope]. */
-    fun downloadSelection(chaptersByScope: Map<MergeScope, Set<ChapterRef>>) = dispatchAndClear { actions ->
-        chaptersByScope.forEach { (scope, chapters) -> actions.download(chapters, ChapterDownloadAction.START, scope) }
+    /**
+     * Resolves what the selected [items] act on ([actingChapters]), then runs [verb] over it. On the app
+     * scope, like the write itself, so leaving the screen during the resolve cannot drop the verb.
+     */
+    fun actOnSelection(
+        items: List<RecentsItem>,
+        mode: RecentsMode,
+        membership: Map<EntryId, Long>,
+        verb: (Set<ChapterRef>) -> Unit,
+    ) {
+        appScope.launch { verb(actingChapters(items, mode, membership)) }
+    }
+
+    /** Downloads the selected [items], each scope's chapters fetching the copies that scope reaches. */
+    fun downloadSelection(items: List<RecentsItem>, mode: RecentsMode, membership: Map<EntryId, Long>) {
+        appScope.launch {
+            val chaptersByScope = actingChaptersByScope(items, mode, membership)
+            dispatchAndClear { actions ->
+                chaptersByScope.forEach { (scope, chapters) ->
+                    actions.download(chapters, ChapterDownloadAction.START, scope)
+                }
+            }
+        }
     }
 
     /**
@@ -469,73 +507,28 @@ class RecentsEngine(
         providersByType[item.entryId.contentType]?.removeHistoryRecord(item)
     }
 
-    // The add flow, owned here rather than by either content type's model, so one shell renders one
-    // dialog channel. Each verb below is the UI entry point; the suspend half beside it is the
-    // operation, which is also what the tests drive, since nothing can await a launched coroutine.
+    /**
+     * The add flow, one per content type through the shared [RecentsAddFlow], so a row adds, asks and
+     * reports a failure the way every other surface does. Its questions are about one entry, so they
+     * never need the surface's one slot, which exists for prompts about a mixed selection.
+     */
+    val addFlows: List<RecentsAddFlow> by lazy { providers.map { RecentsAddFlow(it, viewModelScope, appScope) } }
 
     /** Adds [entry], asking about a possible duplicate or a category first when the decision needs it. */
     fun addToLibrary(entry: EntryId) {
-        viewModelScope.launchIO { startAdd(entry) }
-    }
-
-    /** Adds anyway, from the duplicate prompt's confirm. */
-    fun addAnyway(entry: EntryId) {
-        dismissDialog()
-        viewModelScope.launchIO { runAdd(entry) }
-    }
-
-    /** Adds [entry] and merges it into the group of the duplicates the user picked in the prompt. */
-    fun addToGroup(entry: EntryId, duplicates: List<EntryId>) {
-        dismissDialog()
-        viewModelScope.launchIO { groupAdd(entry, duplicates) }
-    }
-
-    /** The category picker's confirm, which owes both writes the add deferred. */
-    fun applyAddCategories(entry: EntryId, categoryIds: List<Long>) {
-        dismissDialog()
-        viewModelScope.launchIO { fileAddCategories(entry, categoryIds) }
-    }
-
-    /** Migrates a duplicate already in the library onto the entry being added, from the prompt. */
-    fun migrateOntoEntry(entry: EntryId, duplicate: EntryId) {
-        openDialog(RecentsDialog.Migrate(current = duplicate, target = entry))
+        addFlows.firstOrNull { it.contentType == entry.contentType }?.add(entry)
     }
 
     /**
-     * An entry already in the library is left alone rather than added again: the provider would
-     * otherwise refile it, and on the manga side toggle the favorite back off.
+     * One emission per clear that actually happened, so the screen announces only a wipe that did. Not
+     * replayed: a clear finished while nobody was on screen is not announced on the next visit.
      */
-    internal suspend fun startAdd(entry: EntryId) {
-        val provider = providersByType[entry.contentType] ?: return
-        when (val decision = provider.addDecision(entry)) {
-            null, AddDecision.Remove -> Unit
-            is AddDecision.ConfirmDuplicate -> openDialog(RecentsDialog.Duplicate(entry, decision.duplicates))
-            AddDecision.Add -> promptForCategories(entry, provider.addToLibrary(entry))
-        }
-    }
+    val historyCleared: SharedFlow<Unit>
+        field = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
-    // Asks again past the duplicate prompt, since the entry can reach the library while the prompt is open.
-    internal suspend fun runAdd(entry: EntryId) {
-        val provider = providersByType[entry.contentType] ?: return
-        when (provider.addDecision(entry)) {
-            null, AddDecision.Remove -> Unit
-            else -> promptForCategories(entry, provider.addToLibrary(entry))
-        }
-    }
-
-    // A group add files into the group's categories, so it never asks.
-    internal suspend fun groupAdd(entry: EntryId, duplicates: List<EntryId>) {
-        providersByType[entry.contentType]?.addToGroup(entry, duplicates)
-    }
-
-    internal suspend fun fileAddCategories(entry: EntryId, categoryIds: List<Long>) {
-        providersByType[entry.contentType]?.applyAddCategories(entry, categoryIds)
-    }
-
-    private fun promptForCategories(entry: EntryId, result: AddFavoriteResult) {
-        if (result is AddFavoriteResult.NeedsCategoryChoice) {
-            openDialog(RecentsDialog.ChangeCategory(entry, result.initialSelection))
-        }
+    /** Clears the history behind the chip, on the app scope, so leaving the tab cannot drop the wipe. */
+    fun clearHistory() {
+        appScope.launch { if (clearActiveHistory()) historyCleared.tryEmit(Unit) }
     }
 
     /**
@@ -543,17 +536,13 @@ class RecentsEngine(
      * answers whether anything was actually cleared. Mapped before it is reduced, like [refresh], so
      * one type failing cannot skip the other's wipe.
      */
-    suspend fun clearHistory(): Boolean = activeProviders().map { it.clearHistory() }.any { it }
+    internal suspend fun clearActiveHistory(): Boolean = activeProviders().map { it.clearHistory() }.any { it }
 
     /**
      * Updates every library on screen, answering whether anything actually started. Mapped before it is
      * reduced, so one type already running cannot short-circuit the other type's start.
      */
     suspend fun refresh(): Boolean = activeProviders().map { it.refresh() }.any { it }
-
-    /** The details screen for a row, resolved by the provider that owns the entry. */
-    suspend fun detailsScreen(entry: EntryId): Screen? =
-        providersByType[entry.contentType]?.detailsScreen(entry)
 
     /**
      * How a tap on [item] opens its chapter in [mode], or null when there is nothing left to open. One
@@ -634,11 +623,11 @@ class RecentsEngine(
                 offeredPoll()
             },
             progress = when (val progress = progress) {
-                is RecentsDownloadProgress.Live -> RecentsDownloadProgress.Live {
+                is DownloadProgress.Live -> DownloadProgress.Live {
                     progressRevision.longValue
                     progress.percent()
                 }
-                RecentsDownloadProgress.Unsupported -> progress
+                DownloadProgress.Unsupported -> progress
             },
         )
     }
@@ -783,14 +772,11 @@ class RecentsEngine(
             .stateIn(viewModelScope, OVER_PROVIDERS, RecentsRowGate.NONE)
     }
 
-    /** The verbs are suspend because a merged row's action has to read the group's stitch first; the
-     *  selection still clears at once, so the bar closes on the tap rather than on the write. That read
-     *  is what makes the write outlive the screen: leaving it during the stitch read would otherwise
-     *  drop a write the bar has already reported as done. Each provider moves its own work off the main
-     *  thread, so this starts where the tap did rather than costing a dispatch. */
+    /** On the app scope: the selection clears at once, so the bar closes on the tap, and leaving the
+     *  screen during a merged row's stitch read must not drop a write the bar already reported as done. */
     private fun dispatch(action: suspend (RecentsChapterActions) -> Unit) {
         val targets = activeProviders().map { it.chapterActions }
-        viewModelScope.launch { withContext(NonCancellable) { targets.forEach { action(it) } } }
+        appScope.launch { targets.forEach { action(it) } }
     }
 
     private fun dispatchAndClear(action: suspend (RecentsChapterActions) -> Unit) {

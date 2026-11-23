@@ -23,6 +23,12 @@ data class TtsOptions(
     val engines: List<TtsEngineInfo> = emptyList(),
     val voices: List<TtsVoice> = emptyList(),
 ) {
+    /** Whether there is an engine to choose, which one installed leaves nothing to pick from. */
+    val offersEngineChoice: Boolean get() = engines.size > 1
+
+    /** Whether the voices span more than one base language, so a language filter narrows anything. */
+    val offersLanguageChoice: Boolean get() = voices.baseLanguages().size > 1
+
     /** The engines, the system's own first under [defaultLabel]: package name to label. */
     fun engineEntries(defaultLabel: String): Map<String, String> =
         mapOf("" to defaultLabel) + engines.associate { it.packageName to it.label }
@@ -36,9 +42,9 @@ data class TtsOptions(
         .sortedBy { it.second }
         .toMap()
 
-    /** The picked [languages] by name, in [languageNames] order; empty when none is picked. */
-    fun languagesLabel(languages: Set<String>): String =
-        languageNames().filterKeys { it in languages }.values.joinToString()
+    /** The picked [languages] by name, in [languageNames] order; [allLabel] when none is picked. */
+    fun languagesLabel(languages: Set<String>, allLabel: String): String =
+        languageNames().filterKeys { it in languages }.values.joinToString().ifEmpty { allLabel }
 
     /** The voices in [languages], the engine's own first under [defaultLabel]: voice id to name. */
     fun voiceEntries(languages: Set<String>, defaultLabel: String): Map<String, String> =

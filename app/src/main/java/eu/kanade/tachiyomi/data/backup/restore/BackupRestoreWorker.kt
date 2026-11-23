@@ -20,12 +20,16 @@ import eu.kanade.tachiyomi.util.system.isRunning
 import eu.kanade.tachiyomi.util.system.setForegroundSafely
 import eu.kanade.tachiyomi.util.system.workManager
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.Json
 import logcat.LogPriority
 import mihon.app.di.AppGraph
 import mihon.core.metro.metroGraph
 import mihon.core.migration.Migrator
 import reikai.data.backup.ApprovedRepos
+import reikai.data.backup.lnreader.LnReaderBackupConverter
+import reikai.data.task.AppTask
+import reikai.data.task.AppTaskProgress
 import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.core.common.util.lang.withIOContext
 import tachiyomi.core.common.util.system.logcat
@@ -39,6 +43,8 @@ class BackupRestoreWorker(private val context: Context, workerParams: WorkerPara
     @Inject private lateinit var backupRestorerFactory: BackupRestorer.Factory
 
     @Inject private lateinit var notifier: BackupNotifier
+
+    @Inject private lateinit var appTaskProgress: AppTaskProgress // RK
 
     override suspend fun doWork(): Result {
         Migrator.await() // RK: a WorkManager start has no MainActivity to wait for the migrations first
@@ -59,11 +65,16 @@ class BackupRestoreWorker(private val context: Context, workerParams: WorkerPara
         setForegroundSafely()
 
         return try {
-            withIOContext {
-                backupRestorerFactory.create(notifier = notifier, isSync = isSync).restore(uri, options, trusted) // RK
+            // RK: shown on the app-state banner while it runs, and restores what the user trusted
+            appTaskProgress.during(AppTask.RESTORE) {
+                withIOContext {
+                    backupRestorerFactory.create(notifier = notifier, isSync = isSync).restore(uri, options, trusted)
+                }
             }
             Result.success()
-        } catch (e: Exception) {
+            // RK: Throwable, as BackupCreateWorker catches: an Error skipped the Exception catch and the
+            // restore vanished with no error shown.
+        } catch (e: Throwable) {
             if (e is CancellationException) {
                 notifier.showRestoreError(context.stringResource(MR.strings.restoring_backup_canceled))
                 Result.success()
@@ -74,6 +85,7 @@ class BackupRestoreWorker(private val context: Context, workerParams: WorkerPara
             }
         } finally {
             context.cancelNotification(Notifications.ID_RESTORE_PROGRESS)
+            LnReaderBackupConverter.discard(context, uri) // RK: an LNReader backup's converted file
         }
     }
 
@@ -94,12 +106,16 @@ class BackupRestoreWorker(private val context: Context, workerParams: WorkerPara
             return workManager.isRunning(TAG)
         }
 
+        // RK: running or still queued, either of which holds the file it was started on
+        suspend fun isPending(workManager: WorkManager): Boolean =
+            workManager.getWorkInfosByTagFlow(TAG).first().any { !it.state.isFinished }
+
         fun start(
             workManager: WorkManager,
             uri: Uri,
             options: RestoreOptions,
             sync: Boolean = false,
-            trusted: ApprovedRepos = ApprovedRepos(), // RK
+            trusted: ApprovedRepos, // RK
         ) {
             val inputData = workDataOf(
                 LOCATION_URI_KEY to uri.toString(),

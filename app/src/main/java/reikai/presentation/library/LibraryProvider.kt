@@ -4,6 +4,7 @@ import eu.kanade.tachiyomi.ui.library.LibraryItem
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import reikai.domain.entry.EntryId
 import reikai.domain.library.ContentType
 
 /**
@@ -65,7 +66,20 @@ interface LibraryProvider : LibraryBehavior {
      * metadata resolution, and the engine concatenates the active feeds into one kernel call.
      */
     suspend fun dynamicGroupingFeed(groupType: Int): DynamicGroupingFeed
+
+    /**
+     * Every series of this type with its tags, the Edit info tags where set, before any filter or search, so
+     * the tag picker offers tags the current filter hides. On demand: only an open picker pays for it.
+     */
+    fun seriesTagRows(): List<SeriesTagRow>
 }
+
+/** One series' row with its tags, so the engine can leave a hidden series out before the picker sees them. */
+data class SeriesTagRow(val item: LibraryItem, val tags: List<String>)
+
+/** The tags the picker offers: every series' tags but those of a series hidden from the library. */
+fun offeredTags(rows: List<SeriesTagRow>, hidden: Set<EntryId>): List<List<String>> =
+    rows.filterNot { isHiddenFromLibrary(it.item, hidden) }.map { it.tags }
 
 /**
  * A model's rows as [LibraryProvider.rows] hands them over: null while the model is still loading. Its

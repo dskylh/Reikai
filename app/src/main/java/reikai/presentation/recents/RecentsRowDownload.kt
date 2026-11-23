@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.transform
+import reikai.data.merge.MAX_SQL_IDS_PER_QUERY
 import reikai.domain.download.downloadStateOf
 import reikai.domain.download.offersDownload
 import reikai.domain.entry.EntryId
@@ -17,6 +18,7 @@ import reikai.domain.merge.ChapterUnit
 import reikai.domain.merge.CopyToOpen
 import reikai.domain.merge.DownloadTargets
 import reikai.domain.merge.MergeScope
+import reikai.presentation.components.DownloadProgress
 
 /**
  * Every source's copy of [named], [named] first, resolved once with the row so drawing it probes only
@@ -92,11 +94,25 @@ internal fun recentsCopiesDownloadUi(
     return RecentsDownloadUi(
         state = state,
         progress = progress?.let { percent ->
-            RecentsDownloadProgress.Live { targets(copies()).queuedFor(chapterId, percent) ?: 0 }
-        } ?: RecentsDownloadProgress.Unsupported,
+            DownloadProgress.Live { targets(copies()).queuedFor(chapterId, percent) ?: 0 }
+        } ?: DownloadProgress.Unsupported,
         offered = { targets(copies()).offersDownload(chapterId, state()) },
     )
 }
+
+/**
+ * A row's download control, or, for a local series' row ([isLocal]), none: its files are the chapter,
+ * so it reads as downloaded (the Downloaded filter keeps it) and a local source has nothing to fetch.
+ * Both types and every recents lane go through this, as details and the library already treat local.
+ */
+internal fun recentsDownloadUi(isLocal: Boolean, ui: () -> RecentsDownloadUi): RecentsDownloadUi =
+    if (isLocal) LOCAL_DOWNLOAD_UI else ui()
+
+private val LOCAL_DOWNLOAD_UI = RecentsDownloadUi(
+    state = { Download.State.DOWNLOADED },
+    progress = DownloadProgress.Unsupported,
+    offered = { false },
+)
 
 /**
  * A read lane's grouped rows' copies, loaded with the rows ([lane]) rather than per drawn row, because
@@ -156,7 +172,7 @@ internal class RecentsRowCopiesIndex {
         val copies: Flow<Map<Long, List<ChapterCopyRow>>> = if (ids.isEmpty()) {
             flowOf(emptyMap())
         } else {
-            combine(ids.chunked(MAX_IDS_PER_QUERY).map(query)) { maps ->
+            combine(ids.chunked(MAX_SQL_IDS_PER_QUERY).map(query)) { maps ->
                 maps.fold(emptyMap<Long, List<ChapterCopyRow>>()) { a, b -> a + b }
             }
         }
@@ -171,9 +187,5 @@ internal class RecentsRowCopiesIndex {
             missingSources = if (sources.isEmpty()) emptySet() else missingAmong(sources)
             changes.tryEmit(Unit)
         }
-    }
-
-    private companion object {
-        const val MAX_IDS_PER_QUERY = 500
     }
 }

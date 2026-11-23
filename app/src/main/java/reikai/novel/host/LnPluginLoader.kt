@@ -28,7 +28,7 @@ class LnPluginLoader(
 ) {
     /** The script [url] serves now. Stores nothing: the caller decides whether it becomes installed. */
     suspend fun download(url: String): String = withIOContext {
-        logcat(LogPriority.INFO) { "downloading plugin from $url" }
+        logcat(LogPriority.INFO) { "downloading plugin from ${loggableUrl(url)}" }
         val req = Request.Builder()
             .url(url)
             .header("Cache-Control", "no-cache")
@@ -36,10 +36,14 @@ class LnPluginLoader(
             .build()
         networkHelper.client.newCall(req).execute().use { res ->
             if (!res.isSuccessful) {
-                throw LnPluginException("plugin download failed: HTTP ${res.code} from $url")
+                throw LnPluginException("plugin download failed: HTTP ${res.code} from ${loggableUrl(url)}")
             }
             val source = res.body.string()
-            if (source.isBlank()) throw LnPluginException("plugin download returned empty body from $url")
+            if (source.isBlank()) {
+                throw LnPluginException(
+                    "plugin download returned empty body from ${loggableUrl(url)}",
+                )
+            }
             source
         }
     }
@@ -53,25 +57,14 @@ class LnPluginLoader(
         // Written whole since scripts left the cache folder, but one adopted from there can be a partial
         // download. The compiled plugin always carries its default export, so without it nothing loads.
         if (!script.contains(PLUGIN_EXPORT_MARKER)) {
-            logcat(LogPriority.WARN) { "installed plugin ${file.name} looks truncated for $url" }
+            logcat(LogPriority.WARN) { "installed plugin ${file.name} looks truncated for ${loggableUrl(url)}" }
             return@withIOContext null
         }
         script
     }
 
     /** Makes [script] the installed one for [url], replacing the file whole so a crash can't leave half. */
-    suspend fun store(url: String, script: String): Unit = withIOContext {
-        val file = fileFor(url)
-        // Named apart per write: a self-heal load and a reinstall can store one plugin at once.
-        val partial = File.createTempFile(file.name, ".tmp", file.parentFile)
-        try {
-            partial.writeText(script)
-            Files.move(partial.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE)
-        } finally {
-            // Gone already once moved; a write that failed leaves no stray file behind.
-            partial.delete()
-        }
-    }
+    suspend fun store(url: String, script: String): Unit = withIOContext { writeWhole(fileFor(url), script) }
 
     suspend fun delete(url: String) = withIOContext {
         fileFor(url).delete()
@@ -86,7 +79,19 @@ class LnPluginLoader(
     /** Makes [css] the plugin's chapter stylesheet, or removes the stored one when it ships none. */
     suspend fun storeStylesheet(url: String, css: String?): Unit = withIOContext {
         val file = fileFor(url, STYLESHEET_EXTENSION)
-        if (css == null) file.delete() else file.writeText(css)
+        if (css == null) file.delete() else writeWhole(file, css)
+    }
+
+    private fun writeWhole(file: File, text: String) {
+        // Named apart per write: a self-heal load and a reinstall can store one plugin at once.
+        val partial = File.createTempFile(file.name, ".tmp", file.parentFile)
+        try {
+            partial.writeText(text)
+            Files.move(partial.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        } finally {
+            // Gone already once moved; a write that failed leaves no stray file behind.
+            partial.delete()
+        }
     }
 
     /** Scripts used to live in the cache folder, where Android could clear them and force a download. */

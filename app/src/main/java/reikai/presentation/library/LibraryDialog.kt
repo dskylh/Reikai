@@ -1,5 +1,6 @@
 package reikai.presentation.library
 
+import reikai.data.local.CombinableSeries
 import reikai.domain.entry.EntryId
 import reikai.domain.library.ContentType
 import tachiyomi.core.common.preference.CheckboxState
@@ -24,7 +25,7 @@ sealed interface LibraryDialog {
     /**
      * [groupedSourceCount] is the number of grouped sources behind the selection (0 = nothing merged, so
      * no extra option). [containsLocal] hides the delete-downloads option, which a local entry has no use
-     * for; novels have no local concept and never set it.
+     * for, of either type.
      */
     data class Delete(
         val entries: Set<EntryId>,
@@ -42,5 +43,16 @@ sealed interface LibraryDialog {
         val contentType: ContentType,
         val categoryId: Long?,
         val initialTab: LibrarySettingsTab,
+    ) : LibraryDialog
+
+    /**
+     * Combine as volumes over [series], the selection's local series, one of which the user keeps; [canOrganize]
+     * where the storage can move their files, which offers Also organize files.
+     */
+    data class CombineVolumes(
+        val type: ContentType,
+        val entries: Set<EntryId>,
+        val series: List<CombinableSeries>,
+        val canOrganize: Boolean,
     ) : LibraryDialog
 }

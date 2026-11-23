@@ -1,5 +1,3 @@
-@file:Suppress("ktlint:standard:max-line-length")
-
 package reikai.novel.content
 
 import logcat.LogPriority
@@ -14,6 +12,7 @@ import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
 import org.jsoup.parser.Parser
 import org.jsoup.select.NodeVisitor
+import reikai.novel.host.NovelTextSanitizer
 import tachiyomi.core.common.util.system.logcat
 
 object NovelHtmlUtils {
@@ -31,7 +30,7 @@ object NovelHtmlUtils {
     private val stripTagsRegex = Regex("<[^>]+>")
     private val paragraphBreakRegex = Regex("\n{2,}")
     private val adjacentTagsRegex = Regex(">\\s*<")
-    private val leadingSpaceInParagraph = Regex("<p>(?: |&#160;|&nbsp;)+")
+    private val leadingSpaceInParagraph = Regex("(<p\\b[^>]*>)(?: |$NO_BREAK_SPACE)+", RegexOption.IGNORE_CASE)
     private val paragraphTagRegex = Regex("<p[\\s>]", RegexOption.IGNORE_CASE)
     private val blankLineRegex = Regex("\r?\n\r?\n")
     private val verbatimBlockRegex = Regex(
@@ -39,15 +38,14 @@ object NovelHtmlUtils {
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
     )
 
-    // Raw-text elements: the parser reads what they hold as text, so a heading written inside one is not
-    // a heading. Narrower than the prose passes' verbatim rule, since a pre's tags are real elements.
-    private val rawTextBlockRegex = Regex(
-        "<(style|script|textarea)\\b[^>]*>.*?</\\1\\s*>",
-        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
-    )
+    // What the reader never shows: raw-text elements, whose content the parser reads as text, plus a
+    // comment and a noscript block, which both renderers drop. A heading written inside one is not the
+    // title. Narrower than the prose passes' verbatim rule, since a pre's tags are real elements.
+    private const val UNSHOWN_BLOCK = "<!--.*?-->|<(style|script|textarea|noscript)\\b[^>]*>.*?</\\1\\s*>"
+    private val rawTextBlockRegex = Regex(UNSHOWN_BLOCK, setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
 
     private val markupSkipRegex = Regex(
-        "<(style|script|textarea)\\b[^>]*>.*?</\\1\\s*>|<[^>]+>",
+        "$UNSHOWN_BLOCK|<[^>]+>",
         setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL),
     )
     private val textLineRegex = Regex("[^\\r\\n]*\\S[^\\r\\n]*")
@@ -111,12 +109,21 @@ object NovelHtmlUtils {
         Regex("<audio[^>]*>.*?</audio>", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
     private val sourceTagRegex = Regex("<source[^>]*>", RegexOption.IGNORE_CASE)
 
-    private val paddingEntityRegex = Regex("(?:&nbsp;\\s*|[\\u200b]\\s*)+(?=</?p[> ])", RegexOption.IGNORE_CASE)
-    private val breakRunRegex = Regex("<br>\\s*<br>\\s*(?:<br>\\s*)+", RegexOption.IGNORE_CASE)
-    private val breakBesideParagraphRegex =
-        Regex("<br>\\s*<br>\\s*(?=</?p[> ])|(?<=</?p>)\\s*<br>\\s*<br>\\s*", RegexOption.IGNORE_CASE)
-    private val loneBreakBesideParagraphRegex =
-        Regex("<br>\\s*(?=</?p[> ])|(?<=</?p>)\\s*<br>\\s*", RegexOption.IGNORE_CASE)
+    // The spacing and indent passes read the source's own markup, before a parser has rewritten `<br/>`,
+    // `&#160;` or a tag broken over lines the one way a browser serialises them, so every spelling is matched.
+    private const val BREAK = "<br\\b[^>]*>"
+    private const val NO_BREAK_SPACE = "&nbsp;|&#160;|&#xa0;|\\u00a0"
+    private const val PARAGRAPH_AHEAD = "(?=</?p[\\s>])"
+    private val paddingEntityRegex =
+        Regex("(?:(?:$NO_BREAK_SPACE|\\u200b)\\s*)+$PARAGRAPH_AHEAD", RegexOption.IGNORE_CASE)
+    private val breakRunRegex = Regex("$BREAK\\s*$BREAK\\s*(?:$BREAK\\s*)+", RegexOption.IGNORE_CASE)
+    private val breakPairBeforeParagraphRegex = Regex("$BREAK\\s*$BREAK\\s*$PARAGRAPH_AHEAD", RegexOption.IGNORE_CASE)
+    private val breakBeforeParagraphRegex = Regex("$BREAK\\s*$PARAGRAPH_AHEAD", RegexOption.IGNORE_CASE)
+
+    // A paragraph tag, attributes allowed, then the tags and whitespace before any text: a break in that run pads the
+    // paragraph. Matched as a run rather than looked back on, since Android's regex refuses an unbounded lookbehind.
+    private val paragraphTagRunRegex = Regex("</?p(?:\\s[^>]*)?>(?:\\s*<[^>]+>)*\\s*", RegexOption.IGNORE_CASE)
+    private val breakAndSpaceRegex = Regex("$BREAK\\s*", RegexOption.IGNORE_CASE)
     val entityRegex = Regex("&#?[A-Za-z0-9]+;")
     private val tagOrEntityRegex = Regex("<[^>]*>|${entityRegex.pattern}")
 
@@ -129,8 +136,9 @@ object NovelHtmlUtils {
         prose
             .replace(paddingEntityRegex, "")
             .replace(breakRunRegex, "<br><br>")
-            .replace(breakBesideParagraphRegex, "")
-            .replace(loneBreakBesideParagraphRegex, "")
+            .replace(breakPairBeforeParagraphRegex, "")
+            .let { paragraphTagRunRegex.replaceEach(it) { run -> run.replace(breakAndSpaceRegex, "") } }
+            .replace(breakBeforeParagraphRegex, "")
     }
 
     /**
@@ -141,9 +149,9 @@ object NovelHtmlUtils {
     fun lowercaseText(markup: String): String = mapOutsideVerbatimBlocks(markup) { prose ->
         val out = StringBuilder(prose.length)
         var from = 0
-        for (kept in tagOrEntityRegex.findAll(prose)) {
-            out.append(prose.substring(from, kept.range.first).lowercase()).append(kept.value)
-            from = kept.range.last + 1
+        tagOrEntityRegex.forEachMatch(prose) { start, end ->
+            out.append(prose.substring(from, start).lowercase()).append(prose, start, end)
+            from = end
         }
         out.append(prose.substring(from).lowercase()).toString()
     }
@@ -164,14 +172,14 @@ object NovelHtmlUtils {
     }
 
     fun normalizePlainTextContent(content: String): String {
-        return content
-            .replace("\u0000", "")
+        // The fetching adapters strip these too, but a local book's text comes straight from its file.
+        return NovelTextSanitizer.stripInvalidChars(content)
             .replace("\r\n", "\n")
             .replace("\r", "\n")
     }
 
     fun normalizeContentForHtml(content: String, chapterUrl: String?): String {
-        val normalized = content.replace("\u0000", "")
+        val normalized = NovelTextSanitizer.stripInvalidChars(content)
         val kind = detectTextKind(chapterUrl, normalized)
         logcat(LogPriority.DEBUG) { "normalizeContentForHtml: $kind len=${normalized.length}" }
         return when (kind) {
@@ -182,9 +190,9 @@ object NovelHtmlUtils {
     }
 
     private fun detectTextKind(chapterUrl: String?, content: String): ChapterTextKind {
-        val ext = extensionFor(chapterUrl)
-
-        return when (ext) {
+        // By name alone, as the reader decides, so a word written like a tag stays text.
+        if (isPlainTextChapter(chapterUrl)) return ChapterTextKind.PLAIN_TEXT
+        return when (extensionFor(chapterUrl)) {
             "md", "markdown" -> ChapterTextKind.MARKDOWN
             "html", "htm", "xhtml", "epub" -> ChapterTextKind.HTML
             else -> {
@@ -205,7 +213,7 @@ object NovelHtmlUtils {
             val flavour = GFMFlavourDescriptor()
             val parsedTree = MarkdownParser(flavour).buildMarkdownTreeFromString(markdown)
             val rendered = HtmlGenerator(markdown, parsedTree, flavour).generateHtml()
-            "<div data-reikai-markdown=\"1\">$rendered</div>"
+            "<div>$rendered</div>"
         } catch (e: Exception) {
             logcat(LogPriority.WARN, e) { "Markdown render fell back to plain text" }
             plainTextToHtml(markdown)
@@ -219,7 +227,10 @@ object NovelHtmlUtils {
      *  default and need an inline style the embedded-CSS setting strips. A break inside a paragraph is
      *  a `br`, not a newline: a newline survives `pre-wrap` in a WebView and collapses to a space in
      *  the text renderer, laying the same chapter out two ways. */
-    fun plainTextToHtml(text: String): String {
+    fun plainTextToHtml(text: String): String = "<div data-reikai-plain-text=\"1\">${plainTextParagraphs(text)}</div>"
+
+    /** [text]'s paragraphs as [plainTextToHtml] writes them, without its wrapper, for a sink that adds its own. */
+    fun plainTextParagraphs(text: String): String {
         val normalized = normalizePlainTextContent(text)
         // Unescape before re-escaping: a source may hand back content where &lt;D&gt; is already
         // encoded, and escaping its & again would render the entity as literal text.
@@ -231,12 +242,7 @@ object NovelHtmlUtils {
         val paragraphs = decoded.split(paragraphBreakRegex)
             .map { it.trim('\n', ' ', '\t') }
             .filter { it.isNotEmpty() }
-        if (paragraphs.isEmpty()) return "<div data-reikai-plain-text=\"1\"></div>"
-        return paragraphs.joinToString(
-            separator = "",
-            prefix = "<div data-reikai-plain-text=\"1\">",
-            postfix = "</div>",
-        ) { "<p>${escapeHtml(it).replace("\n", "<br>")}</p>" }
+        return paragraphs.joinToString(separator = "") { "<p>${escapeHtml(it).replace("\n", "<br>")}</p>" }
     }
 
     /** [html] as the markup it is, escaped for an HTML sink, one line per tag that follows another so a
@@ -256,7 +262,7 @@ object NovelHtmlUtils {
      * showed one paragraph there and two in the native mode.
      */
     fun wrapBareParagraphs(content: String): String {
-        val trimmed = mapOutsideVerbatimBlocks(content) { it.replace(leadingSpaceInParagraph, "<p>") }
+        val trimmed = mapOutsideVerbatimBlocks(content) { it.replace(leadingSpaceInParagraph, "$1") }
         if (paragraphTagRegex.containsMatchIn(trimmed) || !blankLineRegex.containsMatchIn(trimmed)) return trimmed
         return "<p>${mapOutsideVerbatimBlocks(trimmed, ::breakParagraphs)}</p>"
     }
@@ -278,7 +284,8 @@ object NovelHtmlUtils {
         return out.append(transform(markup.substring(from))).toString()
     }
 
-    private fun escapeHtml(text: String): String {
+    /** Every character markup gives meaning to, as entities XML defines too, so XHTML can take the result. */
+    internal fun escapeHtml(text: String): String {
         return text
             .replace("&", "&amp;")
             .replace("<", "&lt;")

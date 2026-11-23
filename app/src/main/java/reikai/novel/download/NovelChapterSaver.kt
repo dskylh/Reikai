@@ -6,6 +6,7 @@ import dev.zacsweers.metro.SingleIn
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
+import reikai.novel.content.NovelHtmlUtils
 import reikai.novel.network.NovelImageRequests
 import reikai.novel.source.NovelSource
 
@@ -23,16 +24,30 @@ class NovelChapterSaver(
     private val chapterRepo: NovelChapterRepository,
 ) {
 
-    suspend fun save(novel: Novel, chapter: NovelChapter, source: NovelSource, html: String): SaveResult {
-        if (html.isBlank()) return SaveResult.FAILED
+    suspend fun save(novel: Novel, chapter: NovelChapter, source: NovelSource, html: String): SaveResult =
+        write(novel, chapter, prepare(source, html, chapter.url))
+
+    /**
+     * [html] with its images embedded so the saved file reads offline (see [inlineChapterImages]). Apart from
+     * [write] because it fetches every image, and the download lanes write one at a time. A plain-text chapter,
+     * which the reader shows as written by its name ([NovelHtmlUtils.isPlainTextChapter]), is saved as it came.
+     */
+    suspend fun prepare(source: NovelSource, html: String, chapterUrl: String): String =
+        if (html.isBlank() || NovelHtmlUtils.isPlainTextChapter(chapterUrl)) {
+            html
+        } else {
+            inlineChapterImages(html, source.site, imageRequests.forSource(source.id))
+        }
+
+    /** Writes [selfContained], from [prepare], as [chapter]'s downloaded copy. */
+    suspend fun write(novel: Novel, chapter: NovelChapter, selfContained: String): SaveResult {
+        if (selfContained.isBlank()) return SaveResult.FAILED
         val fileName = provider.chapterFileName(chapter)
         // Without the url hash, chapters of one name share a file. The first copy saved keeps it, as manga's
         // downloader keeps the first folder: replacing it would show this text under the other chapter.
         if (provider.findChapterFile(novel, chapter)?.name == fileName && isSharedName(novel, chapter, fileName)) {
             return SaveResult.NAME_TAKEN
         }
-        // Embed inline images so the saved file reads offline (see inlineChapterImages).
-        val selfContained = inlineChapterImages(html, source.site, imageRequests.forSource(source.id))
         if (!provider.writeChapter(novel, chapter, selfContained, fileName)) return SaveResult.FAILED
         cache.addChapter(novel, chapter)
         return SaveResult.SAVED

@@ -1,5 +1,7 @@
 package reikai.presentation.track
 
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.lifecycle.SavedStateHandle
 import eu.kanade.tachiyomi.data.track.model.TrackSearch
 import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
@@ -9,6 +11,7 @@ import io.mockk.unmockkStatic
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -39,6 +42,8 @@ class EntryTrackerSearchModelTest {
         val newer = listOf(mockk<TrackSearch>(relaxed = true))
         val model = model(
             mockk {
+                every { tracks() } returns flowOf(emptyList())
+                coEvery { title() } returns ""
                 coEvery { search(any(), "old") } coAnswers { older.await() }
                 coEvery { search(any(), "new") } returns newer
             },
@@ -54,17 +59,66 @@ class EntryTrackerSearchModelTest {
         model.state.value.queryResult shouldBe Result.success(newer)
     }
 
+    @Test
+    fun `an unbound tracker's search starts from the entry's title read by id`() = runTest {
+        useTestDispatchers()
+        val model = model(
+            mockk {
+                every { tracks() } returns flowOf(emptyList())
+                coEvery { title() } returns "Edited title"
+                coEvery { search(any(), any()) } returns emptyList()
+            },
+        )
+        advanceUntilIdle()
+
+        model.query.text.toString() shouldBe "Edited title"
+    }
+
+    @Test
+    fun `a query typed before the title is read is not replaced by it`() = runTest {
+        useTestDispatchers()
+        val title = CompletableDeferred<String>()
+        val model = model(
+            mockk {
+                every { tracks() } returns flowOf(emptyList())
+                coEvery { title() } coAnswers { title.await() }
+            },
+        )
+        advanceUntilIdle()
+        model.query.setTextAndPlaceCursorAtEnd("typed")
+
+        title.complete("Edited title")
+        advanceUntilIdle()
+
+        model.query.text.toString() shouldBe "typed"
+    }
+
+    @Test
+    fun `a pick awaiting the replace confirmation is held by the model`() = runTest {
+        useTestDispatchers()
+        val model = model(
+            mockk {
+                every { tracks() } returns flowOf(emptyList())
+                coEvery { title() } returns ""
+            },
+        )
+        val pick = mockk<TrackSearch>(relaxed = true)
+
+        model.askToReplace(pick)
+
+        model.state.value.pendingBind shouldBe pick
+    }
+
     private fun TestScope.useTestDispatchers() {
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
         mockIoDispatcher(dispatcher)
     }
 
-    private fun model(port: EntryTrackPort) = EntryTrackerSearchScreen.Model(
+    private fun model(port: EntryTrackPort) = EntryTrackerSearchRoute.Model(
         entry = EntryId.Manga(1L),
-        currentUrl = null,
-        initialQuery = "",
         trackerId = TRACKER_ID,
+        savedState = SavedStateHandle(),
         appScope = testAppScope(),
         context = mockk(),
         trackerManager = mockk { every { get(TRACKER_ID) } returns mockk(relaxed = true) },

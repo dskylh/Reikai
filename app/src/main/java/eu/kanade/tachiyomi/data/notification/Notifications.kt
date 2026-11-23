@@ -64,6 +64,10 @@ object Notifications {
     const val ID_TRACKER_REFRESH_PROGRESS = -108
     const val ID_TRACKER_REFRESH_RESULT = -109
 
+    // RK: exporting novels as EPUB, on the common channel
+    const val ID_EPUB_EXPORT_PROGRESS = -112
+    const val ID_EPUB_EXPORT_RESULT = -113
+
     /**
      * Notification channel and ids used by the downloader.
      */
@@ -250,7 +254,7 @@ object Notifications {
                 },
                 // RK: novel read-aloud (TTS) playback notification
                 buildNotificationChannel(CHANNEL_NOVEL_TTS, IMPORTANCE_LOW) {
-                    setName(context.stringResource(MR.strings.channel_novel_tts))
+                    setName(context.stringResource(MR.strings.tts_novel_read_aloud))
                     setShowBadge(false)
                 },
                 buildNotificationChannel(CHANNEL_EXTENSIONS_UPDATE, IMPORTANCE_DEFAULT) {

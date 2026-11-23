@@ -1,0 +1,6 @@
+-- A local novel's language, read from its files. Empty on upgrade: LocalSeriesLanguageMigration reads
+-- each series in the library again.
+CREATE TABLE local_novel_language(
+    url TEXT NOT NULL PRIMARY KEY,
+    language TEXT NOT NULL
+);

@@ -49,6 +49,9 @@ import reikai.domain.entry.EntryCustomInfo
 import reikai.domain.entry.EntryId
 import reikai.domain.entry.GetEntryCustomInfo
 import reikai.domain.entry.withCustomInfo
+import reikai.domain.library.ContentType
+import reikai.domain.library.ReikaiLibraryPreferences
+import reikai.domain.library.includes
 import reikai.domain.manga.MangaMergeManager
 import reikai.domain.merge.onePerSeries
 import reikai.domain.novel.NovelMergeManager
@@ -83,6 +86,8 @@ class UnifiedUpdatesGlanceWidget : GlanceAppWidget() {
     @Inject private lateinit var getUpdates: GetUpdates
 
     @Inject private lateinit var novelRepository: NovelRepository
+
+    @Inject private lateinit var reikaiLibraryPreferences: ReikaiLibraryPreferences
 
     @Inject private lateinit var preferences: SecurityPreferences
 
@@ -130,7 +135,12 @@ class UnifiedUpdatesGlanceWidget : GlanceAppWidget() {
 
             val flow = remember {
                 combine(
-                    unifiedWidgetUpdates(getUpdates, novelRepository),
+                    unifiedWidgetUpdates(
+                        getUpdates,
+                        novelRepository,
+                        reikaiLibraryPreferences.shownContent.changes(),
+                        reikaiLibraryPreferences.seriesMergingEnabled.changes(),
+                    ),
                     getEntryCustomInfo.subscribeAll(),
                 ) { updates, customInfo ->
                     prepareSections(context, updates, customInfo, rowCount, columnCount)
@@ -150,9 +160,9 @@ class UnifiedUpdatesGlanceWidget : GlanceAppWidget() {
     }
 
     /**
-     * Loads the cover grid for each type. Both sections are always shown with equal height (the rows are
-     * split evenly); a type with no updates renders a skeleton grid instead of collapsing, so the widget
-     * stays balanced whatever is new.
+     * Loads the cover grid for each type. Both sections are shown with equal height (the rows are split
+     * evenly); a type with no updates renders a skeleton grid instead of collapsing, so the widget stays
+     * balanced whatever is new. A type Show hides has no section, and the other takes its rows.
      */
     private suspend fun prepareSections(
         context: Context,
@@ -161,12 +171,10 @@ class UnifiedUpdatesGlanceWidget : GlanceAppWidget() {
         rowCount: Int,
         columnCount: Int,
     ): SectionData {
-        // Dedupe per series, then per merge group so a series grouped across sources draws one cover, then
-        // give each section half the rows.
+        // Dedupe per series, then per merge group so a series grouped across sources draws one cover.
         val novelRows = novelMergeManager.onePerSeries(updates.novel) { it.novelId }
         val mangaRows = mangaMergeManager.onePerSeries(updates.manga) { it.mangaId }
-        val perSectionRows = (rowCount / 2).coerceAtLeast(1)
-        val cap = perSectionRows * columnCount
+        val cap = updates.sectionRows(rowCount) * columnCount
 
         val widthPx = CoverWidth.value.toInt().dpToPx
         val heightPx = CoverHeight.value.toInt().dpToPx
@@ -197,7 +205,7 @@ class UnifiedUpdatesGlanceWidget : GlanceAppWidget() {
                         intent = mangaIntent(context, row.mangaId),
                     )
                 }
-            SectionData(novel = novelCovers, manga = mangaCovers)
+            SectionData(novel = novelCovers, manga = mangaCovers, shown = updates.shown)
         }
     }
 
@@ -210,7 +218,7 @@ class UnifiedUpdatesGlanceWidget : GlanceAppWidget() {
         }
 
     private fun novelIntent(context: Context, row: NovelUpdateWithRelations) =
-        novelDetailsIntent(context, row.source, row.novelUrl).apply {
+        novelDetailsIntent(context, row.novelId).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             // Distinct PendingIntents, namespaced so a novel id never collides with a manga id.
@@ -220,7 +228,11 @@ class UnifiedUpdatesGlanceWidget : GlanceAppWidget() {
 
 private data class WidgetCover(val bitmap: Bitmap?, val intent: Intent)
 
-private data class SectionData(val novel: List<WidgetCover>, val manga: List<WidgetCover>)
+private data class SectionData(
+    val novel: List<WidgetCover>,
+    val manga: List<WidgetCover>,
+    val shown: ContentType,
+)
 
 @Composable
 private fun UnifiedUpdatesContent(
@@ -244,10 +256,14 @@ private fun UnifiedUpdatesContent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalAlignment = Alignment.Start,
             ) {
-                // Both sections always render; a type with no updates keeps a cover row's height under its
+                // Every shown section renders; a type with no updates keeps a cover row's height under its
                 // label, so the layout looks the same whether or not that type has anything new.
-                CoverSection(novelsLabel, data.novel, emptyLabel, columnCount, contentColor)
-                CoverSection(mangaLabel, data.manga, emptyLabel, columnCount, contentColor)
+                if (data.shown.includes(ContentType.NOVELS)) {
+                    CoverSection(novelsLabel, data.novel, emptyLabel, columnCount, contentColor)
+                }
+                if (data.shown.includes(ContentType.MANGA)) {
+                    CoverSection(mangaLabel, data.manga, emptyLabel, columnCount, contentColor)
+                }
             }
         }
     }

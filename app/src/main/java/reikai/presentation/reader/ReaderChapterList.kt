@@ -5,7 +5,10 @@ import androidx.compose.runtime.Stable
 import eu.kanade.presentation.manga.components.ChapterDownloadAction
 import eu.kanade.tachiyomi.data.download.model.Download
 import kotlinx.coroutines.flow.Flow
+import reikai.domain.reader.ChapterProgress
 import reikai.presentation.components.UndatedChapterDate
+import reikai.presentation.details.ChapterVolume
+import reikai.presentation.selection.ChapterMarks
 import kotlin.time.Instant
 
 /**
@@ -22,15 +25,18 @@ data class ReaderChapterRow(
     val dateUpload: Instant?,
     /** How far into an unread chapter the reader got, already worded ("42%", "Page 3"), or null. */
     val readProgress: String?,
-    val read: Boolean,
-    val bookmark: Boolean,
+    override val progress: ChapterProgress?,
+    override val read: Boolean,
+    override val bookmark: Boolean,
     /** Queue state where the chapter is queued, else whether it is on disk. */
     val downloadState: Download.State,
     /** Live percent for the spinner; 0 where the type reports no per-chapter progress. */
     val downloadProgress: Int,
     /** Whether the row draws its download control and takes a download swipe (offersDownload). */
     val offersDownload: Boolean,
-)
+    /** The volume of a local series split into volumes, which the sheet heads the row with; null elsewhere. */
+    val volume: ChapterVolume? = null,
+) : ChapterMarks
 
 /**
  * The chapter list as a capability, so the sheet is one component over both content types. The rows are
@@ -45,14 +51,18 @@ interface ReaderChapterList {
     /** The row the reader is on, which is where the sheet opens scrolled to. */
     val currentChapterId: Flow<Long>
 
+    /** The chapter being read and every neighbour the reader holds beside it, whose pages a strip or the
+     *  window may still draw from disk: the sheet never deletes their downloads. */
+    val heldChapterIds: Flow<Set<Long>>
+
     /** What a row the source dated nothing shows, the answer the type's details list gives. */
     val undatedChapterDate: UndatedChapterDate
 
     fun open(chapterId: Long)
 
-    fun setRead(chapterId: Long, read: Boolean)
+    fun setRead(chapterIds: List<Long>, read: Boolean)
 
-    fun setBookmark(chapterId: Long, bookmarked: Boolean)
+    fun setBookmark(chapterIds: List<Long>, bookmarked: Boolean)
 
-    fun download(chapterId: Long, action: ChapterDownloadAction)
+    fun download(chapterIds: List<Long>, action: ChapterDownloadAction)
 }

@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
+import reikai.novel.local.LocalNovelSource
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.chapter.model.Chapter
 import kotlin.time.Instant
@@ -25,7 +26,7 @@ class NovelChapterTextCacheTest {
     private val chapterCache = testChapterCache()
     private val cache = testChapterTextCache(chapterCache)
 
-    private fun loader(): NovelChapterTextLoader {
+    private fun loader(sourceId: String = "s"): NovelChapterTextLoader {
         val source = mockk<NovelSource> {
             every { site } answers { this@NovelChapterTextCacheTest.site }
             coEvery { parseChapter(any()) } answers { answer }
@@ -35,7 +36,7 @@ class NovelChapterTextCacheTest {
             context = mockk(relaxed = true),
             novelRepo = mockk {
                 coEvery { getById(any()) } answers
-                    { Novel.create().copy(id = firstArg(), source = "s") }
+                    { Novel.create().copy(id = firstArg(), source = sourceId) }
             },
             sourceManager = sourceManager,
             installer = mockk(relaxed = true),
@@ -77,6 +78,17 @@ class NovelChapterTextCacheTest {
         baseUrl.orEmpty() shouldContain "example.test"
     }
 
+    /** A local book can be replaced under the same path, and the old text must not outlive it. */
+    @Test
+    fun `a local chapter is read from its book every time`() = runTest {
+        loader(LocalNovelSource.ID).load(chapter(novelId = 1L))
+        answer = "<p>second answer</p>"
+
+        val (html, _) = loader(LocalNovelSource.ID).load(chapter(novelId = 1L))
+
+        html shouldContain "second answer"
+    }
+
     /** Two sources can use the same chapter path, so the cache keys on the novel as well. */
     @Test
     fun `another novel's chapter at the same path is not read from the cache`() = runTest {
@@ -112,15 +124,25 @@ class NovelChapterTextCacheTest {
         html shouldContain "second answer"
     }
 
-    /** Manga's page lists share the cache, and a plugin's path can be a manga's without its leading slash. */
+    /** Texts have a store of their own, so a chapter's key can be anything a manga's page list uses. */
     @Test
-    fun `a novel chapter's text leaves a manga chapter's cached pages alone`() {
+    fun `a novel chapter's text leaves a manga chapter's cached pages alone`() = runTest {
         val mangaChapter = Chapter.create().copy(mangaId = 1L, url = "/book/ch1.html")
-        chapterCache.putPageListToCache(mangaChapter, listOf(Page(0, "https://example.test/1")))
+        chapterCache.putPageList(mangaChapter, listOf(Page(0, "https://example.test/1")))
 
-        cache.put(chapter(novelId = 1L, url = "book/ch1.html"), CachedChapterText("x", null))
+        chapterCache.putText("1/book/ch1.html", "x")
 
-        chapterCache.getPageListFromCache(mangaChapter).map { it.url } shouldBe listOf("https://example.test/1")
+        chapterCache.getPageList(mangaChapter)?.map { it.url } shouldBe listOf("https://example.test/1")
+    }
+
+    @Test
+    fun `clearing the chapter cache clears novel text too`() = runTest {
+        val novelChapter = chapter(novelId = 1L)
+        cache.put(novelChapter, CachedChapterText("x", null))
+
+        chapterCache.clear()
+
+        cache.get(novelChapter) shouldBe null
     }
 
     private fun chapter(novelId: Long, url: String = "/book/ch1.html") = NovelChapter(

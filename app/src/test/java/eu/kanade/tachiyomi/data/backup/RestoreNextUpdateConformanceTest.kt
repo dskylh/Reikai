@@ -15,12 +15,19 @@ import org.junit.jupiter.params.provider.EnumSource
 import reikai.data.novel.NovelChapterRepositoryImpl
 import reikai.data.novel.NovelHistoryRepositoryImpl
 import reikai.data.novel.NovelRepositoryImpl
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
 import reikai.domain.db.PassThroughTransactions
+import reikai.domain.library.FakeLibraryManualOrderRepository
 import reikai.domain.merge.RestoreMergeGroups
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelUpdate
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import tachiyomi.domain.manga.model.Manga
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.days
@@ -85,6 +92,8 @@ class RestoreNextUpdateConformanceTest {
                     }
                     val wire = BackupNovel(source = "s", url = URL, nextUpdate = backup.millis())
                     NovelRestorer(
+                        tombstones = NoChapterTombstoneRepository,
+                        manualOrder = FakeLibraryManualOrderRepository(),
                         novelRepository = novels,
                         novelChapterRepository = NovelChapterRepositoryImpl(harness.database),
                         categoryRepository = mockk(relaxed = true),
@@ -93,7 +102,12 @@ class RestoreNextUpdateConformanceTest {
                         setCustomNovelInfo = mockk(relaxed = true),
                         novelHistoryRepository = NovelHistoryRepositoryImpl(harness.database),
                         chapterNumberOverrides = NoChapterNumberOverrides,
+                        copyMarks = InMemoryChapterCopyMarks(),
+                        localVolumes = NoLocalVolumes,
+                        volumePicks = NoVolumePicks,
                         readingLog = NoReadingLog,
+                        readingPace = NoReadingPace,
+                        localNovelLanguages = NoLocalNovelLanguages,
                     ).restore(wire.overTheWire(BackupNovel.serializer()), emptyList())
                     novels.getByUrlAndSource(URL, "s")!!.nextUpdate
                 }

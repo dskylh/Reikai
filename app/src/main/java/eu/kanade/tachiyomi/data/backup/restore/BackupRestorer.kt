@@ -11,12 +11,12 @@ import eu.kanade.tachiyomi.data.backup.models.BackupCategory
 import eu.kanade.tachiyomi.data.backup.models.BackupCustomMangaInfo
 import eu.kanade.tachiyomi.data.backup.models.BackupCustomNovelInfo
 import eu.kanade.tachiyomi.data.backup.models.BackupExtension
-import eu.kanade.tachiyomi.data.backup.models.BackupExtensionStore
 import eu.kanade.tachiyomi.data.backup.models.BackupFeedRow
 import eu.kanade.tachiyomi.data.backup.models.BackupFields
 import eu.kanade.tachiyomi.data.backup.models.BackupMangaMergeGroup
 import eu.kanade.tachiyomi.data.backup.models.BackupMangaSourceRef
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelCategory
+import eu.kanade.tachiyomi.data.backup.models.BackupNovelFont
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelMergeGroup
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelSource
 import eu.kanade.tachiyomi.data.backup.models.BackupNovelSourceRef
@@ -26,9 +26,8 @@ import eu.kanade.tachiyomi.data.backup.models.BackupSource
 import eu.kanade.tachiyomi.data.backup.models.BackupSourcePreferences
 import eu.kanade.tachiyomi.data.backup.models.BooleanPreferenceValue
 import eu.kanade.tachiyomi.data.backup.models.LegacyCustomInfo
-import eu.kanade.tachiyomi.data.backup.models.novelSourceName
+import eu.kanade.tachiyomi.data.backup.models.backedUpSourceName
 import eu.kanade.tachiyomi.data.backup.restore.restorers.CategoriesRestorer
-import eu.kanade.tachiyomi.data.backup.restore.restorers.ExtensionStoreRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.FeedRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.MangaRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.NovelRestorer
@@ -43,23 +42,36 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.protobuf.ProtoBuf
 import logcat.LogPriority
 import reikai.data.backup.ApprovedRepos
+import reikai.data.backup.ForeignMergeReader
+import reikai.data.backup.ForeignMerges
+import reikai.data.backup.RestoreCategoryOrder
 import reikai.data.backup.RestoreExtensionInstaller
+import reikai.data.backup.RestoreHiddenEntries
 import reikai.data.backup.RestoreInstallSources
+import reikai.data.backup.backedUpNovelSources
+import reikai.data.backup.isForeignMergedRow
 import reikai.data.backup.mangaTrackScores
 import reikai.data.backup.novelTrackScores
 import reikai.data.backup.rescaleKitsu
 import reikai.data.backup.restoreBatch
+import reikai.data.backup.restoredOwners
+import reikai.data.local.CombineLocalVolumes
 import reikai.domain.backup.KitsuBackupScoreScale
 import reikai.domain.db.Transactions
 import reikai.domain.library.ContentType
+import reikai.domain.library.LibraryManualOrderRepository
 import reikai.domain.library.ReikaiLibraryPreferences
+import reikai.domain.local.VolumeOwner
 import reikai.domain.manga.AdultContentChecker
 import reikai.domain.merge.AlignGroupCategories
+import reikai.domain.merge.GatherGroupViewerFlags
 import reikai.domain.merge.MergeGroupReconstruction
 import reikai.domain.merge.PrefEraGrouping
 import reikai.domain.merge.ReconcileMergedChapters
 import reikai.domain.novel.model.withDisplayBitFromSort
 import reikai.novel.download.NovelDownloadCache
+import reikai.novel.font.NovelFontManager
+import reikai.novel.local.LocalNovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.i18n.stringResource
@@ -67,6 +79,7 @@ import tachiyomi.core.common.util.system.logcat
 import tachiyomi.domain.source.repository.StubSourceRepository
 import tachiyomi.domain.source.service.SourceManager
 import tachiyomi.i18n.MR
+import tachiyomi.source.local.LocalSource
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -85,7 +98,7 @@ class BackupRestorer(
     private val downloadCache: DownloadCache,
     private val categoriesRestorer: CategoriesRestorer,
     private val preferenceRestorer: PreferenceRestorer,
-    private val extensionStoreRestorer: ExtensionStoreRestorer,
+    // RK: no ExtensionStoreRestorer, a backup store comes back only through RestoreExtensionInstaller.addTrusted
     private val mangaRestorer: MangaRestorer,
     private val parser: ProtoBuf, // RK: the streaming restore decodes field by field, no BackupDecoder
     private val sourceManager: SourceManager,
@@ -100,8 +113,14 @@ class BackupRestorer(
     private val transactions: Transactions,
     private val reikaiLibraryPreferences: ReikaiLibraryPreferences,
     private val alignGroupCategories: AlignGroupCategories,
+    private val gatherGroupViewerFlags: GatherGroupViewerFlags,
     private val restoreExtensionInstaller: RestoreExtensionInstaller,
     private val restoreInstallSources: RestoreInstallSources,
+    private val manualOrder: LibraryManualOrderRepository,
+    private val novelFonts: NovelFontManager,
+    private val combineLocalVolumes: CombineLocalVolumes,
+    private val restoreHiddenEntries: RestoreHiddenEntries,
+    private val restoreCategoryOrder: RestoreCategoryOrder,
     // RK <--
 ) {
 
@@ -164,7 +183,11 @@ class BackupRestorer(
 
         if (options.libraryEntries) {
             restoreSourceNames(summary.backupSources)
-            novelSourceManager.rememberBackedUpNames(summary.novelSourceNames) // RK
+            // RK: whole records, so the App settings carry after it is not refused as a source already known
+            novelSourceManager.rememberBackedUp(
+                backedUpNovelSources(summary.novelSourceNames, summary.backupPreferences),
+            )
+            manualOrder.yieldToRestore() // RK: the backup's Manual places follow the device's own
             restoreAmount += summary.mangaCount + summary.novelCount
         }
         if (options.categories) {
@@ -173,9 +196,7 @@ class BackupRestorer(
         if (options.appSettings) {
             restoreAmount += 1
         }
-        if (options.extensionStores) {
-            restoreAmount += summary.backupExtensionStores.size // RK: from the pass-1 summary
-        }
+        // RK: the backup's extension stores restore through restoreExtensions, which reports no progress of its own
         if (options.sourceSettings) {
             restoreAmount += 1
         }
@@ -192,18 +213,30 @@ class BackupRestorer(
                     summary.backupCategories,
                     summary.backupNovelCategories,
                     summary.sortOverridesStored,
+                    summary.fromReikai,
                     summary.backupPreferences.takeIf { options.appSettings },
                 ).join()
             }
-            if (options.appSettings) {
+            // RK: held, so the fonts below restore after the reader setting that names them
+            val appPreferences = if (options.appSettings) {
                 restoreAppPreferences(
                     summary.backupPreferences,
                     summary.backupCategories.takeIf { options.categories },
                     summary.backupNovelCategories.takeIf { options.categories }, // RK
                 )
+            } else {
+                null
             }
             if (options.sourceSettings) {
                 restoreSourcePreferences(summary.backupSourcePreferences) // RK: from the pass-1 summary
+            }
+            // RK: the fonts the restored reader settings name, after them, since a font restored under a cleaned
+            // name rewrites the setting
+            if (appPreferences != null) {
+                restoreIsolated("reader fonts") {
+                    appPreferences.join()
+                    restoreNovelFonts(uri)
+                }
             }
             if (options.libraryEntries) {
                 restoreMangaStream(
@@ -211,9 +244,6 @@ class BackupRestorer(
                     if (options.categories) summary.backupCategories else emptyList(),
                     summary, // RK: the merge groups, older custom info and pref-era grouping inputs
                 )
-            }
-            if (options.extensionStores) {
-                restoreExtensionStores(summary.backupExtensionStores) // RK: from the pass-1 summary
             }
             // RK -->
             if (options.savedSearches) {
@@ -223,6 +253,7 @@ class BackupRestorer(
             }
             restoreNovelsStream(uri, summary, options)
             // RK <--
+            // RK: restoreExtensionStores moved to restoreExtensions below, which adds only the stores the user trusted
 
             // TODO: optionally trigger online library + tracker update
         }
@@ -231,8 +262,10 @@ class BackupRestorer(
 
     // RK --> once the rest is back: the backup repos the user trusted, then the apps and plugins it lacks
     private suspend fun restoreExtensions(summary: BackupSummary, options: RestoreOptions, trusted: ApprovedRepos) {
-        restoreIsolated("extension repos") {
-            restoreExtensionInstaller.addTrusted(trusted).forEach { errors.add(Date() to it) }
+        if (options.extensionStores) {
+            restoreIsolated("extension repos") {
+                restoreExtensionInstaller.addTrusted(trusted).forEach { errors.add(Date() to it) }
+            }
         }
         if (!options.extensions) return
         notifier.showRestoreProgress(
@@ -259,7 +292,6 @@ class BackupRestorer(
         val backupSources = mutableListOf<BackupSource>()
         val backupPreferences = mutableListOf<BackupPreference>()
         val backupSourcePreferences = mutableListOf<BackupSourcePreferences>()
-        val backupExtensionStores = mutableListOf<BackupExtensionStore>()
         val backupExtensions = mutableListOf<BackupExtension>() // RK
         val backupMangaMerges = mutableListOf<BackupMangaMergeGroup>()
         val backupCustomMangaInfo = mutableListOf<BackupCustomMangaInfo>()
@@ -275,6 +307,7 @@ class BackupRestorer(
         var sortOverridesStored = false
         var kitsuNativeScale = false
         val trackScores = mutableListOf<Pair<Long, Double>>()
+        val foreignMerges = ForeignMergeReader()
         var mangaCount = 0
         var novelCount = 0
 
@@ -283,6 +316,7 @@ class BackupRestorer(
                 BackupFields.MANGA -> {
                     mangaCount++
                     trackScores += parser.mangaTrackScores(data)
+                    foreignMerges.read(parser, data)
                 }
                 BackupFields.NOVELS -> {
                     novelCount++
@@ -296,8 +330,6 @@ class BackupRestorer(
                 BackupFields.SOURCE_PREFERENCES -> backupSourcePreferences.add(
                     parser.decodeFromByteArray(BackupSourcePreferences.serializer(), data),
                 )
-                BackupFields.EXTENSION_STORES ->
-                    backupExtensionStores.add(parser.decodeFromByteArray(BackupExtensionStore.serializer(), data))
                 BackupFields.EXTENSIONS -> // RK
                     backupExtensions.add(parser.decodeFromByteArray(BackupExtension.serializer(), data))
                 BackupFields.MANGA_MERGES ->
@@ -327,6 +359,9 @@ class BackupRestorer(
             }
         }
 
+        // 38.sqm moved Kitsu to the native scale before either of the other two markers was written.
+        val kitsuScoreScale =
+            KitsuBackupScoreScale.of(kitsuNativeScale || sortOverridesStored || mergeGroupsStored, trackScores)
         return BackupSummary(
             mangaCount = mangaCount,
             novelCount = novelCount,
@@ -334,7 +369,6 @@ class BackupRestorer(
             backupSources = backupSources,
             backupPreferences = backupPreferences,
             backupSourcePreferences = backupSourcePreferences,
-            backupExtensionStores = backupExtensionStores,
             backupExtensions = backupExtensions, // RK
             backupMangaMerges = backupMangaMerges,
             legacyCustomInfo = LegacyCustomInfo(backupCustomMangaInfo, backupCustomNovelInfo),
@@ -345,14 +379,16 @@ class BackupRestorer(
             novelSourceNames = novelSourceNames,
             mergeGroupsStored = mergeGroupsStored,
             sortOverridesStored = sortOverridesStored,
+            // Any field only Reikai writes, its format markers included: a manga-only backup may carry nothing else.
+            fromReikai = novelCount > 0 || backupNovelCategories.isNotEmpty() || novelSourceNames.isNotEmpty() ||
+                backupExtensions.isNotEmpty() || backupMangaMerges.isNotEmpty() || backupNovelMerges.isNotEmpty() ||
+                backupMangaUnmerges.isNotEmpty() || backupNovelUnmerges.isNotEmpty() || mergeGroupsStored ||
+                kitsuNativeScale,
             novelDisplayBitStored = sortOverridesStored || novelSourceNames.isNotEmpty(),
-            // 38.sqm moved Kitsu to the native scale before either of the other two markers was written.
-            kitsuScoreScale = KitsuBackupScoreScale.of(
-                kitsuNativeScale || sortOverridesStored || mergeGroupsStored,
-                trackScores,
-            ),
+            kitsuScoreScale = kitsuScoreScale,
             backupMangaUnmerges = backupMangaUnmerges,
             backupNovelUnmerges = backupNovelUnmerges,
+            foreignMerges = foreignMerges.merges(kitsuScoreScale),
         )
     }
 
@@ -363,7 +399,6 @@ class BackupRestorer(
         val backupSources: List<BackupSource>,
         val backupPreferences: List<BackupPreference>,
         val backupSourcePreferences: List<BackupSourcePreferences>,
-        val backupExtensionStores: List<BackupExtensionStore>,
         val backupExtensions: List<BackupExtension>, // RK
         val backupMangaMerges: List<BackupMangaMergeGroup>,
         // An older backup's root custom-info lists, folded onto each entry as it is decoded.
@@ -378,6 +413,9 @@ class BackupRestorer(
         val mergeGroupsStored: Boolean,
         // False for a backup written before the sort-override bit, whose flags alone hold each category's sort.
         val sortOverridesStored: Boolean,
+        // Carries a field only Reikai writes, so a low flag bit on its categories is the override bit, not
+        // the per-category display mode Mihon retired without clearing.
+        val fromReikai: Boolean,
         // False for a backup written before a novel's title display had its own local bit (46.sqm). The
         // sort-override marker and the novel source names both postdate that bit, so either one proves it.
         val novelDisplayBitStored: Boolean,
@@ -385,6 +423,8 @@ class BackupRestorer(
         val kitsuScoreScale: KitsuBackupScoreScale,
         val backupMangaUnmerges: List<BackupMangaMergeGroup>,
         val backupNovelUnmerges: List<BackupNovelMergeGroup>,
+        // Another app's merged entries, applied to their members as the stream decodes them.
+        val foreignMerges: ForeignMerges,
     ) {
         /**
          * The pref-era grouping inputs for [contentType], or null when this backup stores every group.
@@ -417,6 +457,10 @@ class BackupRestorer(
         val membershipCategories = if (options.categories) summary.backupNovelCategories else emptyList()
         if (options.libraryEntries) {
             val favorites = mutableListOf<PrefEraGrouping.Favorite<BackupNovelSourceRef>>()
+            val owners = mutableListOf<VolumeOwner>()
+            val localSeries = mutableListOf<String>()
+            val hiddenRefs = mutableListOf<Pair<String, String>>()
+            val deviceHidden = restoreHiddenEntries.deviceHidden(ContentType.NOVELS)
             val kitsuScale = summary.kitsuScoreScale
             restoreEntryStream(
                 uri,
@@ -425,6 +469,9 @@ class BackupRestorer(
                     summary.legacyCustomInfo.decodeNovel(parser, it).rescaleKitsu(kitsuScale).apply {
                         if (!summary.novelDisplayBitStored) chapterFlags = withDisplayBitFromSort(chapterFlags)
                     }.also { novel ->
+                        owners += novel.restoredOwners(novel.url)
+                        if (LocalNovelSource.isLocal(novel.source)) localSeries += novel.url
+                        if (novel.libraryHidden) hiddenRefs += novel.source to novel.url
                         if (!summary.mergeGroupsStored && novel.favorite) {
                             favorites += PrefEraGrouping.Favorite(
                                 BackupNovelSourceRef(novel.url, novel.source),
@@ -436,13 +483,16 @@ class BackupRestorer(
                 },
                 restore = { novelRestorer.restore(it, membershipCategories) },
                 title = { it.title },
-                sourceName = { summary.novelSourceNames.novelSourceName(it.source) },
+                sourceName = { summary.novelSourceNames.backedUpSourceName(it.source) },
                 isAdult = { adultContentChecker.adultNovelIdsAmong(listOf(it.toNovelImpl())).isNotEmpty() },
             )
             restoreIsolated("novel custom info") {
                 summary.legacyCustomInfo.unclaimedNovels().forEach { (ref, info) ->
                     novelRestorer.restoreCustomInfo(ref.first, ref.second, info)
                 }
+            }
+            restoreIsolated("local novel volumes") {
+                combineLocalVolumes.restoreOwners(ContentType.NOVELS, owners, localSeries)
             }
 
             // Isolated as the manga twin is: a failure here must not cancel the sibling stream or
@@ -459,6 +509,14 @@ class BackupRestorer(
                 )
                 // Entries were filed one at a time from the backup, so a group can come back disagreeing.
                 alignGroupCategories.align(ContentType.NOVELS)
+                // A backup made before the upgrade that gathered them carries each member's own reader flags.
+                gatherGroupViewerFlags.gather(ContentType.NOVELS)
+            }
+            // After the merges, never per entry: see RestoreHiddenEntries.
+            restoreIsolated("hidden novels") {
+                restoreHiddenEntries.restore(ContentType.NOVELS, deviceHidden, hiddenRefs) { (source, url) ->
+                    novelRestorer.restoredId(source, url)
+                }
             }
         }
     }
@@ -480,13 +538,16 @@ class BackupRestorer(
         // before the app settings, so both content types' category-id settings translate inline
         backupNovelCategories: List<BackupNovelCategory>,
         sortOverridesStored: Boolean,
+        fromReikai: Boolean,
         restoredPreferences: List<BackupPreference>?,
         // RK <--
     ) = launch {
         ensureActive()
-        categoriesRestorer(backupCategories, sortOverridesStored, restoredPreferences) // RK
+        val existingCategories = restoreCategoryOrder.existing() // RK
+        categoriesRestorer(backupCategories, sortOverridesStored, restoredPreferences, fromReikai) // RK
         // RK -->
         novelRestorer.restoreCategories(backupNovelCategories)
+        restoreCategoryOrder.restore(existingCategories, backupCategories, backupNovelCategories)
         if (backupCategories.isNotEmpty() || backupNovelCategories.isNotEmpty()) {
             categoriesRestorer.restoreCategorizedDisplay()
         }
@@ -511,23 +572,31 @@ class BackupRestorer(
     ) = launch {
         val legacyCustomInfo = summary.legacyCustomInfo
         val favorites = mutableListOf<PrefEraGrouping.Favorite<BackupMangaSourceRef>>()
+        val owners = mutableListOf<VolumeOwner>() // RK: applied once every series is back
+        val localSeries = mutableListOf<String>() // RK: settled against the device's grouping then
+        val hiddenRefs = mutableListOf<Pair<Long, String>>() // RK: applied after the merges
+        val deviceHidden = restoreHiddenEntries.deviceHidden(ContentType.MANGA) // RK: before a re-add clears one
         restoreEntryStream(
             uri,
             fieldNumber = BackupFields.MANGA,
             decode = {
-                legacyCustomInfo.decodeManga(parser, it).rescaleKitsu(summary.kitsuScoreScale).also { manga ->
-                    if (!summary.mergeGroupsStored && manga.favorite) {
-                        favorites += PrefEraGrouping.Favorite(
-                            BackupMangaSourceRef(manga.url, manga.source),
-                            manga.title,
-                            manga.author,
-                        )
+                legacyCustomInfo.decodeManga(parser, it).rescaleKitsu(summary.kitsuScoreScale)
+                    .let(summary.foreignMerges::applyTo).also { manga ->
+                        owners += manga.restoredOwners(manga.url) // RK
+                        if (manga.source == LocalSource.ID) localSeries += manga.url // RK
+                        if (manga.libraryHidden) hiddenRefs += manga.source to manga.url // RK
+                        if (!summary.mergeGroupsStored && manga.favorite && !manga.isForeignMergedRow) {
+                            favorites += PrefEraGrouping.Favorite(
+                                BackupMangaSourceRef(manga.url, manga.source),
+                                manga.title,
+                                manga.author,
+                            )
+                        }
                     }
-                }
             },
-            restore = { mangaRestorer.restore(listOf(it), backupCategories) },
+            restore = { if (!it.isForeignMergedRow) mangaRestorer.restore(listOf(it), backupCategories) },
             title = { it.title },
-            sourceName = { sourceMapping[it.source] ?: it.source.toString() },
+            sourceName = { sourceMapping.backedUpSourceName(it.source) },
             isAdult = { adultContentChecker.adultIdsAmong(listOf(it.getMangaImpl())).isNotEmpty() },
         )
         restoreIsolated("manga custom info") {
@@ -535,6 +604,8 @@ class BackupRestorer(
                 mangaRestorer.restoreCustomInfo(ref.first, ref.second, info)
             }
         }
+        // RK: a local series' volumes from other folders regroup chapters across series, so once all are back
+        restoreIsolated("local volumes") { combineLocalVolumes.restoreOwners(ContentType.MANGA, owners, localSeries) }
 
         // RK: with every manga restored (fresh IDs), materialize the backup's merge groups. Isolated
         // like the entry loop above: a failure here would otherwise cancel the novel stream mid-batch
@@ -549,9 +620,18 @@ class BackupRestorer(
                     favorites,
                     summary.backupMangaUnmerges.map { it.refs },
                 ),
+                summary.foreignMerges.groups,
             )
             // RK: entries were filed one at a time from the backup, so a group can come back disagreeing
             alignGroupCategories.align(ContentType.MANGA)
+            // RK: a backup made before the upgrade that gathered them carries each member's own reader flags
+            gatherGroupViewerFlags.gather(ContentType.MANGA)
+        }
+        // RK: after the merges, never per entry: see RestoreHiddenEntries
+        restoreIsolated("hidden manga") {
+            restoreHiddenEntries.restore(ContentType.MANGA, deviceHidden, hiddenRefs) { (source, url) ->
+                mangaRestorer.restoredId(source, url)
+            }
         }
     }
 
@@ -585,13 +665,36 @@ class BackupRestorer(
             batch.clear()
         }
 
+        var read = 0
         BackupProtoReader(context).read(uri) { field, data ->
             if (field != fieldNumber) return@read
             currentCoroutineContext().ensureActive()
-            batch.add(decode(data))
+            read++
+            // The summary pass reads only a few fields of each entry, so one unreadable elsewhere shows up here,
+            // and is skipped as a failed restore of it is.
+            val entry = try {
+                decode(data)
+                // Any failure, not only the serializer's: decoding runs no suspension, so nothing here is a cancel.
+            } catch (e: Exception) {
+                errors.add(Date() to "Entry $read could not be read: ${e.message}")
+                restoreProgress.addAndFetch(1)
+                return@read
+            }
+            batch.add(entry)
             if (batch.size >= RESTORE_CHUNK) flush()
         }
         flush()
+    }
+
+    // RK: a font runs to megabytes, so each is read from the file and restored on its own, never all held at once
+    private suspend fun restoreNovelFonts(uri: Uri) {
+        BackupProtoReader(context).read(uri) { field, data ->
+            if (field != BackupFields.NOVEL_FONTS) return@read
+            val font = parser.decodeFromByteArray(BackupNovelFont.serializer(), data)
+            if (!novelFonts.restore(font.fileName, font.bytes)) {
+                errors.add(Date() to "Font not restored: ${font.fileName}")
+            }
+        }
     }
 
     // RK: run a post-loop restore phase, recording a failure instead of taking the whole restore down.
@@ -620,6 +723,7 @@ class BackupRestorer(
         )
     }
 
+    // RK: restoreExtensionStores is replaced by restoreExtensions, see the constructor's note
     private fun CoroutineScope.restoreSourcePreferences(preferences: List<BackupSourcePreferences>) = launch {
         ensureActive()
         preferenceRestorer.restoreSource(preferences)
@@ -631,32 +735,6 @@ class BackupRestorer(
             restoreAmount,
             isSync,
         )
-    }
-
-    private fun CoroutineScope.restoreExtensionStores(
-        backupExtensionStores: List<BackupExtensionStore>,
-    ) = launch {
-        backupExtensionStores
-            .chunked(RESTORE_CHUNK) // RK
-            .forEach { chunk ->
-                chunk.forEach {
-                    ensureActive()
-
-                    try {
-                        extensionStoreRestorer(it)
-                    } catch (e: Exception) {
-                        errors.add(Date() to "Error Adding Repo: ${it.name} : ${e.message}")
-                    }
-
-                    restoreProgress.incrementAndFetch()
-                }
-                notifier.showRestoreProgress(
-                    context.stringResource(MR.strings.extensionStores),
-                    restoreProgress.load(),
-                    restoreAmount,
-                    isSync,
-                )
-            }
     }
 
     private fun writeErrorLog(): File {

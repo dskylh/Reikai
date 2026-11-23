@@ -27,6 +27,7 @@ import eu.kanade.presentation.library.components.CommonMangaItemDefaults
 import eu.kanade.tachiyomi.network.interceptor.cloudflareBlockedUrl
 import mihon.icons.materialsymbols.MaterialSymbols
 import mihon.icons.materialsymbols.automirroredrounded.Help
+import mihon.icons.materialsymbols.rounded.Add
 import mihon.icons.materialsymbols.rounded.Public
 import mihon.icons.materialsymbols.rounded.Refresh
 import reikai.presentation.browse.EntryBrowseGridCell
@@ -42,14 +43,27 @@ import tachiyomi.presentation.core.screens.EmptyScreenAction
 import tachiyomi.presentation.core.screens.LoadingScreen
 import tachiyomi.presentation.core.util.plus
 
+/** A local source's own actions, both types' alike: adding files, and the guide to laying them out. */
+class LocalSourceActions(val onImport: () -> Unit, val onGuide: () -> Unit)
+
 /**
  * The one catalogue body, for a manga source and a light-novel source alike: the loading, empty and
  * fetch-error states, then the results in whichever layout [rowStyle] asks for. Both catalogues used
  * to carry their own copy of all of it, which is how novels ended up ignoring the column preference.
  *
- * [onLocalSourceHelpClick] replaces the whole empty-state action set when present, the way upstream
- * points a reader at the local-source guide instead of offering a retry there is nothing to retry.
+ * [localSource] replaces the whole empty-state action set when present, the way upstream points a
+ * reader at the local-source guide instead of offering a retry there is nothing to retry.
  */
+private fun LazyPagingItems<*>.loadErrorState(): LoadState? =
+    loadState.refresh.takeIf { it is LoadState.Error } ?: loadState.append.takeIf { it is LoadState.Error }
+
+/**
+ * The page a Cloudflare challenge blocked the listing on, a first page or a later one, for Open in
+ * WebView: a source root is often not challenged at all, so opening that leaves nothing to solve.
+ */
+fun LazyPagingItems<*>.challengeUrl(): String? =
+    (loadErrorState() as? LoadState.Error)?.error?.cloudflareBlockedUrl()
+
 @Composable
 fun EntryBrowseCatalogue(
     rows: LazyPagingItems<EntryBrowseRow>,
@@ -57,19 +71,16 @@ fun EntryBrowseCatalogue(
     selectedKeys: Set<String>,
     snackbarHostState: SnackbarHostState,
     contentPadding: PaddingValues,
-    onWebViewClick: (challengeUrl: String?) -> Unit,
-    onHelpClick: () -> Unit,
+    // Null hides that empty-state action, for a listing with no page or source guide behind it.
+    onWebViewClick: ((challengeUrl: String?) -> Unit)?,
+    onHelpClick: (() -> Unit)?,
     gestures: EntryGestures<EntryBrowseRow>,
-    onLocalSourceHelpClick: (() -> Unit)? = null,
+    localSource: LocalSourceActions? = null,
 ) {
     val context = LocalContext.current
 
-    val errorState = rows.loadState.refresh.takeIf { it is LoadState.Error }
-        ?: rows.loadState.append.takeIf { it is LoadState.Error }
-
-    // A Cloudflare challenge blocks one URL, and a source root is often not challenged at all, so
-    // opening that leaves the reader nothing to solve and every retry keeps failing.
-    val challengeUrl = (errorState as? LoadState.Error)?.error?.cloudflareBlockedUrl()
+    val errorState = rows.loadErrorState()
+    val challengeUrl = rows.challengeUrl()
 
     // Indefinite: a fetch error stays until it is dismissed or retried. Raised only once results are
     // already on screen; an empty listing routes the same error through the empty state below.
@@ -98,14 +109,20 @@ fun EntryBrowseCatalogue(
             message = (errorState as? LoadState.Error)
                 ?.let { with(context) { it.error.sourceFailureMessage } }
                 ?: stringResource(MR.strings.no_results_found),
-            actions = onLocalSourceHelpClick?.let {
-                listOf(EmptyScreenAction(MR.strings.local_source_help_guide, HelpIcon, it))
-            } ?: listOf(
+            // A local source lists nothing until files are added, so adding them comes first.
+            actions = localSource?.let {
+                listOf(
+                    EmptyScreenAction(MR.strings.local_import_title, MaterialSymbols.Rounded.Add, it.onImport),
+                    EmptyScreenAction(MR.strings.local_source_help_guide, HelpIcon, it.onGuide),
+                )
+            } ?: listOfNotNull(
                 EmptyScreenAction(MR.strings.action_retry, MaterialSymbols.Rounded.Refresh, rows::refresh),
-                EmptyScreenAction(MR.strings.action_open_in_web_view, MaterialSymbols.Rounded.Public) {
-                    onWebViewClick(challengeUrl)
+                onWebViewClick?.let {
+                    EmptyScreenAction(MR.strings.action_open_in_web_view, MaterialSymbols.Rounded.Public) {
+                        it(challengeUrl)
+                    }
                 },
-                EmptyScreenAction(MR.strings.label_help, HelpIcon, onHelpClick),
+                onHelpClick?.let { EmptyScreenAction(MR.strings.label_help, HelpIcon, it) },
             ),
         )
         return

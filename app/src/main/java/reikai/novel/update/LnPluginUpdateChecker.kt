@@ -14,6 +14,8 @@ import reikai.novel.registry.LnRepoRegistries
 import reikai.novel.registry.LnRepoResult
 import reikai.novel.registry.byPluginUrl
 import reikai.novel.registry.fetchEach
+import reikai.novel.registry.listedPlugins
+import reikai.novel.registry.unlistedRepos
 import reikai.util.runCatchingCancellable
 import tachiyomi.core.common.util.system.logcat
 import java.util.concurrent.TimeUnit
@@ -41,15 +43,11 @@ class LnPluginUpdateChecker(
         val repos = prefs.addedRepoUrls().get()
         val installedUrls = prefs.installedPluginUrls().get()
         val fetched = if (repos.isEmpty() || installedUrls.isEmpty()) emptyMap() else fetcher.fetchEach(repos)
-        // The screens recompute the badge from their registries, so they must not keep an older copy.
-        registries.accept(fetched)
+        // The screens recompute the badge from their registries, so they must not keep an older copy,
+        // and the check judges a down repo by the listing they keep for it, as the screens do.
+        val results = registries.accept(fetched)
         installer.recordRepos(fetched)
-        val found = findPluginUpdates(
-            installedUrls,
-            prefs.installedPluginMetadata().get(),
-            fetched.values.flatMap { (it as? LnRepoResult.Reached)?.entries.orEmpty() },
-            unreachable = fetched.filterValues { it !is LnRepoResult.Reached }.keys,
-        )
+        val found = findPluginUpdates(installedUrls, prefs.installedPluginMetadata().get(), results)
         notifier.setPending(found)
         // With no repo answering nothing was learned, so the next launch or Browse open checks again.
         if (fetched.isEmpty() || fetched.values.any { it is LnRepoResult.Reached }) {
@@ -81,8 +79,9 @@ data class LnPluginUpdate(
 )
 
 /**
- * What one check found: the [updates] to offer, and the [undecided] plugin ids that no answering repo
- * settles while the plugin's own repo is down. An undecided plugin keeps the badge it had ([pendingIds]).
+ * What one check found: the [updates] to offer, and the [undecided] plugin ids that no listing settles
+ * while the plugin's own repo is down and has not answered since launch. An undecided plugin keeps the
+ * badge it had ([pendingIds]).
  * twin of KindListing, pinned by FindPluginUpdatesTest
  */
 data class LnPluginUpdates(
@@ -94,13 +93,20 @@ data class LnPluginUpdates(
         updates.mapTo(HashSet()) { it.entry.id } + (previous intersect undecided)
 }
 
+/** [findPluginUpdates] over what fetching every added repo gave, which the check and the Extensions screen both hold. */
+fun findPluginUpdates(
+    installedUrls: Set<String>,
+    metadata: Map<String, LnInstalledPluginMetadata>,
+    results: Map<String, LnRepoResult>,
+): LnPluginUpdates = findPluginUpdates(installedUrls, metadata, results.listedPlugins(), results.unlistedRepos())
+
 /**
  * The installed plugins a repo offers a newer version of, matched by plugin id since a repo can publish
  * a new version at a new URL. Where several repos list the id, the listing at the installed URL decides,
  * because accepting another repo's entry replaces the installed script with that repo's. With no such
  * listing the highest version wins, a tie going to the earlier repo in [entries], but only once the
  * plugin's own repo answered (every repo, before a check has recorded one): a repo that is down looks
- * the same as one that stopped listing the plugin. [unreachable] are the added repos that did not answer.
+ * the same as one that stopped listing the plugin. [unreachable] are the added repos with no listing to judge by.
  */
 fun findPluginUpdates(
     installedUrls: Set<String>,

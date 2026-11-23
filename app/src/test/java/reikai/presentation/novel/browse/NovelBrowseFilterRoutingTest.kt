@@ -1,5 +1,6 @@
 package reikai.presentation.novel.browse
 
+import androidx.lifecycle.viewModelScope
 import eu.kanade.domain.source.service.SourcePreferences
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -29,7 +30,6 @@ import reikai.novel.source.NovelSource
 import reikai.novel.source.NovelSourceManager
 import reikai.presentation.browse.EntryBulkFavoriteViewModel
 import reikai.presentation.browse.catalogue.NovelBrowseAdapter
-import reikai.presentation.migrate.flow.MigrationPickHandoff
 import reikai.presentation.recents.EmittingPreferenceStore
 import reikai.util.testAppScope
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -146,7 +146,7 @@ class NovelBrowseFilterRoutingTest {
             every { state } returns MutableStateFlow(EntryBulkFavoriteViewModel.State())
         }
 
-        val draft = NovelBrowseAdapter(model, bulk, SOURCE_ID).captureSearch()
+        val draft = NovelBrowseAdapter(model, bulk, SOURCE_ID, model.viewModelScope).captureSearch()
 
         draft.filtersJson shouldBe null
     }
@@ -217,7 +217,6 @@ class NovelBrowseFilterRoutingTest {
                 every { getFavoritedKeysAsFlow() } returns flowOf(FavoritedNovels.None)
             },
             libraryAdder = mockk(relaxed = true),
-            pickHandoff = MigrationPickHandoff(),
             reikaiSourcePreferences = ReikaiSourcePreferences(store),
             sourcePreferences = SourcePreferences(store),
             getIncognitoState = mockk(relaxed = true),

@@ -9,9 +9,11 @@ import kotlinx.collections.immutable.PersistentList
 import kotlinx.collections.immutable.mutate
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toPersistentList
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import tachiyomi.core.common.preference.CheckboxState
 import tachiyomi.core.common.util.lang.launchIO
 import tachiyomi.domain.category.model.Category
@@ -23,8 +25,9 @@ import tachiyomi.domain.category.model.Category
  * key, the batch's category decision, the in-library check and the add-to-library verb. One category choice applies to the whole selection, already-favorited entries are skipped, and
  * there is no per-duplicate prompt.
  */
-abstract class EntryBulkFavoriteViewModel<T : Any> :
-    ViewModel() {
+abstract class EntryBulkFavoriteViewModel<T : Any>(
+    private val appScope: CoroutineScope,
+) : ViewModel() {
 
     val state: StateFlow<EntryBulkFavoriteViewModel.State<T>>
         field = MutableStateFlow<EntryBulkFavoriteViewModel.State<T>>(State())
@@ -107,7 +110,9 @@ abstract class EntryBulkFavoriteViewModel<T : Any> :
     }
 
     private suspend fun addAndFinish(items: List<T>, categoryIds: List<Long>) {
-        addToLibrary(items, categoryIds)
+        // On the app scope, so leaving the screen mid-batch neither drops the rest nor stops one
+        // entry between its favorite and its filing. A launch, so a failure reaches the scope's handler.
+        appScope.launch { addToLibrary(items, categoryIds) }.join()
         setDialog(null)
         toggleSelectionMode(false)
     }

@@ -6,14 +6,17 @@ import dev.zacsweers.metro.SingleIn
 import reikai.domain.library.ContentType
 import reikai.domain.library.ReikaiLibraryPreferences
 import reikai.domain.merge.ChapterUnit
+import reikai.domain.merge.DownloadTargets
 import reikai.domain.merge.GroupChapterFlags
 import reikai.domain.merge.MergeScope
 import reikai.domain.merge.ReconcileMergedChapters
+import reikai.domain.merge.mergeMemberName
 import reikai.domain.merge.renderMergedReadingOrder
 import tachiyomi.domain.chapter.model.Chapter
 import tachiyomi.domain.manga.interactor.GetMangaWithChapters
 import tachiyomi.domain.manga.model.Manga
 import tachiyomi.domain.source.service.SourceManager
+import tachiyomi.source.local.isLocal
 
 /**
  * One-shot merge group resolver for manga: given an entry, it resolves the whole group and returns the
@@ -46,6 +49,17 @@ class MergedChapterProvider(
         val pooledChapters: List<Chapter> = chapters,
     ) {
         val isMerged: Boolean get() = mangaById.size > 1
+
+        /** The copy a download of each of [shown] fetches in [scope], a copy counting as fetchable while
+         *  its member's source [isInstalled]. The library and the reader build theirs here, stitch or none. */
+        inline fun downloadTargets(
+            scope: MergeScope,
+            shown: List<Chapter>,
+            isInstalled: (Manga) -> Boolean,
+        ): DownloadTargets {
+            val installed = mangaById.values.filter(isInstalled).mapTo(HashSet()) { it.id }
+            return DownloadTargets.of(scope, pooledChapters, shown, stitch, { it.id }) { it.mangaId in installed }
+        }
     }
 
     suspend fun load(anchor: Manga): Group {
@@ -59,7 +73,9 @@ class MergedChapterProvider(
         }
         val mangaById = ids.associateWith { getMangaWithChapters.awaitManga(it) }
         val chaptersBySource = ids.associateWith { getMangaWithChapters.awaitChapters(it, applyScanlatorFilter = true) }
-        val sourceNameByMangaId = mangaById.mapValues { sourceManager.getOrStub(it.value.source).name }
+        val sourceNameByMangaId = mangaById.mapValues { (_, manga) ->
+            mergeMemberName(sourceManager.getOrStub(manga.source).name, manga.title, manga.isLocal())
+        }
         val pooled = chaptersBySource.values.flatten()
         val stitch = stitchOf(anchor.id)
         val merged = merged(pooled, stitch)
@@ -86,18 +102,16 @@ class MergedChapterProvider(
         renderMergedReadingOrder(chapters, stitch, { it.id }) { chapter, order -> chapter.copy(sourceOrder = order) }
 
     /** The member manga ids in trunk order (first = trunk), for ordering the manage-sources rows so the
-     *  primary sits on top. Uses the stitch's own ranking; [memberRanking] is the caller's
-     *  already-resolved per-group override (empty = the global ranking wins). */
-    fun rankedMemberIds(
-        chaptersBySource: Map<Long, List<Chapter>>,
-        sourceIdByManga: Map<Long, Long>,
-        memberRanking: List<Long>,
-    ): List<Long> = ChapterAggregation.rankedMemberIds(
-        chaptersBySource,
-        sourceIdByManga,
-        reikaiLibraryPreferences.preferredMangaSources.get(),
-        memberRanking,
-    )
+     *  primary sits on top. Reads each member's whole chapter list, as the stitch does, since a hidden
+     *  scanlator is a display choice; [memberRanking] is the caller's already-resolved per-group
+     *  override (empty = the global ranking wins). */
+    suspend fun rankedMemberIds(memberIds: List<Long>, memberRanking: List<Long>): List<Long> =
+        ChapterAggregation.ranking.rank(
+            memberIds.associateWith { getMangaWithChapters.awaitChapters(it) },
+            memberIds.associateWith { getMangaWithChapters.awaitManga(it).source },
+            reikaiLibraryPreferences.preferredMangaSources.get(),
+            memberRanking,
+        ).map { it.memberId }
 }
 
 /** [shown]'s flags across the whole group, as the library's resume and download ask them; a null group

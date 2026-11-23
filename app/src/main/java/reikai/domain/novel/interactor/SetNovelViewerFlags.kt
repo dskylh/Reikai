@@ -2,15 +2,16 @@ package reikai.domain.novel.interactor
 
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
+import reikai.domain.novel.NovelPageLayout
+import reikai.domain.novel.NovelRenderingMode
 import reikai.domain.novel.NovelRepository
-import reikai.domain.novel.model.NovelUpdate
-import reikai.domain.novel.model.setNovelFlag
 
 /**
  * Per-novel reader viewer-flag writes, the novel twin of
  * [eu.kanade.domain.manga.interactor.SetMangaViewerFlags], pinned by ViewerOrientationConformanceTest.
- * Novels carry only the orientation bits (the reader is text-based, so there is no reading-mode).
- * Reads the current flags and writes only the [viewer_flags] column via a [NovelUpdate].
+ * Novels carry the orientation bits, their own rendering mode and their own reading mode ([NovelPageLayout]).
+ * Each write is one masked update in the database rather than a read then a write, so two quick choices
+ * on different fields cannot overwrite each other.
  */
 @Inject
 class SetNovelViewerFlags(
@@ -18,9 +19,16 @@ class SetNovelViewerFlags(
 ) {
 
     suspend fun awaitSetOrientation(id: Long, flag: Long) {
-        val novel = novelRepository.getById(id) ?: return
-        novelRepository.update(
-            NovelUpdate(id) { viewerFlags = setNovelFlag(novel.viewerFlags, flag, ReaderOrientation.MASK.toLong()) },
-        )
+        novelRepository.setViewerFlags(id, flag, ReaderOrientation.MASK.toLong())
+    }
+
+    /** Keeps [mode] for this novel, or follows the rendering-mode setting again when it is null. */
+    suspend fun awaitSetRenderingMode(id: Long, mode: NovelRenderingMode?) {
+        novelRepository.setViewerFlags(id, NovelRenderingMode.flagOf(mode), NovelRenderingMode.MASK)
+    }
+
+    /** Keeps [layout] for this novel, or follows the reading-mode setting again when it is null. */
+    suspend fun awaitSetPageLayout(id: Long, layout: NovelPageLayout?) {
+        novelRepository.setViewerFlags(id, NovelPageLayout.flagOf(layout), NovelPageLayout.MASK)
     }
 }

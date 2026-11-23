@@ -51,9 +51,9 @@ android {
 
         // versionCode also climbs mid-cycle when a preference migration needs it, since a migration is a
         // no-op until the shipped versionCode reaches its gate (see CLAUDE.md). Each migration's own
-        // `version` names its gate. 0.5.1 ships as 205, so the next migration takes 206+. versionName
-        // tracks the last shipped release until the next cycle is cut.
-        versionCode = 205
+        // `version` names its gate. 0.5.1 shipped as 205 and this cycle has climbed to 210, so the next
+        // migration takes 211+. versionName tracks the last shipped release until the next cycle is cut.
+        versionCode = 210
         versionName = "0.5.1"
         // RK <--
 
@@ -244,10 +244,13 @@ dependencies {
     baselineProfile(projects.baselineProfile)
 
     implementation(projects.i18n)
-    // RK: the icon modules moved to the Compose group below
+    implementation(projects.icons.customMaterialSymbols)
+    implementation(projects.icons.materialSymbols)
+    implementation(projects.icons.simpleIcons)
     implementation(projects.core.archive)
     implementation(projects.core.common)
     implementation(projects.core.metro)
+    implementation(projects.core.navigation)
     implementation(projects.coreMetadata)
     implementation(projects.sourceApi)
     implementation(projects.sourceLocal)
@@ -265,11 +268,6 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.material3)
-    // RK --> icon modules moved from the top of the block into the Compose group
-    implementation(projects.icons.customMaterialSymbols)
-    implementation(projects.icons.materialSymbols)
-    implementation(projects.icons.simpleIcons)
-    // RK <--
     implementation(libs.androidx.compose.animation)
     implementation(libs.androidx.compose.animationGraphics)
     debugImplementation(libs.androidx.compose.uiTooling)
@@ -296,8 +294,8 @@ dependencies {
     implementation(libs.ireader.sourceApi) {
         exclude(group = "io.insert-koin")
     }
-    // The host builds IReader's clients with the Ktor that API was built against, decoding JSON with
-    // Gson as IReader's own client does.
+    // The host builds IReader's clients with the Ktor upstream IReader pins, which extensions link
+    // against (browse-and-sources.md), decoding JSON with Gson as IReader's own client does.
     implementation(libs.ireader.ktor.okhttp)
     implementation(libs.ireader.ktor.contentNegotiation)
     implementation(libs.ireader.ktor.gson)
@@ -319,6 +317,8 @@ dependencies {
     implementation(libs.androidx.profileInstaller)
 
     implementation(libs.bundles.androidx.lifecycle)
+    implementation(libs.bundles.androidx.navigation3)
+    implementation(libs.androidx.compose.runtimeRetain) // RK: retain, for the result bus
 
     // Job scheduling
     implementation(libs.androidx.work)
@@ -338,7 +338,7 @@ dependencies {
     implementation(libs.jsoup)
 
     // Disk
-    implementation(libs.diskLruCache)
+    implementation(libs.diskLruCache) // RK: PagePreviewCache still uses it
     implementation(libs.unifile)
 
     // Preferences
@@ -370,7 +370,6 @@ dependencies {
     }
     implementation(libs.composeRichEditor)
     implementation(libs.aboutLibraries.compose)
-    implementation(libs.bundles.voyager)
     implementation(libs.composeMaterialMotion)
     implementation(libs.swipe)
     implementation(libs.composeWebview)
@@ -379,6 +378,7 @@ dependencies {
     implementation(libs.vico.compose.m3) // RK: Statistics charts (status, score, reading time)
     implementation(libs.bundles.markdown)
     implementation(libs.materialKolor)
+    implementation(libs.colorpicker.compose) // RK: the Custom theme's color picker
 
     // Logging
     implementation(libs.logcat)
@@ -397,10 +397,9 @@ dependencies {
     testImplementation(libs.bundles.test)
     testRuntimeOnly(libs.junit.platform.launcher)
 
-    // RK: instrumented test for the headless LN plugin host (network-dependent, on-device only).
-    // quickjs-kt is a main dep above, so androidTest sees it transitively.
+    // RK: the instrumented suite under src/androidTest (on-device only).
     androidTestImplementation(libs.androidx.test.junit)
-    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation(libs.androidx.test.runner)
 
     // For detecting memory leaks; see https://square.github.io/leakcanary/
     // debugImplementation(libs.leakCanary.android)
@@ -413,6 +412,9 @@ dependencies {
     // through :data, so the SQLDelight runtime those tests compile against is test-only here too.
     testImplementation(libs.sqldelight.sqliteDriver)
     testImplementation(libs.bundles.sqldelight)
+    // RK: the production SQLDelight driver over Robolectric's SQLite, for the tests that pin how its
+    // transactions nest (ChapterTombstoneTransactionTest); the bundled driver has no desktop natives here.
+    testImplementation(libs.androidx.sqlite.framework)
 
     // RK: screenshot comparison for the Compose UI tests, see docs/dev/testing.md
     testImplementation(libs.roborazzi)

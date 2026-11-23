@@ -1,6 +1,14 @@
 package reikai.presentation.reader
 
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.sample
 import tachiyomi.core.common.preference.Preference
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * How the page is lit and tinted: custom brightness, a colour filter over the page, grayscale and
@@ -18,4 +26,18 @@ class ReaderDisplayFilters(
     val colorFilterMode: Preference<Int>,
     val grayscale: Preference<Boolean>,
     val invertedColors: Preference<Boolean>,
+    /** In percent, [PageColorAdjust.CONTRAST_RANGE]; 100 is none. */
+    val contrastPercent: Preference<Int>,
 )
+
+/**
+ * The custom brightness, 0 while it is off. A collector that outlived its toggle was how a switched-off brightness
+ * kept moving, so the value is only followed while the setting is on (mihon 8124d324a).
+ */
+@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
+fun ReaderDisplayFilters.brightness(): Flow<Int> = customBrightness.changes()
+    .flatMapLatest { enabled -> if (enabled) customBrightnessValue.changes().sample(0.1.seconds) else flowOf(0) }
+
+/** Grayscale, inverted colours and contrast as the one rule the page takes them by. */
+fun ReaderDisplayFilters.pageColorAdjust(): Flow<PageColorAdjust> =
+    combine(grayscale.changes(), invertedColors.changes(), contrastPercent.changes(), ::PageColorAdjust)

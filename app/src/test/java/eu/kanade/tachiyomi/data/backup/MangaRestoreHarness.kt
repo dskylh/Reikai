@@ -6,11 +6,22 @@ import eu.kanade.tachiyomi.data.backup.restore.restorers.MangaRestorer
 import eu.kanade.tachiyomi.data.backup.restore.restorers.NovelRestorer
 import io.mockk.mockk
 import reikai.data.chapter.ChapterNumberOverrideRepositoryImpl
+import reikai.data.chapter.ChapterTombstoneRepositoryImpl
+import reikai.domain.chapter.InMemoryChapterCopyMarks
+import reikai.domain.chapter.LocalVolumeRepository
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
+import reikai.domain.chapter.VolumePickRepository
 import reikai.domain.db.PassThroughTransactions
+import reikai.domain.library.FakeLibraryManualOrderRepository
+import reikai.domain.library.LibraryManualOrderRepository
 import reikai.domain.merge.MergeGroupRepository
 import reikai.domain.merge.RestoreMergeGroups
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import reikai.domain.readinglog.ReadingLogRepository
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
@@ -36,11 +47,15 @@ fun mangaRestorer(
     mergeGroups: MergeGroupRepository = mockk(relaxed = true),
     customInfo: CustomMangaInfoRepository = CustomMangaInfoRepositoryImpl(database),
     readingLog: ReadingLogRepository = NoReadingLog,
+    localVolumes: LocalVolumeRepository = NoLocalVolumes,
+    volumePicks: VolumePickRepository = NoVolumePicks,
 ): MangaRestorer {
     val mangas = MangaRepositoryImpl(database)
     val chapters = ChapterRepositoryImpl(database)
     return MangaRestorer(
         restoreRepository = RestoreRepositoryImpl(
+            tombstones = ChapterTombstoneRepositoryImpl(database),
+            manualOrder = FakeLibraryManualOrderRepository(),
             database = database,
             mangaRepository = mangas,
             chapterRepository = chapters,
@@ -48,6 +63,7 @@ fun mangaRestorer(
             mangaMetadataRepository = MangaMetadataRepositoryImpl(database),
             setCustomMangaInfo = SetCustomMangaInfo(customInfo),
             chapterNumberOverrides = ChapterNumberOverrideRepositoryImpl(database),
+            copyMarks = InMemoryChapterCopyMarks(),
             readingLog = readingLog,
         ),
         getCategories = GetCategories(CategoryRepositoryImpl(database)),
@@ -55,6 +71,8 @@ fun mangaRestorer(
         getMangaByUrlAndSourceId = GetMangaByUrlAndSourceId(mangas),
         restoreMergeGroups = RestoreMergeGroups(mergeGroups, PassThroughTransactions),
         setCustomMangaInfo = SetCustomMangaInfo(customInfo),
+        localVolumes = localVolumes,
+        volumePicks = volumePicks,
     )
 }
 
@@ -78,7 +96,11 @@ class MangaRestoreHarness private constructor(val driver: JdbcSqliteDriver, val 
     ) = mangaRestorer(database, mergeGroups, customInfo)
 
     /** The novel restore over this database's categories, the rest of it relaxed. */
-    fun novelCategoryRestorer() = NovelRestorer(
+    fun novelCategoryRestorer(
+        manualOrder: LibraryManualOrderRepository = FakeLibraryManualOrderRepository(),
+    ) = NovelRestorer(
+        tombstones = NoChapterTombstoneRepository,
+        manualOrder = manualOrder,
         novelRepository = mockk(relaxed = true),
         novelChapterRepository = mockk(relaxed = true),
         categoryRepository = categories,
@@ -87,7 +109,12 @@ class MangaRestoreHarness private constructor(val driver: JdbcSqliteDriver, val 
         setCustomNovelInfo = mockk(relaxed = true),
         novelHistoryRepository = mockk(relaxed = true),
         chapterNumberOverrides = NoChapterNumberOverrides,
+        copyMarks = InMemoryChapterCopyMarks(),
+        localVolumes = NoLocalVolumes,
+        volumePicks = NoVolumePicks,
         readingLog = NoReadingLog,
+        readingPace = NoReadingPace,
+        localNovelLanguages = NoLocalNovelLanguages,
     )
 
     /** Stores a bare device copy under a chosen [id], for a test that pins the id a restore writes under. */

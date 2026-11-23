@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.network.interceptor
 
+import eu.kanade.tachiyomi.network.WithPluginCookies
+import eu.kanade.tachiyomi.network.cookiesSent
 import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldStartWith
@@ -7,12 +9,15 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Cookie
+import okhttp3.CookieJar
 import okhttp3.FormBody
-import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl
 import okhttp3.MultipartBody
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
 import org.junit.jupiter.params.provider.ValueSource
 
 class FlareSolverrCommandTest {
@@ -36,16 +41,32 @@ class FlareSolverrCommandTest {
         cookiesSent(listOf(cookie("cf_clearance"), cookie("__cf_bm"), cookie("site"))) shouldBe listOf("site" to "v")
     }
 
+    private fun jarOf(vararg cookies: Cookie) = object : CookieJar {
+        override fun loadForRequest(url: HttpUrl) = cookies.toList()
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = Unit
+    }
+
+    private fun withHeader(header: String) =
+        Request.Builder().url("https://www.example.com/").header("Cookie", header).build()
+
     @Test
     fun `a cookie the source set on the request goes when the jar has none, as OkHttp sends it`() {
-        cookiesToForward(emptyList(), "session=abc; lang=en", "https://www.example.com/".toHttpUrl())
+        cookiesSent(jarOf(), withHeader("session=abc; lang=en"))
             .map { it.name to it.value } shouldBe listOf("session" to "abc", "lang" to "en")
     }
 
     @Test
     fun `the jar's cookies win over a Cookie header, as OkHttp sends them`() {
-        cookiesToForward(listOf(cookie("site", "jar")), "site=header", "https://www.example.com/".toHttpUrl())
+        cookiesSent(jarOf(cookie("site", "jar")), withHeader("site=header"))
             .map { it.value } shouldBe listOf("jar")
+    }
+
+    // The LN host's client: a plugin's age gate or read token reaches a site that set a cookie itself.
+    @Test
+    fun `a plugin's Cookie header joins its jar's cookies and wins by name`() {
+        val header = "a=plugin; b=x"
+        cookiesSent(WithPluginCookies(jarOf(cookie("a", "jar"), cookie("keep", "jar")), header), withHeader(header))
+            .map { it.name to it.value } shouldBe listOf("keep" to "jar", "a" to "plugin", "b" to "x")
     }
 
     @Test
@@ -99,6 +120,14 @@ class FlareSolverrCommandTest {
     )
     fun `secrets never cross the internet in the clear`(url: String) {
         isPrivateChannel(url) shouldBe false
+    }
+
+    @ParameterizedTest
+    @CsvSource("http://nas:8191, 1", "https://solver.example.com, 1", "http://solver.example.com:8191, 0")
+    fun `a solve hands the site's cookies only to a solver it may trust with them`(url: String, sent: Int) {
+        val page = okhttp3.Request.Builder().url("https://www.novelupdates.com/").build()
+
+        cookiesForSolver(url, jarOf(cookie("site")), page).size shouldBe sent
     }
 
     @Test

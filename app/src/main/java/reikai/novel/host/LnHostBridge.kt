@@ -1,35 +1,35 @@
 package reikai.novel.host
 
-import android.util.Base64
+import eu.kanade.tachiyomi.network.WithPluginCookies
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.Json
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import logcat.LogPriority
-import okhttp3.Cookie
-import okhttp3.CookieJar
-import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import reikai.novel.network.applyNovelDefaults
 import reikai.novel.source.httpFailure
 import reikai.novel.source.lnStorageScope
 import tachiyomi.core.common.preference.PreferenceStore
 import tachiyomi.core.common.util.system.logcat
 import java.net.URLDecoder
+import java.nio.charset.Charset
+import java.util.Base64
 
 /**
  * Engine-agnostic host services for LN plugins: HTTP over OkHttp, per-plugin storage over the shared
  * [PreferenceStore], and logging. [LnPluginHost] binds these to the JS runtime as host functions
  * (`__lnFetch` / `__lnGetStorage` / `__lnSetStorage` / `__lnLog`); nothing here touches a WebView.
  * Storage is namespaced keys rather than raw SharedPreferences, which the project forbids, keyed
- * `ln_storage::<pluginId>::<key>`; clearing a scope deletes every key with that prefix.
+ * `ln_storage::<pluginId>::<key>`.
  */
 class LnHostBridge(
     private val preferenceStore: PreferenceStore,
@@ -47,10 +47,10 @@ class LnHostBridge(
             val opts = parseFetchOpts(optsJson)
             val builder = Request.Builder().url(url)
             val method = opts.method?.uppercase() ?: "GET"
-            // Binary body (base64) for gRPC-web / protobuf via fetchProto; multipart for FormData
+            // Binary body (base64) for a typed-array body or fetchProto; multipart for FormData
             // posts (matches browsers / lnreader); otherwise the string body.
             val explicitBody = when {
-                opts.bodyBase64 != null -> Base64.decode(opts.bodyBase64, Base64.NO_WRAP).toRequestBody()
+                opts.bodyBase64 != null -> Base64.getDecoder().decode(opts.bodyBase64).toRequestBody()
                 opts.multipart != null -> MultipartBody.Builder().setType(MultipartBody.FORM).apply {
                     opts.multipart.forEach { addFormDataPart(it.getOrElse(0) { "" }, it.getOrElse(1) { "" }) }
                 }.build()
@@ -61,10 +61,9 @@ class LnHostBridge(
             val body = explicitBody
                 ?: ByteArray(0).toRequestBody().takeIf { method == "POST" || method == "PUT" || method == "PATCH" }
             builder.method(method, body)
+            // The device WebView UA first, so a plugin's own replaces it; the Referer is left to the plugin.
+            userAgent().takeIf { it.isNotBlank() }?.let { builder.header("User-Agent", it) }
             opts.headers?.forEach { (k, v) -> builder.header(k, v) }
-            // Default the device WebView UA unless the plugin set one; the Referer is left to the plugin.
-            val pluginSetUa = opts.headers?.keys?.any { it.equals("User-Agent", ignoreCase = true) } == true
-            builder.applyNovelDefaults(userAgent(), pluginSetUserAgent = pluginSetUa)
             // Laravel / Inertia sources expect the XSRF-TOKEN cookie echoed back as the X-XSRF-TOKEN
             // header. Derive it from the shared cookie jar unless the plugin set the header itself. The
             // token is a per-session CSRF value, applied but never logged.
@@ -90,25 +89,32 @@ class LnHostBridge(
             val headers = res.headers.toMultimap()
                 .mapKeys { it.key.lowercase() }
                 .mapValues { it.value.firstOrNull().orEmpty() }
-            // Binary responses (protobuf) are returned base64 so they survive the string bridge; the
-            // body can be read only once, so the two branches are mutually exclusive.
+            // LNReader's fetchText decodes with the encoding the plugin names over the one the site
+            // declares, which for a GBK site labelled gb2312 loses every character outside GB2312.
+            val charset = opts.encoding?.let { runCatching { Charset.forName(it) }.getOrNull() }
+            val contentType = res.body.contentType()
+            // The bytes go back too, base64 so they survive the string bridge, when the plugin can want
+            // them: it sent a binary body, or the reply is not a text type. A text type keeps the text
+            // path alone, so a mislabelled GBK page is never re-decoded by a guess.
             val bodyText: String
             val bodyBase64: String?
-            if (opts.binary) {
-                bodyText = ""
-                bodyBase64 = Base64.encodeToString(res.body.bytes(), Base64.NO_WRAP)
+            if (opts.binary || contentType?.isText() == false) {
+                val bytes = res.body.bytes()
+                bodyBase64 = Base64.getEncoder().encodeToString(bytes)
+                bodyText = bytes.toString(charset ?: contentType?.charset() ?: Charsets.UTF_8)
             } else {
-                bodyText = res.body.string()
+                bodyText = charset?.let { res.body.bytes().toString(it) } ?: res.body.string()
                 bodyBase64 = null
             }
-            JSON.encodeToString(
+            LnPluginHost.JSON.encodeToString(
                 FetchResponseDto.serializer(),
                 FetchResponseDto(res.code, res.message, headers, bodyText, finalUrl, null, bodyBase64),
             )
         } catch (e: Throwable) {
-            logcat(LogPriority.ERROR, e) { "fetch($url) failed" }
+            // Without the query or fragment: a search's terms or a plugin's token would reach shared crash logs.
+            logcat(LogPriority.ERROR, e) { "fetch(${loggableUrl(url)}) failed" }
             onFailure(e)
-            JSON.encodeToString(
+            LnPluginHost.JSON.encodeToString(
                 FetchResponseDto.serializer(),
                 FetchResponseDto(0, "", emptyMap(), "", url, e.message ?: e.javaClass.simpleName, null),
             )
@@ -125,6 +131,13 @@ class LnHostBridge(
         if (value == null) pref.delete() else pref.set(value)
     }
 
+    /** Everything [pluginId] has stored, in a stable order, so a change to any of it can be told apart. */
+    fun storageSnapshot(pluginId: String): String {
+        val scope = lnStorageScope(pluginId)
+        return preferenceStore.getAll().filterKeys { it.startsWith(scope) }.toSortedMap()
+            .entries.joinToString("\u0000") { (key, value) -> "$key=$value" }
+    }
+
     fun log(level: String, message: String) {
         when (level.lowercase()) {
             "error" -> logcat(LogPriority.ERROR) { message }
@@ -134,44 +147,47 @@ class LnHostBridge(
         }
     }
 
-    private fun scopePrefix(pluginId: String): String = lnStorageScope(pluginId)
-
-    private fun scopedKey(pluginId: String, key: String): String = "${scopePrefix(pluginId)}$key"
+    private fun scopedKey(pluginId: String, key: String): String = "${lnStorageScope(pluginId)}$key"
 
     /**
-     * lnreader's FetchInit allows `headers` as a plain object or Headers instance, `body` as
-     * string or FormData. The bridge accepts only the JSON-friendly subset; the runtime serializes
-     * FormData to a urlencoded string before it reaches here.
+     * lnreader's FetchInit allows `headers` as a plain object or Headers instance, `body` as string or
+     * FormData; the runtime flattens a Headers instance and sends FormData as `multipart` field pairs.
+     * Each field is read on its own, so one off-shape field (an array for headers, an object for a body)
+     * drops alone rather than the multipart or binary body beside it.
      */
-    // internal (not private) so the lenient parse fallback is unit-testable.
     internal fun parseFetchOpts(optsJson: String): FetchOpts {
         if (optsJson.isBlank() || optsJson == "{}") return FetchOpts()
-        return try {
-            JSON.decodeFromString(FetchOpts.serializer(), optsJson)
-        } catch (_: Throwable) {
-            // Fallback: pick out fields manually so a malformed `body` doesn't abort the whole call.
-            val obj = JSON.parseToJsonElement(optsJson).jsonObject
-            FetchOpts(
-                method = obj["method"]?.jsonPrimitive?.contentOrNull,
-                headers = (obj["headers"] as? JsonObject)
-                    ?.mapValues { it.value.jsonPrimitive.content },
-                body = obj["body"]?.let {
-                    if (it is JsonPrimitive) it.content else it.toString()
-                },
-            )
-        }
+        val obj = LnPluginHost.JSON.parseToJsonElement(optsJson).jsonObject
+        fun <T> field(name: String, serializer: KSerializer<T>): T? =
+            obj[name]?.let { runCatching { LnPluginHost.JSON.decodeFromJsonElement(serializer, it) }.getOrNull() }
+        return FetchOpts(
+            method = field("method", String.serializer()),
+            // A browser sends a null header value as the text "null", as `content` reads it.
+            headers = (obj["headers"] as? JsonObject)?.mapValues {
+                (it.value as? JsonPrimitive)?.content
+                    ?: it.value.toString()
+            },
+            body = obj["body"]?.takeIf {
+                it !is JsonNull
+            }?.let { if (it is JsonPrimitive) it.content else it.toString() },
+            multipart = field("multipart", ListSerializer(ListSerializer(String.serializer()))),
+            bodyBase64 = field("bodyBase64", String.serializer()),
+            binary = field("binary", Boolean.serializer()) ?: false,
+            encoding = field("encoding", String.serializer()),
+        )
     }
 
-    @Serializable
     internal data class FetchOpts(
         val method: String? = null,
         val headers: Map<String, String>? = null,
         val body: String? = null,
         // Field pairs for a multipart/form-data body (set by fetchApi for FormData posts).
         val multipart: List<List<String>>? = null,
-        // Set by fetchProto: base64 request body + flag to return the response base64 (binary-safe).
+        // A typed-array body or fetchProto: base64 request body + flag to return the response base64 too.
         val bodyBase64: String? = null,
         val binary: Boolean = false,
+        // fetchText's charset override, a Java charset name ("gbk").
+        val encoding: String? = null,
     )
 
     @Serializable
@@ -184,33 +200,11 @@ class LnHostBridge(
         val error: String?,
         val bodyBase64: String? = null,
     )
-
-    companion object {
-        val JSON: Json = Json {
-            ignoreUnknownKeys = true
-            isLenient = true
-            encodeDefaults = true
-        }
-    }
 }
 
-/**
- * The jar's cookies plus the ones a plugin set in its own Cookie header, the plugin's winning by name.
- * OkHttp replaces a request's Cookie header with the jar's whenever the jar holds any for the url, so
- * without this a plugin's age gate or read token never reached a site that had set a cookie itself.
- */
-private class WithPluginCookies(private val jar: CookieJar, header: String) : CookieJar {
-    private val pairs = header.split(';').mapNotNull { part ->
-        part.trim().takeIf { '=' in it }?.let { it.substringBefore('=').trim() to it.substringAfter('=').trim() }
-    }
+private fun MediaType.isText(): Boolean =
+    type == "text" || listOf("json", "xml", "javascript", "html", "x-www-form-urlencoded").any { it in subtype }
 
-    override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        val own = pairs.mapNotNull { (name, value) ->
-            runCatching { Cookie.Builder().name(name).value(value).domain(url.host).build() }.getOrNull()
-        }
-        val names = own.mapTo(HashSet()) { it.name }
-        return jar.loadForRequest(url).filterNot { it.name in names } + own
-    }
-
-    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) = jar.saveFromResponse(url, cookies)
-}
+internal fun loggableUrl(url: String): String =
+    url.toHttpUrlOrNull()?.newBuilder()?.query(null)?.fragment(null)?.build()?.toString()
+        ?: url.substringBefore('?').substringBefore('#')

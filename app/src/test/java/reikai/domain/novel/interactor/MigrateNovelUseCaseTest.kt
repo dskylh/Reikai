@@ -1,14 +1,20 @@
 package reikai.domain.novel.interactor
 
 import io.kotest.matchers.collections.shouldContainExactlyInAnyOrder
+import io.kotest.matchers.shouldBe
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Test
+import reikai.data.novel.NovelChapterSyncRules
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstones
 import reikai.domain.db.PassThroughTransactions
+import reikai.domain.library.FakeLibraryHiddenRepository
+import reikai.domain.library.HideSeries
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelMergeManager
 import reikai.domain.novel.NovelRepository
@@ -16,6 +22,9 @@ import reikai.domain.novel.model.Novel
 import reikai.domain.novel.model.NovelChapter
 import reikai.domain.novel.model.NovelMigrationFlag
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
+import reikai.domain.readinglog.NovelChapterPace
+import reikai.domain.readinglog.ReadingPaceRepository
 import reikai.novel.download.NovelDownloadManager
 import tachiyomi.core.common.preference.InMemoryPreferenceStore
 import tachiyomi.domain.library.service.LibraryPreferences
@@ -32,10 +41,10 @@ class MigrateNovelUseCaseTest {
     private fun useCase(
         novelChapterRepository: NovelChapterRepository,
         novelDownloadManager: NovelDownloadManager,
+        readingPace: ReadingPaceRepository = NoReadingPace,
     ) = MigrateNovelUseCase(
         novelChapterRepository = novelChapterRepository,
         getNovelCategories = mockk(relaxed = true),
-        setNovelCategories = mockk(relaxed = true),
         novelMergeManager = mockk<NovelMergeManager>(relaxed = true) {
             coEvery { computeRelatedIds(any()) } returns longArrayOf()
         },
@@ -43,15 +52,18 @@ class MigrateNovelUseCaseTest {
         updateNovel = mockk(relaxed = true),
         coverCache = mockk(relaxed = true),
         getNovelTracks = mockk(relaxed = true),
-        upsertNovelTrack = mockk(relaxed = true),
+        upsertNovelTrack = mockk { coEvery { awaitAll(any()) } returns true },
         sourceManager = mockk(relaxed = true),
         novelRepository = mockk<NovelRepository>(relaxed = true) { coEvery { updateAll(any()) } returns true },
         libraryPreferences = LibraryPreferences(InMemoryPreferenceStore()),
         transactions = PassThroughTransactions,
-        sourceTracker = mockk(relaxed = true),
-        novelHistoryRepository = mockk(relaxed = true),
-        chapterNumberOverrides = NoChapterNumberOverrides,
+        swapEffects = mockk(relaxed = true),
+        novelHistoryRepository = mockk(relaxed = true) { coEvery { upsertAllNovelHistory(any()) } returns true },
+        syncRules = NovelChapterSyncRules(NoChapterNumberOverrides, InMemoryChapterCopyMarks(), NoChapterTombstones),
         readingLog = NoReadingLog,
+        readingPace = readingPace,
+        hideSeries = HideSeries(FakeLibraryHiddenRepository(), mockk(relaxed = true), mockk(relaxed = true)),
+        carryCustomInfo = mockk(relaxed = true),
     )
 
     @Test
@@ -74,6 +86,34 @@ class MigrateNovelUseCaseTest {
         // so anything still queued survived and kept downloading into the source just left behind.
         coVerify { downloadManager.awaitDeleteNovel(match { it.id == 1L }) }
         verify(exactly = 0) { downloadManager.deleteChapters(any()) }
+    }
+
+    @Test
+    fun `a matched chapter keeps the read-aloud share of the history it carries`() = runTest {
+        val repo = mockk<NovelChapterRepository>(relaxed = true) {
+            coEvery { getByNovelId(1L) } returns listOf(chapter(1, 1.0, read = true))
+            coEvery { getByNovelId(2L) } returns listOf(chapter(10, 1.0))
+            coEvery { updateAll(any()) } returns true
+        }
+        val kept = mutableListOf<Pair<Long, Long>>()
+        val pace = object : ReadingPaceRepository by NoReadingPace {
+            override suspend fun novelChapterPace(novelIds: List<Long>) =
+                listOf(NovelChapterPace(novelId = 1, chapterId = 1, url = "u1", words = 2_000, listenedMs = 400))
+
+            override suspend fun keepListenedTime(chapterId: Long, ms: Long) {
+                kept += chapterId to ms
+            }
+        }
+
+        useCase(repo, mockk(relaxed = true), pace)(
+            novel(1),
+            novel(2),
+            setOf(NovelMigrationFlag.CHAPTER),
+            replace = false,
+            skipTargetRefresh = true,
+        )
+
+        kept shouldBe listOf(10L to 400L)
     }
 
     private fun chapter(id: Long, number: Double, read: Boolean = false) = NovelChapter(

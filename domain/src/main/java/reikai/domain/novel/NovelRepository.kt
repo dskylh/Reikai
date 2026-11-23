@@ -15,8 +15,18 @@ import kotlin.time.Instant
 interface NovelRepository {
     suspend fun getAll(): List<Novel>
     suspend fun getById(id: Long): Novel?
+
+    /** The stored novels among [ids], in one read rather than one per id. */
+    suspend fun getByIds(ids: List<Long>): List<Novel>
     suspend fun getByUrlAndSource(url: String, source: String): Novel?
     suspend fun getFavorites(): List<Novel>
+
+    /** Clears every novel's reader settings; false when the write failed. Called by `ResetEntryViewerFlags`. */
+    suspend fun resetViewerFlags(): Boolean
+
+    /** Writes [flag] into the [mask] bits of one novel's viewer flags in one statement, leaving the rest; false
+     *  when the write failed. */
+    suspend fun setViewerFlags(id: Long, flag: Long, mask: Long): Boolean
 
     /** Non-favorite novels with read progress (read chapters or a mid-chapter position), for the
      *  read-entries backup option. Twin of
@@ -62,6 +72,7 @@ interface NovelRepository {
      * UpdatesFeedFilterConformanceTest and RecentsCategoryFilterConformanceTest. [after] is a lower bound on the
      * fetch date and [limit] caps the row count, applied after the filters. Downloaded stays a Kotlin filter on
      * both content types, since download state lives on disk.
+     * [seriesMerging] is the library's merging switch: on, a merged series with any hidden member is left out.
      */
     fun getFilteredNovelUpdatesAsFlow(
         after: Instant,
@@ -71,6 +82,7 @@ interface NovelRepository {
         bookmarked: Boolean?,
         includedCategories: List<Long>,
         excludedCategories: List<Long>,
+        seriesMerging: Boolean,
     ): Flow<List<NovelUpdateWithRelations>>
 
     /** The library by source and url, for the browse, search and feed lists; silent on a write outside it. */
@@ -78,6 +90,9 @@ interface NovelRepository {
 
     /** The stored novel, emitted again only when its row changes, not on another novel's write. */
     fun getByUrlAndSourceAsFlow(url: String, source: String): Flow<Novel?>
+
+    /** The stored novel by its id, which outlives a change of address, emitted again when its row changes. */
+    fun getByIdAsFlow(id: Long): Flow<Novel?>
 
     /** The new row's id, or null when the source already lists this novel or the write failed. */
     suspend fun insert(novel: Novel): Long?

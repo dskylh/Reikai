@@ -2,13 +2,18 @@ package reikai.data.novel
 
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
+import io.mockk.coEvery
 import io.mockk.mockk
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
 import mihon.domain.extension.model.ContentWarning
 import org.junit.jupiter.api.Test
+import reikai.data.novel.NovelChapterSyncRules
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstones
 import reikai.domain.novel.model.Novel
+import reikai.novel.host.ChapterItem
 import reikai.novel.host.SourceNovel
 import reikai.novel.source.NovelExtensionFormat
 import reikai.novel.source.NovelFilterState
@@ -26,19 +31,50 @@ class NovelPageWalkTest {
             walkNovelPages(
                 novel = Novel.create().copy(id = 1L, url = "/novel", totalPages = 5L),
                 source = source,
-                fromPage = 2L,
+                walkedThrough = 1L,
                 toPage = 5L,
                 novelChapterRepository = mockk(),
                 novelRepository = mockk(),
                 libraryPreferences = mockk(),
-                numberOverrides = NoChapterNumberOverrides,
+                syncRules = NovelChapterSyncRules(
+                    NoChapterNumberOverrides,
+                    InMemoryChapterCopyMarks(),
+                    NoChapterTombstones,
+                ),
             )
         }
 
         source.pagesEntered shouldBe listOf("2")
     }
 
-    private class CancellingSource(private val cancelOnPage: String) : NovelSource {
+    @Test
+    fun `a walk cancelled while it writes a page's chapters stops there`() = runTest {
+        val source = CancellingSource(cancelOnPage = null)
+
+        shouldThrow<CancellationException> {
+            walkNovelPages(
+                novel = Novel.create().copy(id = 1L, url = "/novel", totalPages = 5L),
+                source = source,
+                walkedThrough = 1L,
+                toPage = 5L,
+                novelChapterRepository = mockk {
+                    coEvery { getByNovelId(any()) } throws CancellationException("stopped")
+                },
+                novelRepository = mockk(),
+                libraryPreferences = mockk(),
+                syncRules = NovelChapterSyncRules(
+                    NoChapterNumberOverrides,
+                    InMemoryChapterCopyMarks(),
+                    NoChapterTombstones,
+                ),
+            )
+        }
+
+        source.pagesEntered shouldBe listOf("2")
+    }
+
+    /** Cancels on [cancelOnPage]; any other page lists one chapter. */
+    private class CancellingSource(private val cancelOnPage: String?) : NovelSource {
         val pagesEntered = mutableListOf<String>()
 
         override val id = "src"
@@ -54,7 +90,10 @@ class NovelPageWalkTest {
         override suspend fun parsePage(novelPath: String, page: String): SourceNovel? {
             pagesEntered += page
             if (page == cancelOnPage) throw CancellationException("refresh cancelled")
-            return null
+            return SourceNovel(
+                path = novelPath,
+                chapters = listOf(ChapterItem(name = "Chapter $page", path = "/c/$page")),
+            )
         }
 
         override suspend fun parseNovel(novelPath: String): SourceNovel = unused()

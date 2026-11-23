@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -87,48 +88,62 @@ import tachiyomi.presentation.core.util.collectAsState
 /*
  * The novel half of the reader's settings sheet, in tsundoku's look: the rows a reader adjusts while
  * looking at the page. Settings -> Novel reader writes the same values for every row except this novel's
- * rotation, the text size and the page colours, which live here and on the reader's Theme and Text size
- * bar buttons. Read aloud is a novel's tab alone.
+ * own reading mode, rotation and chapter display, the text size and the page colours, which live here and on
+ * the reader's Theme and Text size bar buttons. Read aloud is a novel's tab alone.
  */
 
 /** Words the split threshold steps by, across its 20 to 2000 range. */
 private const val AUTO_SPLIT_STEP = 10
 
 /**
- * This novel's rotation, then how the text is drawn: the renderer, the font and its size, the paragraphs
- * and the margins around them.
+ * This novel's reading mode, rotation and renderer, then how the text is drawn: the font and its size, the
+ * paragraphs and the margins around them.
  */
 @Composable
 internal fun ColumnScope.NovelReadingPage(pages: ReaderSettingsPages.Novel) {
     val preferences = pages.preferences
 
     HeadingItem(MR.strings.pref_category_for_this_series)
-    val orientation by pages.orientation.collectAsState(null)
-    EntryRotationRow(orientation) { pages.onChangeOrientation(it.flagValue) }
-
-    HeadingItem(MR.strings.pref_category_text)
-    val renderingModePref = preferences.readerRenderingMode()
-    val renderingMode by renderingModePref.collectAsState()
-    SettingsChipRow(MR.strings.pref_novel_rendering_mode) {
-        NovelRenderingMode.entries.forEach {
-            FilterChip(
-                selected = renderingMode == it,
-                onClick = { renderingModePref.set(it) },
-                label = { Text(stringResource(it.titleRes)) },
-            )
-        }
-    }
-    val pageLayoutPref = preferences.readerPageLayout()
-    val pageLayout by pageLayoutPref.collectAsState()
+    // In manga's order: reading mode, rotation, then how the chapter is drawn. Each Default follows Settings ->
+    // Novel reader, so the sheet offers no second row for the default.
+    val ownLayout by pages.textSettings.pageLayout.collectAsState(null)
     SettingsChipRow(MR.strings.pref_category_reading_mode) {
+        FilterChip(
+            selected = ownLayout == null,
+            onClick = { pages.textSettings.setPageLayout(null) },
+            label = { Text(stringResource(MR.strings.label_default)) },
+        )
         NovelPageLayout.entries.forEach {
             FilterChip(
-                selected = pageLayout == it,
-                onClick = { pageLayoutPref.set(it) },
+                selected = ownLayout == it,
+                onClick = { pages.textSettings.setPageLayout(it) },
                 label = { Text(stringResource(it.titleRes)) },
             )
         }
     }
+    val orientation by pages.orientation.collectAsState(null)
+    EntryRotationRow(orientation) { pages.onChangeOrientation(it.flagValue) }
+    // The renderer this novel keeps, for a book that only reads well in one.
+    val ownMode by pages.textSettings.renderingMode.collectAsState(null)
+    SettingsChipRow(MR.strings.pref_novel_rendering_mode) {
+        FilterChip(
+            selected = ownMode == null,
+            onClick = { pages.textSettings.setRenderingMode(null) },
+            label = { Text(stringResource(MR.strings.label_default)) },
+        )
+        NovelRenderingMode.entries.forEach {
+            FilterChip(
+                selected = ownMode == it,
+                onClick = { pages.textSettings.setRenderingMode(it) },
+                label = { Text(stringResource(it.titleRes)) },
+            )
+        }
+    }
+
+    HeadingItem(MR.strings.pref_category_text)
+    val pageLayout by pages.textSettings.effectivePageLayout.collectAsState()
+    // Where manga's sheet has it, beside the paged reading it applies to.
+    if (pageLayout.isPaged) DualPageViewRows(preferences.readerDualPageView(), preferences.readerSpreadGap())
     FontRow(preferences.readerFontFamily(), pages.installedFonts)
     val fontSize by preferences.readerFontSize().collectAsState()
     StepperItem(
@@ -213,7 +228,7 @@ internal fun ColumnScope.NovelAppearancePage(pages: ReaderSettingsPages.Novel) {
     HeadingItem(MR.strings.pref_category_theme)
     // A radio, not a checkbox: following the system is left by picking a swatch, never by unticking it.
     RadioItem(
-        label = stringResource(MR.strings.pref_novel_theme_follow_system),
+        label = stringResource(MR.strings.follow_system),
         selected = followSystem,
         onClick = pages.textSettings::followSystemTheme,
     )
@@ -228,7 +243,7 @@ internal fun ColumnScope.NovelAppearancePage(pages: ReaderSettingsPages.Novel) {
         ),
     )
     // Either colour picked by hand is the custom theme; the other keeps what the page shows now.
-    PageColorRow(MR.strings.pref_novel_background_color, readerBackgroundColorInt(shown.background)) {
+    PageColorRow(MR.strings.pref_reader_theme, readerBackgroundColorInt(shown.background)) {
         pages.textSettings.setThemeColors(it, shown.textColor)
     }
     PageColorRow(MR.strings.pref_novel_text_color, readerTextColorInt(shown.textColor)) {
@@ -240,6 +255,9 @@ internal fun ColumnScope.NovelAppearancePage(pages: ReaderSettingsPages.Novel) {
         titleFormat = preferences.readerChapterTitleFormat(),
         progressLabel = MR.strings.pref_show_reading_progress,
         showProgress = preferences.readerShowProgressPercentage(),
+        showTimeLeft = preferences.readerShowTimeLeft(),
+        progressSize = preferences.readerProgressSize(),
+        progressBacked = preferences.readerProgressBacked(),
         fullscreen = preferences.readerFullscreen(),
         drawUnderCutout = preferences.readerDrawUnderCutout(),
         keepScreenOn = preferences.readerKeepScreenOn(),
@@ -252,16 +270,18 @@ internal fun ColumnScope.NovelAppearancePage(pages: ReaderSettingsPages.Novel) {
         )
     }
     // A flash clears a page turn's ghosting; a scroll has no turn to flash on.
-    val pageLayout by preferences.readerPageLayout().collectAsState()
+    val pageLayout by pages.textSettings.effectivePageLayout.collectAsState()
     if (pageLayout.isPaged) ReaderFlashRows(ReaderFlash.novel(preferences))
 
-    NovelChapterTextRows(preferences)
+    // The renderer this novel draws with: its own choice, else the default.
+    val ownMode by pages.textSettings.renderingMode.collectAsState(null)
+    val defaultMode by preferences.readerRenderingMode().collectAsState()
+    NovelChapterTextRows(preferences, ownMode ?: defaultMode)
 }
 
 /** The rows of Settings -> Novel reader -> Chapter text that change what the page shows, in its order. */
 @Composable
-private fun ColumnScope.NovelChapterTextRows(preferences: NovelPreferences) {
-    val renderingMode by preferences.readerRenderingMode().collectAsState()
+private fun ColumnScope.NovelChapterTextRows(preferences: NovelPreferences, renderingMode: NovelRenderingMode) {
     val autoSplit by preferences.readerAutoSplitText().collectAsState()
     val sourceCssPriority by preferences.readerSourceCssPriority().collectAsState()
 
@@ -305,7 +325,8 @@ private fun ColumnScope.NovelChapterTextRows(preferences: NovelPreferences) {
 
 /** Seamless chapters, taps and swipes, and the volume keys; auto-scroll sits above, shared with manga. */
 @Composable
-internal fun ColumnScope.NovelControlsPage(preferences: NovelPreferences) {
+internal fun ColumnScope.NovelControlsPage(pages: ReaderSettingsPages.Novel) {
+    val preferences = pages.preferences
     HeadingItem(MR.strings.pref_category_scrolling)
     val seamless by preferences.readerSeamlessChapters().collectAsState()
     if (seamless) {
@@ -323,7 +344,7 @@ internal fun ColumnScope.NovelControlsPage(preferences: NovelPreferences) {
 
     HeadingItem(MR.strings.pref_category_gestures)
     // The open mode's layout, as manga's sheet shows its open viewer's.
-    val pageLayout by preferences.readerPageLayout().collectAsState()
+    val pageLayout by pages.textSettings.effectivePageLayout.collectAsState()
     NovelTapZonesRows(preferences, pageLayout.isPaged)
     if (pageLayout.isPaged) {
         CheckboxItem(
@@ -338,10 +359,21 @@ internal fun ColumnScope.NovelControlsPage(preferences: NovelPreferences) {
             pref = preferences.readerSwipeGestures(),
         )
     }
-    CheckboxItem(
-        label = stringResource(MR.strings.pref_novel_text_selectable),
-        pref = preferences.readerTextSelectable(),
+    // A spread selects no text (NovelViewportSettings.selectsText), so the switch would do nothing there.
+    val dualPageView by preferences.readerDualPageView().collectAsState()
+    val configuration = LocalConfiguration.current
+    val spread = sheetDualPageRowsShown(
+        pageLayout.isPaged,
+        dualPageView,
+        configuration.screenWidthDp,
+        configuration.screenHeightDp,
     )
+    if (!spread) {
+        CheckboxItem(
+            label = stringResource(MR.strings.pref_novel_text_selectable),
+            pref = preferences.readerTextSelectable(),
+        )
+    }
 
     HeadingItem(MR.strings.pref_reader_navigation)
     val showNavigator by preferences.readerShowNavigator().collectAsState()
@@ -356,30 +388,12 @@ internal fun ColumnScope.NovelControlsPage(preferences: NovelPreferences) {
             ReaderRailRows(onLeft = preferences.readerRailOnLeft(), height = preferences.readerRailHeight())
         }
     }
-    val volumeKeys by preferences.readerUseVolumeButtons().collectAsState()
-    CheckboxItem(
-        label = stringResource(MR.strings.pref_read_with_volume_keys),
-        pref = preferences.readerUseVolumeButtons(),
+    VolumeKeyRows(
+        enabled = preferences.readerUseVolumeButtons(),
+        inverted = preferences.readerVolumeButtonsInverted(),
+        scrollFraction = preferences.readerVolumeButtonsFraction(),
+        scrolls = !pageLayout.isPaged,
     )
-    if (volumeKeys) {
-        CheckboxItem(
-            label = stringResource(MR.strings.pref_read_with_volume_keys_inverted),
-            pref = preferences.readerVolumeButtonsInverted(),
-        )
-    }
-    // A press turns a whole page when paged, so there is no distance to choose.
-    if (volumeKeys && !pageLayout.isPaged) {
-        val percentPref = preferences.readerVolumeButtonsFraction().scaled(ReaderRanges.PERCENT)
-        val percent by percentPref.collectAsState()
-        SliderItem(
-            value = percent,
-            valueRange = ReaderRanges.volumeKeyScrollPercent,
-            label = stringResource(MR.strings.pref_volume_keys_scroll_amount),
-            valueString = "$percent%",
-            onChange = percentPref::set,
-            pillColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-        )
-    }
 }
 
 /** The tap layout, its inversion where it has something to invert, and the bottom layout's zone height. */
@@ -394,8 +408,6 @@ private fun ColumnScope.NovelTapZonesRows(preferences: NovelPreferences, paged: 
         selected = layout.ordinal,
         onSelect = { preferences.setReaderTapLayout(paged, NovelTapLayout.entries[it]) },
         layout = layout,
-        offersInvert = layout.offersInvert,
-        invertModes = layout.invertModes,
         invert = invert,
         onInvert = invertPref::set,
         bottomZoneHeight = preferences.readerTapBottomZoneHeight(),
@@ -499,7 +511,7 @@ private fun FontItem(label: String, summary: String?, selected: Boolean, onClick
 private fun FontRow(pref: Preference<String>, installedFonts: suspend () -> List<NovelFont>) {
     val family by pref.collectAsState()
     var picking by remember { mutableStateOf(false) }
-    val defaultLabel = stringResource(MR.strings.pref_novel_font_default)
+    val defaultLabel = stringResource(MR.strings.label_default)
 
     PickerRow(MR.strings.pref_novel_font, readerFontLabel(family, defaultLabel)) { picking = true }
 
@@ -597,12 +609,11 @@ internal fun ColumnScope.NovelReadAloudPage(preferences: NovelPreferences) {
         TtsHighlightColors.highlight,
         MR.strings.pref_tts_highlight_color,
     )
-    // Underline and outline leave the text's own colour alone.
-    if (style == TtsHighlightStyle.BACKGROUND) {
+    if (style.recolorsText) {
         TtsColorRow(
             preferences.readerTtsHighlightTextColor(),
             TtsHighlightColors.text,
-            MR.strings.pref_tts_highlight_text_color,
+            MR.strings.pref_novel_text_color,
         )
     }
 }
@@ -610,7 +621,7 @@ internal fun ColumnScope.NovelReadAloudPage(preferences: NovelPreferences) {
 /** The engine, only offered when more than one is installed. A new engine stops playback. */
 @Composable
 private fun EngineRow(preferences: NovelPreferences, options: TtsOptions) {
-    if (options.engines.size <= 1) return
+    if (!options.offersEngineChoice) return
     val enginePref = preferences.readerTtsEngine()
     val engine by enginePref.collectAsState()
     var picking by remember { mutableStateOf(false) }
@@ -637,12 +648,12 @@ private fun EngineRow(preferences: NovelPreferences, options: TtsOptions) {
 private fun VoiceLanguagesRow(preferences: NovelPreferences, options: TtsOptions) {
     val languagesPref = preferences.readerTtsLanguages()
     val selected by languagesPref.collectAsState()
+    if (!options.offersLanguageChoice) return
     val languages = remember(options) { options.languageNames() }
-    if (languages.size <= 1) return
     var picking by remember { mutableStateOf(false) }
     PickerRow(
         labelRes = MR.strings.pref_tts_languages,
-        value = options.languagesLabel(selected).ifEmpty { stringResource(MR.strings.all) },
+        value = options.languagesLabel(selected, stringResource(MR.strings.all)),
         onClick = { picking = true },
     )
     if (picking) {

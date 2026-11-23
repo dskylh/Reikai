@@ -15,10 +15,17 @@ import org.junit.jupiter.api.Test
 import reikai.data.novel.NovelChapterRepositoryImpl
 import reikai.data.novel.NovelHistoryRepositoryImpl
 import reikai.data.novel.NovelRepositoryImpl
+import reikai.domain.chapter.InMemoryChapterCopyMarks
 import reikai.domain.chapter.NoChapterNumberOverrides
+import reikai.domain.chapter.NoChapterTombstoneRepository
+import reikai.domain.chapter.NoLocalVolumes
+import reikai.domain.chapter.NoVolumePicks
 import reikai.domain.db.PassThroughTransactions
+import reikai.domain.library.FakeLibraryManualOrderRepository
 import reikai.domain.merge.RestoreMergeGroups
+import reikai.domain.novel.local.NoLocalNovelLanguages
 import reikai.domain.readinglog.NoReadingLog
+import reikai.domain.readinglog.NoReadingPace
 import tachiyomi.data.Database
 import tachiyomi.data.DatabaseBindings
 
@@ -79,6 +86,9 @@ class NovelRestorerChapterReadsTest {
     }
 
     private suspend fun restore() = NovelRestorer(
+
+        tombstones = NoChapterTombstoneRepository,
+        manualOrder = FakeLibraryManualOrderRepository(),
         novelRepository = NovelRepositoryImpl(database),
         novelChapterRepository = chapters,
         categoryRepository = mockk(relaxed = true),
@@ -87,7 +97,12 @@ class NovelRestorerChapterReadsTest {
         setCustomNovelInfo = mockk(relaxed = true),
         novelHistoryRepository = NovelHistoryRepositoryImpl(database),
         chapterNumberOverrides = NoChapterNumberOverrides,
+        copyMarks = InMemoryChapterCopyMarks(),
+        localVolumes = NoLocalVolumes,
+        volumePicks = NoVolumePicks,
         readingLog = NoReadingLog,
+        readingPace = NoReadingPace,
+        localNovelLanguages = NoLocalNovelLanguages,
     ).restore(
         BackupNovel(
             source = "src",

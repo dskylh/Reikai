@@ -52,16 +52,17 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Tachiyomi">
 
+        <!-- RK: documentLaunchMode never, so a share sheet's NEW_DOCUMENT and MULTIPLE_TASK cannot open a
+             second copy of the app in a Recents card of its own; it joins the app's task instead -->
+        <!-- RK: the main screen under reikai.util.MainActivityTarget, a name no launcher entry has, since
+             .ui.main.MainActivity is now the build's own icon below and goes off while another is picked -->
         <activity
-            android:name=".ui.main.MainActivity"
+            android:name="reikai.util.MainActivityTarget"
+            android:documentLaunchMode="never"
             android:exported="true"
             android:launchMode="singleTop"
             android:theme="@style/Theme.Tachiyomi.SplashScreen">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
+            <!-- RK: the launcher entry and its shortcuts are on the app icon aliases below -->
 
             <!-- Legacy deeplink to add extension store -->
             <intent-filter android:label="@string/action_addExtensionStore">
@@ -112,11 +113,465 @@
                 <data android:pathPattern=".*\\..*\\..*\\..*\\..*\\..*\\..*\\.tachibk" />
             </intent-filter>
 
+            <!-- RK: books and comic archives opened with or shared to the app, copied into the local sources -->
+            <intent-filter android:label="@string/local_import_title">
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="application/epub+zip" />
+                <data android:mimeType="application/vnd.comicbook+zip" />
+                <data android:mimeType="application/x-cbz" />
+                <data android:mimeType="application/vnd.comicbook-rar" />
+                <data android:mimeType="application/x-cbr" />
+                <data android:mimeType="application/x-cb7" />
+            </intent-filter>
+
+        </activity>
+
+        <!-- RK: one launcher entry per app icon, MainActivityTarget behind each, and Settings > Appearance >
+             App icon switches between them. Names never change or go: a launcher keeps an icon the user picked
+             by its name, across updates. A launcher drops the pinned shortcuts of an entry that stops being one,
+             so each build's own icon stays on the entry its shipped builds had: .ui.main.MainActivity on release,
+             the own alias on nightly and debug, whose builds launched from it since the aliases arrived. -->
+        <activity-alias
+            android:name=".ui.main.MainActivity"
+            android:enabled="@bool/launcher_own_on_legacy_entry"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_own"
+            android:roundIcon="@mipmap/ic_launcher_own"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
             <!--suppress AndroidDomInspection -->
             <meta-data
                 android:name="android.app.shortcuts"
                 android:resource="@xml/shortcuts" />
-        </activity>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconCurrentStable"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_current_stable"
+            android:roundIcon="@mipmap/ic_launcher_current_stable"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconOriginalReStable"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_original_re_stable"
+            android:roundIcon="@mipmap/ic_launcher_original_re_stable"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconFlameRStable"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flame_r_stable"
+            android:roundIcon="@mipmap/ic_launcher_flame_r_stable"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconFlameReStable"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flame_re_stable"
+            android:roundIcon="@mipmap/ic_launcher_flame_re_stable"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconCurrentNightly"
+            android:enabled="@bool/launcher_icon_current_nightly"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_current_nightly"
+            android:roundIcon="@mipmap/ic_launcher_current_nightly"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconOriginalReNightly"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_original_re_nightly"
+            android:roundIcon="@mipmap/ic_launcher_original_re_nightly"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconFlameRNightly"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flame_r_nightly"
+            android:roundIcon="@mipmap/ic_launcher_flame_r_nightly"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconFlameReNightly"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flame_re_nightly"
+            android:roundIcon="@mipmap/ic_launcher_flame_re_nightly"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconCurrentDev"
+            android:enabled="@bool/launcher_icon_current_dev"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_current_dev"
+            android:roundIcon="@mipmap/ic_launcher_current_dev"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconOriginalReDev"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_original_re_dev"
+            android:roundIcon="@mipmap/ic_launcher_original_re_dev"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconFlameRDev"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flame_r_dev"
+            android:roundIcon="@mipmap/ic_launcher_flame_r_dev"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconFlameReDev"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flame_re_dev"
+            android:roundIcon="@mipmap/ic_launcher_flame_re_dev"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconMihonReStable"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_mihon_re_stable"
+            android:roundIcon="@mipmap/ic_launcher_mihon_re_stable"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconMihonReNightly"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_mihon_re_nightly"
+            android:roundIcon="@mipmap/ic_launcher_mihon_re_nightly"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconMihonReDev"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_mihon_re_dev"
+            android:roundIcon="@mipmap/ic_launcher_mihon_re_dev"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconMihonReMihonLight"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_mihon_re_mihon_light"
+            android:roundIcon="@mipmap/ic_launcher_mihon_re_mihon_light"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconMihonReMihonDark"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_mihon_re_mihon_dark"
+            android:roundIcon="@mipmap/ic_launcher_mihon_re_mihon_dark"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconCurrentOutline"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_current_outline"
+            android:roundIcon="@mipmap/ic_launcher_current_outline"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconOriginalReOutline"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_original_re_outline"
+            android:roundIcon="@mipmap/ic_launcher_original_re_outline"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconFlameROutline"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flame_r_outline"
+            android:roundIcon="@mipmap/ic_launcher_flame_r_outline"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconFlameReOutline"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_flame_re_outline"
+            android:roundIcon="@mipmap/ic_launcher_flame_re_outline"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
+
+        <activity-alias
+            android:name=".ui.main.LauncherIconMihonReOutline"
+            android:enabled="false"
+            android:exported="true"
+            android:icon="@mipmap/ic_launcher_mihon_re_outline"
+            android:roundIcon="@mipmap/ic_launcher_mihon_re_outline"
+            android:targetActivity="reikai.util.MainActivityTarget">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--suppress AndroidDomInspection -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity-alias>
 
         <activity
             android:name=".crash.CrashActivity"
@@ -189,6 +644,7 @@
              and /reader/, MangaDex uses /title/, /manga/ and /chapter/. -->
         <activity
             android:name="exh.ui.intercept.InterceptActivity"
+            android:documentLaunchMode="never"
             android:exported="true"
             android:theme="@style/Theme.Tachiyomi">
             <intent-filter>

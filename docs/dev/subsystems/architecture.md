@@ -11,7 +11,7 @@ The wiring every screen and background job sits on: how objects are built and sh
 Metro resolves dependencies in the compiler, so a missing binding is a build error and nothing is looked up by reflection at runtime. `App` implements `GraphProvider<AppGraph>` (`:core:metro`), builds the graph once per process and calls `graph.inject(this)`; anything with a `Context` reaches it as `context.appGraph`.
 
 - `AppGraph` is Mihon's graph in Mihon's order. It extends `ViewModelGraph` and `ReikaiGraph`, which holds Reikai's own `inject()` members and accessors, so a Reikai addition never edits Mihon's member list.
-- Providers that cannot be an annotated class live in binding containers: `AppBindings` (Mihon's `Json`, `XML`, `ProtoBuf` and the `@AppCoroutineScope` scope), `ReikaiBindings` (the two merge managers and the tracker-library fetcher list), and `DatabaseBindings` in `:data` (`SqlDriver`, `Database`).
+- Providers that cannot be an annotated class live in binding containers: `AppBindings` (Mihon's `Json`, `XML`, `ProtoBuf` and the `@AppCoroutineScope` scope), `ReikaiBindings` (`SourceContacts`, the built-in novel sources, `LocalVolumeOwnerRepository` over `LocalVolumeRepository`, the two merge managers and the tracker-library fetcher list), and `DatabaseBindings` in `:data` (`SqlDriver`, `Database`).
 - Every other class joins by carrying `@Inject`, with `@SingleIn(AppScope::class)` for a singleton and `@ContributesBinding(AppScope::class)` for an implementation of an interface. Migrations join a set with `@ContributesIntoSet`, ViewModels a map with `@ContributesIntoMap`.
 
 Short work an app singleton runs past the screen that asked for it (a download index save, a queue restore, a page action) goes on the one `@AppCoroutineScope` `CoroutineScope`, a `SupervisorJob` on `Dispatchers.IO` taken as a constructor parameter. Its exception handler re-throws a failure to the thread's crash handler in a debug build and logs and reports it to Crashlytics in every other, since by the time it fails the screen that started it may be gone. Manga and novel singletons share it, and a ViewModel takes it as `appScope` for a write its screen closing must not cut off, keeping only the UI follow-up on `viewModelScope`. Only owners with a real cancellation point (the reader's views, `HttpPageLoader`, the two extension installers) build their own.
@@ -24,14 +24,16 @@ Installed extensions compile against `source-api`, which resolves its dependenci
 
 ### ViewModels
 
-A screen model extends `androidx.lifecycle.ViewModel` directly and declares its own `val state: StateFlow<S>` with an explicit backing field; there is no state base class and no Voyager `ScreenModel`. Resolution goes through `ReikaiViewModelFactory`, the graph's `MetroViewModelFactory`, which `setComposeContent` provides as `LocalMetroViewModelFactory`:
+A screen model extends `androidx.lifecycle.ViewModel` directly and declares its own `val state: StateFlow<S>` with an explicit backing field; there is no state base class and no `ScreenModel`. Resolution goes through `ReikaiViewModelFactory`, the graph's `MetroViewModelFactory`, which `setComposeContent` provides as `LocalMetroViewModelFactory`:
 
 - A model whose dependencies all come from the graph carries `@ViewModelKey` and is resolved with `metroViewModel<T>()`.
 - A model that needs a call-site value (an entry id, a source id) is `@AssistedInject` with an `@AssistedFactory` keyed by `@ManualViewModelAssistedFactoryKey`, resolved with `assistedMetroViewModel<T, F> { create(...) }`.
-- The reader's models live outside any Voyager `Navigator`, so `ReaderActivity` scopes them to itself with `by viewModels { graph.viewModelFactory }`.
-- Two models are still built by hand through `viewModelFactory`: the cover model in `EntryDetailsDialog` (star-projected, built from the behavior object and keyed by `coverKey`, the source chip's entry) and `NovelSourceSettingsModel`.
+- The reader's models live outside the navigator's display, so `ReaderActivity` scopes them to itself: `ReaderViewModel` with `by viewModels { graph.viewModelFactory }`, and the assisted `NovelReaderViewModel` and `ReaderEngine` through a `viewModelFactory { initializer { } }` that calls the graph's `createManuallyAssistedFactory`.
+- Three models are still built by hand through `viewModelFactory`, without the graph: upstream's `ReaderSettingsViewModel` in `ReaderActivity`, the cover model in `EntryDetailsDialog` (star-projected, built from the behavior object and keyed by `coverKey`, the source chip's entry) and `NovelSourceSettingsModel`.
 
-Under a `Navigator`, `viewModel()` resolves against that Screen's own store, cleared on pop; tabs each get their own store that survives tab switches. The full scoping rule is in screen-conventions.md.
+A model resolved by a bare `viewModel<T>()` must not be `private`: that factory builds it by reflection, and a private top-level class is package-private in bytecode, so the screen crashes on open in every build type.
+
+On the main display, `viewModel()` resolves against that route entry's own store, cleared on pop; tabs each get their own store that survives tab switches. The full scoping rule is in screen-conventions.md.
 
 ### Preference migrations
 
@@ -41,7 +43,7 @@ A preference migration implements `Migration` with a `version` and joins the set
 
 ### Settings screens and search
 
-Each top-level Settings screen is a `SearchableSettings` object (a Voyager `Screen`) returning a list of `Preference` groups; `SettingsMainScreen` lists the root entries. Settings search builds its index from the `settingScreens` list in `SettingsSearchScreen.kt`, one entry per screen, and indexes every row with a non-blank title under a `HighlightKey` of (group, title), which is what scrolls to and highlights the row a result opens. A group heading that matches is a result of its own, keyed `HighlightKey.heading`, and opens the screen at that heading. A `CustomPreference` with a blank title (the About logo, its link icons) never becomes a result.
+Each top-level Settings screen is a `SearchableSettings` data object (a route) returning a list of `Preference` groups; `SettingsMainScreen` lists the root entries. Settings search builds its index from the `settingScreens` list in `SettingsSearchScreen.kt`, one entry per screen, and indexes every row with a non-blank title under a `HighlightKey` of (group, title), which is what scrolls to and highlights the row a result opens. A group heading that matches is a result of its own, keyed `HighlightKey.heading`, and opens the screen at that heading. A `CustomPreference` with a blank title (the About logo, its link icons) never becomes a result.
 
 `SearchableSettings.isEnabled()` suspends, because the MangaDex gate waits for the extension scan. Search resolves every gate once with `produceState` and shows nothing until they answer; Browse and sources reads the MangaDex gate the same way.
 
@@ -62,7 +64,7 @@ The layout, by subject:
 - `app/src/main/java/mihon/app/di/injekt/MetroInjektRegistrar.kt`: the fifteen Injekt bindings.
 - `app/src/main/java/mihon/app/di/ReikaiViewModelFactory.kt`: the ViewModel factory over both maps.
 - `app/src/main/java/eu/kanade/tachiyomi/util/view/ViewExtensions.kt`: `setComposeContent`, which provides `LocalMetroViewModelFactory`.
-- `core/metro/src/main/kotlin/mihon/core/metro/GraphProvider.kt`: `GraphProvider`, `metroGraph`.
+- `core/metro/src/main/kotlin/mihon/core/metro/GraphProvider.kt`: `GraphProvider`; `Utils.kt` beside it: `metroGraph`.
 - `core/metro/src/main/kotlin/mihon/core/metro/AppCoroutineScope.kt`: the app scope's qualifier; `providesAppCoroutineScope` in `AppBindings` builds it.
 - `app/src/main/java/eu/kanade/tachiyomi/App.kt`: graph construction, `initializeMigrator`, the `:error_handler` gate.
 - `app/src/main/java/mihon/core/migration/Migrator.kt` and `MigrationStrategy.kt`: `initialize`, `await`, the version-range strategies.
@@ -79,17 +81,17 @@ The layout, by subject:
 - **Changing a lazy read to a constructor parameter changes when the object is built.** A dependency whose `init` starts work then starts it wherever its owner is built, transitively: the novel library once resumed downloads through `SetNovelReadStatus` to `DeleteNovelChaptersAfterRead`. Read the type's `init` and its whole closure before promoting it, and keep a deferral as `() -> T`.
 - **A new screen joins `settingScreens`, or search never sees it.** Nothing fails; its rows are just absent.
 - **Moving a row to another group changes its `HighlightKey`.** A stale key fails silently: the result opens the screen but does not scroll.
-- **Never push a screen from `SourcePreferencesScreen`.** It hosts a Fragment behind a one-time commit guarded by `rememberSaveable`, and coming back from a pushed screen leaves the body empty.
 - **A gate read in a composable is observed state, never a bare `isEnabled()` call.** A one-shot read does not update when the preference flips, so the row appears only after the screen is recreated.
 - **Workers inject in `init`, not at the top of `doWork`.** WorkManager may call `getForegroundInfo` first, and `NovelDownloadWorker` reads an injected field there.
 - **`App.onCreate` also runs in `:error_handler`.** The migration set and the image loader's dependencies are read off the graph after that process's early return, since building them there would load WebView and could take down the crash screen.
 - **A model a test constructs keeps every parameter.** What the graph cannot fill becomes `@Assisted`, so the test seam survives; a conversion that shrinks a tested constructor breaks the test's isolation.
 - **`viewModelScope` is cancelled before `onCleared()` runs.** Cleanup written as a launch inside `onCleared()` never happens; it must be synchronous.
 - **No `flowWithLifecycle` inside a ViewModel.** The model outlives the Activity, so a captured `Lifecycle` is a dead one after rotation; use a `stateIn` with a lifecycle-aware collect instead.
-- **A screen model keeps running while its screen is hidden; its `SubscriberGate` holds updates back instead.** The library, details, Updates, History and Upcoming models of both types start their state at once and never stop it. Five seconds after the last collector leaves, the gate pauses every database query (`subscribeToList` and its siblings) and every flow marked `pausedWhileUnsubscribed`, and delivers the latest on return, so a revisit shows the last state rather than re-running the queries. The gate only travels in the coroutine context of the `stateIn` that carries it: a model's own `viewModelScope.launch` (a merge observer, a download listener) is never paused. A share that collects a model (the library and recents engines, the library adapters) stays `WhileSubscribed`, since an eager one would hold that model's gate open for good.
+- **A screen model keeps running while its screen is hidden; its `SubscriberGate` holds updates back instead.** The library, details, Updates, History and Upcoming models of both types start their state at once and never stop it. Five seconds after the last collector leaves, the gate pauses every database query (`subscribeToList` and its siblings) and every flow marked `pausedWhileUnsubscribed`, and delivers the latest on return, so a revisit shows the last state rather than re-running the queries. The gate only travels in the coroutine context of the `stateIn` that carries it: a model's own `viewModelScope.launch` (a merge observer, a download listener) is never paused. A share that collects a model (the library and recents engines, the library adapters) stays `WhileSubscribed`, since an eager one would hold that model's gate open for good. A flow shared on the app scope (the library rows) runs outside every gate, so a gated model reads it through `subscribedWhileOpen`, which stops collecting while the gate is shut.
 - **The novel merge manager and its tracker propagator form a cycle.** `ReikaiBindings` supplies the propagator as `() -> PropagateNovelTrackerLinks`, cutting it at one edge.
 - **A launch on the app scope whose failure is expected passes its own handler.** Otherwise a network failure crashes a debug build; `AutoBindOnAdd` and `PushNovelUnread` launch with a log-only `CoroutineExceptionHandler`, which replaces the scope's for that child.
 - **The checker sees what the compiler does not.** `di-interop-check.ps1` fails on an Injekt read the registrar does not bind, an unscoped or unread binding, an Injekt registration, and a ViewModel or migration left out of its multibinding; it runs from the `pre-commit` hook and CI.
+- **Nothing starts the main screen by `MainActivity`'s name.** That name is the launcher entry of a release build's own app icon, off while another icon is picked and always off on nightly and debug builds, and a start of an entry that is off fails. Notifications, widgets, shortcuts and deep links name `MainActivityTarget`, the class behind every entry; `LauncherIconsTest` fails on a start by the old name.
 
 ## Decisions
 
@@ -100,6 +102,7 @@ The layout, by subject:
 - **Two reader screens, not a hub with drill-downs.** A hub would cost every manga reader an extra tap, and a shared row shown on both screens reads as two settings.
 - **Source settings live on Browse and sources, not at the root.** MangaDex and E-Hentai were at the root only because their preferences are app-owned, which a user cannot know.
 - **Upstream's placement of rows in Advanced, Library and Reader stays** unless the row is Reikai's own; Advanced's untitled top block is the one regrouped.
+- **Each build's own app icon stays on the launcher entry its shipped builds launched from:** `.ui.main.MainActivity` on release, the own alias (`LauncherIconCurrentNightly`, `LauncherIconCurrentDev`) on nightly and debug, which shipped the aliases before any release did. A launcher removes the pinned shortcuts of an entry that stops being a launcher entry, as Pixel Launcher did on an update to per-icon aliases, and it reacts at install, before any app code runs, so a migration cannot move an entry back in time. Keeping the launcher filter on the activity itself would leave its icon impossible to hide without breaking every start of the main screen, and re-pinning after an update needs a prompt per shortcut. So `MainActivity` is open, `MainActivityTarget` subclasses it as the real activity, and every icon, the old name included, is an alias of it. The cost: a nightly last updated before the aliases loses its pinned shortcuts once, as it would have on any nightly since.
 
 ## Upstream divergences
 
@@ -110,11 +113,11 @@ The layout, by subject:
 - **A new injected class**: `@Inject`, plus `@SingleIn(AppScope::class)` if it is shared; take dependencies as constructor parameters. Code with no constructor reads `context.appGraph.x`, adding the accessor to `ReikaiGraph`.
 - **A new screen model**: `@ViewModelKey` and `@ContributesIntoMap(AppScope::class, binding = binding<ViewModel>())`, or the assisted shape for a call-site value; resolve it with `metroViewModel` / `assistedMetroViewModel`.
 - **A new preference migration**: `@Inject` and `@ContributesIntoSet(AppScope::class)`, `version` set to the next unused `versionCode`, and bump `versionCode` in `app/build.gradle.kts` to match; check whether a worker that reads the migrated state already awaits `Migrator`.
-- **A new settings screen**: a `SearchableSettings` object, an entry in `SettingsMainScreen` and in `settingScreens`.
+- **A new settings screen**: a `@Serializable data object` implementing `SearchableSettings`, registered in `reikaiEntries()` and listed in `ReikaiRoutesTest`, plus an entry in `SettingsMainScreen` and in `settingScreens` ([recipes.md](../recipes.md)).
 
 ## Tests
 
-`MetroInjektRegistrarTest` (all fifteen bindings resolve through `fullType`), `ReikaiViewModelFactoryTest` (a model resolves only once contributed), `MigratorTest` (strategy selection and ordering), `AppCoroutineScopeTest` (a failed app-scope child crashes only a debug build), plus one test per migration under `app/src/test/java/mihon/core/migration/migrations/`. `pwsh scripts/di-interop-check.ps1` runs the graph checks. Run a class with `./gradlew :app:testDebugUnitTest --tests "<FullyQualifiedClassName>"`.
+`MetroInjektRegistrarTest` (all fifteen bindings resolve through `fullType`), `ReikaiViewModelFactoryTest` (a model resolves only once contributed), `MigratorTest` (strategy selection and ordering), `AppCoroutineScopeTest` (a failed app-scope child crashes only a debug build), plus per-migration tests under `app/src/test/java/mihon/core/migration/migrations/`. `pwsh scripts/di-interop-check.ps1` runs the graph checks. Run a class with `./gradlew :app:testDebugUnitTest --tests "<FullyQualifiedClassName>"`.
 
 ## Related
 

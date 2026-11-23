@@ -2,10 +2,13 @@ package reikai.domain.source
 
 import dev.zacsweers.metro.Inject
 import eu.kanade.tachiyomi.data.cache.CoverCache
+import reikai.data.novel.NovelChapterSyncRules
 import reikai.data.novel.insertOpenedNovel
 import reikai.data.novel.refreshNovelFromSource
 import reikai.data.novel.sentName
+import reikai.domain.chapter.ChapterCopyMarkRepository
 import reikai.domain.chapter.ChapterNumberOverrideRepository
+import reikai.domain.chapter.LocalChapterTombstones
 import reikai.domain.novel.NovelChapterRepository
 import reikai.domain.novel.NovelRepository
 import reikai.domain.novel.model.Novel
@@ -17,9 +20,9 @@ import reikai.novel.source.NovelSourceManager
 import reikai.util.runCatchingCancellable
 import tachiyomi.domain.library.service.LibraryPreferences
 
-/** What a shared link opens among novels: a novel by its source and path, or a stored chapter. */
+/** What a shared link opens among novels: a stored novel, or a stored chapter. */
 sealed interface NovelLinkTarget {
-    data class Novel(val sourceId: String, val url: String) : NovelLinkTarget
+    data class Novel(val novelId: Long) : NovelLinkTarget
     data class Chapter(val novelId: Long, val chapterId: Long) : NovelLinkTarget
 }
 
@@ -34,7 +37,7 @@ class ResolveNovelLink(
     private val novelRepository: NovelRepository,
     private val novelChapterRepository: NovelChapterRepository,
     private val libraryPreferences: LibraryPreferences,
-    private val chapterNumberOverrides: ChapterNumberOverrideRepository,
+    private val syncRules: NovelChapterSyncRules,
     private val coverCache: CoverCache,
     // Built only by a chapter link's refresh, since building it reads the saved queue
     private val novelDownloadManager: () -> NovelDownloadManager,
@@ -47,7 +50,7 @@ class ResolveNovelLink(
         novelRepository: NovelRepository,
         novelChapterRepository: NovelChapterRepository,
         libraryPreferences: LibraryPreferences,
-        chapterNumberOverrides: ChapterNumberOverrideRepository,
+        syncRules: NovelChapterSyncRules,
         coverCache: CoverCache,
         novelDownloadManager: () -> NovelDownloadManager,
     ) : this(
@@ -58,7 +61,7 @@ class ResolveNovelLink(
         novelRepository,
         novelChapterRepository,
         libraryPreferences,
-        chapterNumberOverrides,
+        syncRules,
         coverCache,
         novelDownloadManager,
     )
@@ -73,7 +76,7 @@ class ResolveNovelLink(
         for (source in sources()) {
             val link = source.links?.resolve(text.trim()) ?: continue
             return when (link) {
-                is NovelLink.Novel -> NovelLinkTarget.Novel(source.id, link.path)
+                is NovelLink.Novel -> novelTarget(source, link.path)
                 is NovelLink.Chapter -> chapterTarget(source, link)
             }
         }
@@ -81,7 +84,7 @@ class ResolveNovelLink(
     }
 
     suspend fun byStoredRow(text: String): NovelLinkTarget? =
-        single(text)?.let { match -> match.stored?.let { NovelLinkTarget.Novel(match.source.id, it) } }
+        single(text)?.stored?.let { NovelLinkTarget.Novel(it.id) }
 
     suspend fun byGuess(text: String): NovelLinkTarget? {
         // A stored match names nothing, so it is never guessed again.
@@ -95,32 +98,45 @@ class ResolveNovelLink(
             runCatchingCancellable { source.parseNovel(parent) }.getOrNull()?.name
         }
         if (isBelow) return null
-        insertOpenedNovel(
+        val stored = insertOpenedNovel(
             parsed.copy(path = path),
             source.id,
             novelRepository,
             novelChapterRepository,
             libraryPreferences,
-            chapterNumberOverrides,
+            syncRules,
         ) ?: return null
-        return NovelLinkTarget.Novel(source.id, path)
+        return NovelLinkTarget.Novel(stored.id)
     }
 
-    // A novel's stored value is the spelling its row carries, which the novel screen opens by.
-    private suspend fun single(text: String) = SharedLink.parse(text)?.matchOne(
-        sources(),
-        siteOf = { it.site },
-        storedAt = { source, url -> url.takeIf { novelRepository.getByUrlAndSource(url, source.id) != null } },
-        webUrl = { source, path -> source.webUrl(path, true) },
-    )
+    private val matches = HashMap<String, SharedLink.Match<NovelSource, Novel>?>()
+
+    // A novel's stored value is its row, found by any spelling the link may be stored under. Kept per text,
+    // since a stored-row miss is followed by a guess over the same match; a resolver serves one link screen.
+    private suspend fun single(text: String) = if (text in matches) {
+        matches[text]
+    } else {
+        SharedLink.parse(text)?.matchOne(
+            sources(),
+            siteOf = { it.site },
+            storedAt = { source, url -> novelRepository.getByUrlAndSource(url, source.id) },
+            webUrl = { source, path -> source.webUrl(path, true) },
+        ).also { matches[text] = it }
+    }
 
     // A page that is not a novel's still parses on many sites; a name and something to read is the bar.
     private fun SourceNovel.isANovel() = sentName != null && (!chapters.isNullOrEmpty() || totalPages > 1)
 
+    private suspend fun novelTarget(source: NovelSource, path: String): NovelLinkTarget? =
+        storedOrOpened(source, path)?.let { NovelLinkTarget.Novel(it.id) }
+
+    // A stored row opens with no fetch; a fetch that fails answers nothing, so the next tier runs.
+    private suspend fun storedOrOpened(source: NovelSource, path: String): Novel? =
+        novelRepository.getByUrlAndSource(path, source.id)
+            ?: runCatchingCancellable { opened(source, path) }.getOrNull()
+
     private suspend fun chapterTarget(source: NovelSource, link: NovelLink.Chapter): NovelLinkTarget? {
-        val novel = novelRepository.getByUrlAndSource(link.novelPath, source.id)
-            ?: runCatchingCancellable { opened(source, link.novelPath) }.getOrNull()
-            ?: return null
+        val novel = storedOrOpened(source, link.novelPath) ?: return null
         val chapter = novelChapterRepository.getByUrlAndNovelId(link.chapterPath, novel.id)
             ?: runCatchingCancellable {
                 refreshNovelFromSource(
@@ -129,13 +145,13 @@ class ResolveNovelLink(
                     novelChapterRepository,
                     novelRepository,
                     libraryPreferences,
-                    chapterNumberOverrides,
+                    syncRules,
                     coverCache,
                     novelDownloadManager(),
                 )
                 novelChapterRepository.getByUrlAndNovelId(link.chapterPath, novel.id)
             }.getOrNull()
-        return chapter?.let { NovelLinkTarget.Chapter(novel.id, it.id) } ?: NovelLinkTarget.Novel(source.id, novel.url)
+        return chapter?.let { NovelLinkTarget.Chapter(novel.id, it.id) } ?: NovelLinkTarget.Novel(novel.id)
     }
 
     private suspend fun opened(source: NovelSource, path: String): Novel? =
@@ -145,6 +161,6 @@ class ResolveNovelLink(
             novelRepository,
             novelChapterRepository,
             libraryPreferences,
-            chapterNumberOverrides,
+            syncRules,
         )
 }
