@@ -323,6 +323,7 @@ private fun EntryDetailsSelectionBar(
         // A local or stub source has nothing to fetch, which upstream says by passing no download action.
         onDownloadClicked = { behavior.downloadSelected() }.takeIf { state.chaptersDownloadable && offers.download },
         onDeleteClicked = { behavior.deleteSelected() }.takeIf { offers.delete },
+        onPreRenderClicked = { behavior.preRenderSelected() }.takeIf { state.capabilities.novelPreRender != null },
     )
 }
 

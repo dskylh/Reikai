@@ -331,6 +331,23 @@ class NovelPreferences(
     /** The most pre-rendered audio kept, in MB. Past it the oldest renders are deleted first. */
     fun readerTtsRenderCapMb() = preferenceStore.getInt("ln_reader_tts_render_cap_mb", 1024)
 
+    /** How many chapters after the one being read are pre-rendered; 0 turns the window off. */
+    fun readerTtsRenderAhead() = preferenceStore.getInt("ln_reader_tts_render_ahead", 3)
+
+    /** How many finished chapters keep their pre-rendered audio for rewinds; older ones lose it. */
+    fun readerTtsKeepBehind() = preferenceStore.getInt("ln_reader_tts_keep_behind", 2)
+
+    /** The PC render server's address, as `http://host:port`. */
+    fun readerTtsServerUrl() = preferenceStore.getString("ln_reader_tts_server_url", "")
+
+    /** The token the PC render server issued when paired. A credential: never logged or shown. */
+    fun readerTtsServerToken() = preferenceStore.getString(Preference.privateKey("ln_reader_tts_server_token"), "")
+
+    /** The PC render server's model and voice ids, as its info call lists them. */
+    fun readerTtsServerModel() = preferenceStore.getString("ln_reader_tts_server_model", "")
+
+    fun readerTtsServerVoice() = preferenceStore.getString("ln_reader_tts_server_voice", "")
+
     /** Bold the start of each word (bionic reading) to ease skimming. */
     fun readerBionicReading() = preferenceStore.getBoolean("ln_reader_bionic_reading", false)
 

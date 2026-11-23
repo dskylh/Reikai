@@ -64,6 +64,7 @@ import mihon.icons.materialsymbols.rounded.RemoveDone
 import mihon.icons.materialsymbols.rounded.SwapCalls
 import reikai.presentation.icons.CallSplit
 import reikai.presentation.icons.Merge
+import reikai.presentation.icons.RecordVoiceOver
 import reikai.presentation.icons.ReikaiIcons
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.stringResource
@@ -80,6 +81,8 @@ fun MangaBottomActionMenu(
     onMarkPreviousAsReadClicked: (() -> Unit)? = null,
     onDownloadClicked: (() -> Unit)? = null,
     onDeleteClicked: (() -> Unit)? = null,
+    // RK: queues the selected novel chapters for read-aloud pre-rendering
+    onPreRenderClicked: (() -> Unit)? = null,
 ) {
     AnimatedVisibility(
         visible = visible,
@@ -93,7 +96,8 @@ fun MangaBottomActionMenu(
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
         ) {
             val haptic = LocalHapticFeedback.current
-            val confirm = remember { mutableStateListOf(false, false, false, false, false, false, false) }
+            // RK: an eighth slot, for Pre-render
+            val confirm = remember { mutableStateListOf(false, false, false, false, false, false, false, false) }
             var resetJob by remember { mutableStateOf<Job?>(null) }
             val onLongClickItem: (Int) -> Unit = { toConfirmIndex ->
                 haptic.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -176,6 +180,17 @@ fun MangaBottomActionMenu(
                         onClick = onDeleteClicked,
                     )
                 }
+                // RK -->
+                if (onPreRenderClicked != null) {
+                    Button(
+                        title = stringResource(MR.strings.action_pre_render),
+                        icon = ReikaiIcons.RecordVoiceOver,
+                        toConfirm = confirm[7],
+                        onLongClick = { onLongClickItem(7) },
+                        onClick = onPreRenderClicked,
+                    )
+                }
+                // RK <--
             }
         }
     }

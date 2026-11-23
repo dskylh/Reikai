@@ -10,4 +10,7 @@ enum class TtsAudioSource(val titleRes: StringResource) {
 
     /** Paragraphs are rendered to files on this phone ahead of playback; one not ready yet is spoken live. */
     PHONE(MR.strings.tts_audio_source_phone),
+
+    /** Paragraphs are rendered by a render server on the user's PC and downloaded over the local network. */
+    PC(MR.strings.tts_audio_source_pc),
 }

@@ -75,6 +75,9 @@ interface EntryDetailsBehavior {
     fun runDownloadAction(action: DownloadAction)
     fun onChapterDownloadAction(chapterId: Long, action: ChapterDownloadAction)
     fun downloadSelected()
+
+    /** Queues the selected chapters for read-aloud pre-rendering; offered only through [EntryCapabilities.novelPreRender]. */
+    fun preRenderSelected()
     fun deleteSelected()
 
     /** Confirm the bulk delete (the chapter ids captured when the confirm dialog opened). */

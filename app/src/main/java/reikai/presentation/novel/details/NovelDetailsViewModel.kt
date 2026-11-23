@@ -24,6 +24,7 @@ import eu.kanade.tachiyomi.data.download.model.Download
 import eu.kanade.tachiyomi.data.track.Tracker
 import eu.kanade.tachiyomi.data.track.TrackerManager
 import eu.kanade.tachiyomi.data.track.model.TrackMangaMetadata
+import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -60,6 +61,7 @@ import reikai.data.novel.storeRefreshedNovel
 import reikai.data.novel.syncChaptersWithNovelSource
 import reikai.data.novel.syncOpenedChapters
 import reikai.data.novel.toNovel
+import reikai.data.novel.tts.TtsRenderScheduler
 import reikai.data.novel.updateNovelFetchInterval
 import reikai.data.updateerror.refreshFailureMessage
 import reikai.domain.chapter.ChapterNumberEdit
@@ -238,6 +240,7 @@ class NovelDetailsViewModel(
     private val trackPorts: EntryTrackPorts,
     private val autoBindTrackers: AutoBindTrackers,
     private val downloadedTexts: NovelDownloadedTexts,
+    private val ttsScheduler: TtsRenderScheduler,
 ) : ViewModel() {
 
     private val subscriberGate = SubscriberGate()
@@ -1490,6 +1493,13 @@ class NovelDetailsViewModel(
     fun downloadSelected() = withSelection {
         appScope.launch { downloadManager.downloadChapters(downloadCopiesOf(it)) }.join()
         promptAddToLibraryOnFirstDownload()
+    }
+
+    /** Queues the selected chapters for read-aloud pre-rendering, first to read first. */
+    fun preRenderSelected() = withSelection { chapters ->
+        val ids = chapters.sortedByDescending { it.sourceOrder }.map { it.id }
+        appScope.launch { ttsScheduler.preRender(ids) }.join()
+        withUIContext { context.toast(context.stringResource(MR.strings.tts_pre_render_queued, ids.size)) }
     }
 
     private fun promptAddToLibraryOnFirstDownload() {

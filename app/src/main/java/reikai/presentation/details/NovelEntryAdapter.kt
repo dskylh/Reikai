@@ -107,6 +107,7 @@ class NovelEntryAdapter(
                 undatedChapterDate = UndatedChapterDate.Blank,
             ),
             capabilities = EntryCapabilities(
+                novelPreRender = NovelPreRenderCapability,
                 novelPageSelector = if (pages.size > 1) {
                     NovelPageSelectorCapability(pages = pages, pageIndex = pageIndex, isPageLoading = isPageLoading)
                 } else {
@@ -181,6 +182,10 @@ class NovelEntryAdapter(
 
     override fun downloadSelected() {
         model.downloadSelected()
+    }
+
+    override fun preRenderSelected() {
+        model.preRenderSelected()
     }
     override fun deleteSelected() {
         model.deleteSelected()

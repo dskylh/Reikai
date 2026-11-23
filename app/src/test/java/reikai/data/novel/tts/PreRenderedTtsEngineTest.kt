@@ -15,6 +15,8 @@ import reikai.domain.novel.tts.TtsAudioRepository
 import reikai.domain.novel.tts.TtsAudioSource
 import reikai.domain.novel.tts.TtsEngineInfo
 import reikai.domain.novel.tts.TtsPiece
+import reikai.domain.novel.tts.TtsQueuedChapter
+import reikai.domain.novel.tts.TtsRenderPriority
 import reikai.domain.novel.tts.TtsVoice
 import reikai.presentation.recents.EmittingPreferenceStore
 
@@ -92,6 +94,18 @@ class PreRenderedTtsEngineTest {
         override suspend fun evictOldest(maxBytes: Long) = emptyList<String>()
         override suspend fun totalBytes() = 0L
         override suspend fun clear() = Unit
+        override suspend fun enqueue(
+            chapterIds: List<Long>,
+            pinned: Boolean,
+            priority: TtsRenderPriority,
+            requestedAt: Long,
+        ) = Unit
+
+        override suspend fun nextQueued(): TtsQueuedChapter? = null
+        override suspend fun isQueued(chapterId: Long) = false
+        override suspend fun finish(chapterId: Long, rendered: Boolean) = Unit
+        override suspend fun cancelQueued(chapterIds: List<Long>) = Unit
+        override suspend fun dropChapters(chapterIds: List<Long>) = emptyList<String>()
     }
 
     private class FakeLive : NovelTtsEngine {

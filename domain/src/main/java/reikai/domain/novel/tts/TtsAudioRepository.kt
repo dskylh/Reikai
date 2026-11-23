@@ -29,6 +29,33 @@ interface TtsAudioRepository {
 
     suspend fun totalBytes(): Long
 
-    /** Drops every row. */
+    /** Drops every row, the render queue's included. */
     suspend fun clear()
+
+    /**
+     * Queues [chapterIds] for rendering. A chapter already known is queued again so its audio is checked
+     * against the current voice, keeping the higher of its two [pinned] and the earlier [priority].
+     */
+    suspend fun enqueue(chapterIds: List<Long>, pinned: Boolean, priority: TtsRenderPriority, requestedAt: Long)
+
+    /** The queued chapter to render next, window chapters first, oldest request first within each. */
+    suspend fun nextQueued(): TtsQueuedChapter?
+
+    suspend fun isQueued(chapterId: Long): Boolean
+
+    suspend fun finish(chapterId: Long, rendered: Boolean)
+
+    /** Takes queued chapters off the queue, except ones picked by hand. */
+    suspend fun cancelQueued(chapterIds: List<Long>)
+
+    /** Forgets [chapterIds] entirely, audio and queue alike; returns the files to delete. */
+    suspend fun dropChapters(chapterIds: List<Long>): List<String>
 }
+
+/** Where a chapter waits in the render queue: the sliding window's ahead of chapters picked by hand. */
+enum class TtsRenderPriority(val rank: Long) {
+    WINDOW(0),
+    MANUAL(1),
+}
+
+data class TtsQueuedChapter(val chapterId: Long, val priority: TtsRenderPriority)

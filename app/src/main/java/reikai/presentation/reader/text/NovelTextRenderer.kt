@@ -118,7 +118,7 @@ class NovelTextRenderer(
                 // The normalising walks and copies the whole chapter, which for a downloaded one with its
                 // images inlined is megabytes, so it belongs here rather than on the caller's thread.
                 val spanned = Html.fromHtml(
-                    normalizeHtmlForRendering(html, baseUrl),
+                    normalizeHtmlForRendering(html, baseUrl, context.resources.displayMetrics.widthPixels),
                     Html.FROM_HTML_MODE_LEGACY,
                     imageGetter,
                     NovelChapterTags,
@@ -232,78 +232,6 @@ class NovelTextRenderer(
         }
     }
 
-    /**
-     * `Html.fromHtml` has no CSS and no `picture` support, so the markup is reshaped into what it can
-     * read. Failing open leaves the chapter as it was rather than blanking it. It also ignores table,
-     * definition-list and `pre` layout, which are rebuilt here into the lines a WebView shows for them.
-     */
-    private fun normalizeHtmlForRendering(html: String, baseUrl: String?): String = try {
-        val doc = Jsoup.parse(html)
-        doc.select("style, script").remove()
-        NovelChapterTags.prepare(doc, baseUrl)
-        doc.select("video source, audio source").remove()
-        // `source` is a void element and Html.fromHtml corrupts the rest of the document without one.
-        NovelImageSources.unwrapPictures(doc)
-        rebuildBlockLayout(doc)
-        val targetWidth = context.resources.displayMetrics.widthPixels
-        doc.select("img").forEach { img ->
-            NovelImageSources.srcsetCandidate(img, targetWidth)?.let { img.attr("src", it) }
-            if (img.hasAttr("src")) img.attr("src", NovelChapterAddress.absolute(baseUrl, img.attr("src")))
-            val parent = img.parent()
-            if (parent?.tagName() == "p" || parent?.tagName() == "div") {
-                liftOutOfText(img, parent)
-            } else {
-                img.wrap("<p style=\"text-align:center;\"></p>")
-            }
-        }
-        // The WebView mode loads the chapter with this base, so its relative links arrive absolute and
-        // open in the browser. Left relative here they reach the link policy as a non-http URL, which
-        // it blocks, and the tap did nothing with nothing said.
-        doc.select("a[href]").forEach { it.attr("href", NovelChapterAddress.absolute(baseUrl, it.attr("href"))) }
-        doc.body().html()
-    } catch (e: Exception) {
-        logcat(LogPriority.WARN, e) { "Chapter markup left unprepared" }
-        html
-    }
-
-    /** A table row, a term and its definition each take a line, cells a space apart, and a `pre` keeps
-     *  its line breaks, as they lay out in a WebView. */
-    private fun rebuildBlockLayout(doc: Document) {
-        doc.select("td, th").forEach { cell ->
-            if (cell.previousElementSibling() != null) cell.before(" ")
-            cell.tagName("span")
-        }
-        doc.select("tr, dt, dd").tagName("div")
-        doc.select("pre").forEach { it.html(it.html().replace("\n", "<br>")) }
-    }
-
-    /**
-     * The WebView's stylesheet lays every image out as a block, so text either side of one reads as its
-     * own line there. The paragraph is split around it to match, the image taking the centred block an
-     * image outside a paragraph gets; a side left with nothing to show is dropped. A paragraph showing
-     * only the image is centred where it stands.
-     */
-    private fun liftOutOfText(img: Element, parent: Element) {
-        val siblings = parent.childNodes()
-        // Another picture counts: two in one paragraph each take their own block, as the page lays them out.
-        val showsSomethingElse = siblings.any {
-            it !== img &&
-                ((it is TextNode && !it.isBlank) || (it is Element && (it.hasText() || it.isOrHoldsImage())))
-        }
-        if (!showsSomethingElse) {
-            parent.attr("style", "text-align:center;")
-            return
-        }
-        val after = parent.shallowClone().appendChildren(siblings.drop(siblings.indexOf(img) + 1))
-        parent.after(after)
-        parent.after(Element("p").attr("style", "text-align:center;").appendChild(img))
-        listOf(parent, after)
-            .filter { !it.hasText() && !it.isOrHoldsImage() }
-            .forEach(Element::remove)
-    }
-
-    private fun Element.isOrHoldsImage() = tagName() == "img" || selectFirst("img") != null
-
     private fun applyParagraphSpans(spannable: SpannableStringBuilder, spacingPx: Int, indentPx: Int) {
         var i = 0
         var paragraphStart = 0
@@ -348,6 +276,96 @@ class NovelTextRenderer(
 
     companion object {
         private const val CHUNK_TARGET_CHARS = 6_000
+
+        /**
+         * The chapter's read-aloud paragraphs from its [html], without building any view: the text the
+         * renderer sets, split as `ReadAloudSurface` counts it. Rendering ahead hashes these, so it must
+         * follow every step of [render] that changes the text rather than its spans.
+         */
+        fun paragraphsOf(html: String, baseUrl: String?, targetWidth: Int): List<String> {
+            val text = SpannableStringBuilder(
+                Html.fromHtml(
+                    normalizeHtmlForRendering(html, baseUrl, targetWidth),
+                    Html.FROM_HTML_MODE_LEGACY,
+                    null,
+                    NovelChapterTags,
+                ),
+            )
+            collapseBlankLines(text)
+            return readAloudParagraphs(chunkRanges(text).map { (start, end) -> text.subSequence(start, end) })
+                .map { it.text }
+        }
+
+        /**
+         * `Html.fromHtml` has no CSS and no `picture` support, so the markup is reshaped into what it can
+         * read. Failing open leaves the chapter as it was rather than blanking it. It also ignores table,
+         * definition-list and `pre` layout, which are rebuilt here into the lines a WebView shows for them.
+         */
+        private fun normalizeHtmlForRendering(html: String, baseUrl: String?, targetWidth: Int): String = try {
+            val doc = Jsoup.parse(html)
+            doc.select("style, script").remove()
+            NovelChapterTags.prepare(doc, baseUrl)
+            doc.select("video source, audio source").remove()
+            // `source` is a void element and Html.fromHtml corrupts the rest of the document without one.
+            NovelImageSources.unwrapPictures(doc)
+            rebuildBlockLayout(doc)
+            doc.select("img").forEach { img ->
+                NovelImageSources.srcsetCandidate(img, targetWidth)?.let { img.attr("src", it) }
+                if (img.hasAttr("src")) img.attr("src", NovelChapterAddress.absolute(baseUrl, img.attr("src")))
+                val parent = img.parent()
+                if (parent?.tagName() == "p" || parent?.tagName() == "div") {
+                    liftOutOfText(img, parent)
+                } else {
+                    img.wrap("<p style=\"text-align:center;\"></p>")
+                }
+            }
+            // The WebView mode loads the chapter with this base, so its relative links arrive absolute and
+            // open in the browser. Left relative here they reach the link policy as a non-http URL, which
+            // it blocks, and the tap did nothing with nothing said.
+            doc.select("a[href]").forEach { it.attr("href", NovelChapterAddress.absolute(baseUrl, it.attr("href"))) }
+            doc.body().html()
+        } catch (e: Exception) {
+            logcat(LogPriority.WARN, e) { "Chapter markup left unprepared" }
+            html
+        }
+
+        /** A table row, a term and its definition each take a line, cells a space apart, and a `pre` keeps
+         *  its line breaks, as they lay out in a WebView. */
+        private fun rebuildBlockLayout(doc: Document) {
+            doc.select("td, th").forEach { cell ->
+                if (cell.previousElementSibling() != null) cell.before(" ")
+                cell.tagName("span")
+            }
+            doc.select("tr, dt, dd").tagName("div")
+            doc.select("pre").forEach { it.html(it.html().replace("\n", "<br>")) }
+        }
+
+        /**
+         * The WebView's stylesheet lays every image out as a block, so text either side of one reads as its
+         * own line there. The paragraph is split around it to match, the image taking the centred block an
+         * image outside a paragraph gets; a side left with nothing to show is dropped. A paragraph showing
+         * only the image is centred where it stands.
+         */
+        private fun liftOutOfText(img: Element, parent: Element) {
+            val siblings = parent.childNodes()
+            // Another picture counts: two in one paragraph each take their own block, as the page lays them out.
+            val showsSomethingElse = siblings.any {
+                it !== img &&
+                    ((it is TextNode && !it.isBlank) || (it is Element && (it.hasText() || it.isOrHoldsImage())))
+            }
+            if (!showsSomethingElse) {
+                parent.attr("style", "text-align:center;")
+                return
+            }
+            val after = parent.shallowClone().appendChildren(siblings.drop(siblings.indexOf(img) + 1))
+            parent.after(after)
+            parent.after(Element("p").attr("style", "text-align:center;").appendChild(img))
+            listOf(parent, after)
+                .filter { !it.hasText() && !it.isOrHoldsImage() }
+                .forEach(Element::remove)
+        }
+
+        private fun Element.isOrHoldsImage() = tagName() == "img" || selectFirst("img") != null
 
         /**
          * Splits at the first paragraph boundary past every [CHUNK_TARGET_CHARS], so each chunk's layout

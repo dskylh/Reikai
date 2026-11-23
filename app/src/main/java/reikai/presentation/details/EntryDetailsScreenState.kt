@@ -170,6 +170,8 @@ sealed interface EntryChapterListItem {
 @Immutable
 data class EntryCapabilities(
     val novelPageSelector: NovelPageSelectorCapability? = null,
+    // Read-aloud pre-rendering of selected chapters. Null for manga, which has no text to speak.
+    val novelPreRender: NovelPreRenderCapability? = null,
     // Manga-only. Their payload types are defined with MangaEntryAdapter (they carry manga-engine types),
     // keeping this shared file free of manga-package imports. Null for novels.
     val mangaPagePreviews: MangaPagePreviewsCapability? = null,
@@ -178,6 +180,10 @@ data class EntryCapabilities(
     // grouped tag chips + the gallery-info card; both render nothing for a normal (non-adult) manga.
     val mangaGallery: MangaGalleryCapability? = null,
 )
+
+/** Selected chapters can be queued for read-aloud pre-rendering. */
+@Immutable
+data object NovelPreRenderCapability
 
 /**
  * A paged novel source's page/volume selector. Not a downstream toggle: the page index is a live input to

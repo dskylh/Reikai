@@ -16,6 +16,8 @@ CREATE TABLE novel_tts_audio(
 
 CREATE INDEX novel_tts_audio_created_index ON novel_tts_audio(created_at);
 
+CREATE INDEX novel_tts_audio_chapter_index ON novel_tts_audio(chapter_id);
+
 find:
 SELECT file_path, duration_ms
 FROM novel_tts_audio
@@ -39,3 +41,9 @@ DELETE FROM novel_tts_audio WHERE _id = :id;
 
 deleteAll:
 DELETE FROM novel_tts_audio;
+
+pathsOfChapters:
+SELECT file_path FROM novel_tts_audio WHERE chapter_id IN :chapterIds;
+
+deleteOfChapters:
+DELETE FROM novel_tts_audio WHERE chapter_id IN :chapterIds;

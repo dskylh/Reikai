@@ -10,6 +10,9 @@ import java.text.Normalizer
  */
 object TtsParagraphKey {
 
+    /** The version of the paragraph rule, sent to a PC server so a pack made under another can be refused. */
+    const val SPLITTER_VERSION = 1
+
     private val whitespace = Regex("\\s+")
 
     /** Lowercase hex SHA-256 of [text] in NFC, with every whitespace run collapsed to one space, trimmed. */

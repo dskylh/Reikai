@@ -22,7 +22,7 @@ class RenderedTtsAudio(
     suspend fun clear() {
         withIOContext {
             store.clear()
-            File(context.filesDir, PreRenderedTtsEngine.AUDIO_DIR).deleteRecursively()
+            File(context.filesDir, PhoneParagraphRenderer.AUDIO_DIR).deleteRecursively()
         }
     }
 }

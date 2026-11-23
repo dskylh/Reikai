@@ -45,6 +45,7 @@ import logcat.LogPriority
 import mihon.core.metro.AppCoroutineScope
 import reikai.data.novel.tts.PreRenderedTtsEngine
 import reikai.data.novel.tts.SystemTtsEngine
+import reikai.data.novel.tts.TtsRenderScheduler
 import reikai.domain.download.downloadStateOf
 import reikai.domain.download.offersDownload
 import reikai.domain.download.rowDownloadChapters
@@ -170,6 +171,7 @@ class NovelReaderViewModel(
     private val adultChecker: AdultContentChecker,
     private val getNextNovelChapter: GetNextNovelChapter,
     private val ttsAudio: TtsAudioRepository,
+    private val ttsScheduler: TtsRenderScheduler,
     // Dispatchers.IO, which is what launchIO would have used. Passed in so a JVM test can run the
     // whole session on its own scheduler.
     @Assisted private val io: CoroutineDispatcher = Dispatchers.IO,
@@ -944,6 +946,9 @@ class NovelReaderViewModel(
         visibleReport = openGeneration to opened.chapterId
         settleNeighbours(around)
         this.window.value = window
+        // The sliding window of pre-rendered read-aloud audio follows the chapter open, whoever opened it.
+        val order = orderedIds
+        appScope.launch(io) { ttsScheduler.onChapterOpened(order, row.id) }
     }
 
     private suspend fun NovelChapter.toLoadedChapter(html: String, baseUrl: String?): LoadedChapter {

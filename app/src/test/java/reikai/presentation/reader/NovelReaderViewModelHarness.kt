@@ -399,6 +399,7 @@ class NovelReaderViewModelHarness private constructor(
             ),
             // Read-aloud's engine is never built by these tests.
             ttsAudio = mockk(relaxed = true),
+            ttsScheduler = mockk(relaxed = true),
             io = dispatcher,
         ).also(::track)
     }
@@ -468,6 +469,7 @@ class NovelReaderViewModelHarness private constructor(
             trackPorts = mockk(relaxed = true),
             autoBindTrackers = mockk(relaxed = true),
             downloadedTexts = mockk(relaxed = true),
+            ttsScheduler = mockk(relaxed = true),
         ).also { model ->
             track(model)
             if (shown) model.viewModelScope.launch { model.state.collect {} }

@@ -13,6 +13,9 @@ Reikai uses its own [Semantic Versioning](https://semver.org/) from the Mihon-ba
 #### Added
 
 - **Novel read-aloud can now play paragraphs rendered ahead on your phone instead of speaking them live.** Pick Audio source in the read-aloud settings; a paragraph not ready yet is still spoken live.
+- **Novel read-aloud can render the next chapters ahead of you and delete the audio of chapters well behind you.** Render ahead and Keep behind set how many.
+- **Selected novel chapters can now be pre-rendered for read-aloud from the chapter list.** Any number of chapters, queued in reading order.
+- **Novel read-aloud can play audio rendered by a render server on your own PC, over Wi-Fi.** Pair it from the read-aloud settings.
 
 ## [0.5.1]
 

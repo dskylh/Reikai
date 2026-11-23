@@ -209,6 +209,9 @@ class MangaEntryAdapter(
         model.showDeleteChapterDialog(selectedChapters())
     }
 
+    // Never offered: a manga chapter has no text to speak, so its capability slot stays null.
+    override fun preRenderSelected() = Unit
+
     override fun deleteChapters(chapterIds: List<Long>) {
         model.toggleAllSelection(false)
         model.deleteChapters(chapterIds.mapNotNull { chapterById(it) })

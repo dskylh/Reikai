@@ -70,9 +70,7 @@ class PreRenderedTtsEngine(
     @Volatile
     private var renderFrom = 0
     private var renderJob: Job? = null
-
-    @Volatile
-    private var renderer: SystemTtsRenderer? = null
+    private val phone = PhoneParagraphRenderer(context, enginePackage, preferences, store)
 
     /** Keys that failed to render this session, so a paragraph the engine refuses is not retried forever. */
     private val failedKeys = mutableSetOf<String>()
@@ -107,8 +105,9 @@ class PreRenderedTtsEngine(
         val spoken = ++generation
         speakJob = scope.launch {
             val key = TtsParagraphKey.of(text)
+            val signature = if (source == TtsAudioSource.PC) TtsRenderSignature.pc(preferences) else phone.signature
             val audio = withContext(io) {
-                store.find(key, signature())?.takeIf { File(it.path).isFile }
+                store.find(key, signature)?.takeIf { File(it.path).isFile }
             }
             if (spoken != generation) return@launch
             if (audio == null) {
@@ -128,8 +127,7 @@ class PreRenderedTtsEngine(
     override fun shutdown() {
         stopPlayback()
         renderJob?.cancel()
-        renderer?.shutdown()
-        renderer = null
+        phone.shutdown()
         player?.release()
         player = null
         live.shutdown()
@@ -210,10 +208,6 @@ class PreRenderedTtsEngine(
         .setWakeMode(C.WAKE_MODE_LOCAL)
         .build()
 
-    /** The voice a render is made in, so a change of engine, voice or pitch misses old renders. */
-    private fun signature(): String =
-        "$enginePackage|${preferences.readerTtsVoice().get()}|${preferences.readerTtsPitch().get()}"
-
     /** Keeps the [RENDER_AHEAD] paragraphs after [text] rendered, one at a time, while the phone is the source. */
     private fun renderAheadOf(text: String) {
         val at = chapterParagraphs.indexOf(text)
@@ -225,7 +219,7 @@ class PreRenderedTtsEngine(
                 if (preferences.readerTtsAudioSource().get() != TtsAudioSource.PHONE) break
                 val id = chapterId ?: break
                 val next = nextToRender() ?: break
-                if (!renderOne(id, next)) failedKeys += TtsParagraphKey.of(next)
+                if (!phone.render(id, next)) failedKeys += TtsParagraphKey.of(next)
             }
         }
     }
@@ -233,44 +227,16 @@ class PreRenderedTtsEngine(
     private suspend fun nextToRender(): String? {
         val paragraphs = chapterParagraphs
         val from = renderFrom
-        val signature = signature()
         for (index in from until minOf(from + RENDER_AHEAD, paragraphs.size)) {
             val text = paragraphs[index]
-            val key = TtsParagraphKey.of(text)
-            if (key in failedKeys) continue
-            if (store.find(key, signature)?.let { File(it.path).isFile } != true) return text
+            if (TtsParagraphKey.of(text) in failedKeys) continue
+            if (!phone.isRendered(text)) return text
         }
         return null
     }
 
-    private suspend fun renderOne(chapterId: Long, text: String): Boolean {
-        val signature = signature()
-        val key = TtsParagraphKey.of(text)
-        val dir = File(context.filesDir, "$AUDIO_DIR/$chapterId").apply { mkdirs() }
-        val name = "$key-${signature.hashCode().toUInt().toString(16)}"
-        val wav = File(dir, "$name.wav")
-        val out = File(dir, "$name.m4a")
-        val engine = renderer ?: SystemTtsRenderer(context, enginePackage).also { renderer = it }
-        try {
-            if (!engine.render(text, preferences.readerTtsVoice().get(), preferences.readerTtsPitch().get(), wav)) {
-                return false
-            }
-            val durationMs = TtsAudioEncoder.wavToAac(wav, out) ?: return false
-            store.add(key, signature, chapterId, out.path, out.length(), durationMs, System.currentTimeMillis())
-            val capBytes = preferences.readerTtsRenderCapMb().get() * BYTES_PER_MB
-            store.evictOldest(capBytes).forEach { File(it).delete() }
-            return true
-        } finally {
-            wav.delete()
-        }
-    }
-
-    companion object {
-        /** Under `filesDir`, one folder per chapter. */
-        const val AUDIO_DIR = "tts"
-
-        private const val RENDER_AHEAD = 5
-        private const val PROGRESS_POLL_MS = 50L
-        private const val BYTES_PER_MB = 1024L * 1024L
+    private companion object {
+        const val RENDER_AHEAD = 5
+        const val PROGRESS_POLL_MS = 50L
     }
 }

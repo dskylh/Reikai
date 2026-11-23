@@ -1,6 +1,12 @@
 package eu.kanade.presentation.more.settings.screen
 
+import android.os.Build
 import android.text.format.Formatter
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ReadOnlyComposable
@@ -12,6 +18,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.input.KeyboardType
 import cafe.adriel.voyager.navigator.LocalNavigator
 import cafe.adriel.voyager.navigator.currentOrThrow
 import dev.icerock.moko.resources.StringResource
@@ -24,6 +31,8 @@ import eu.kanade.tachiyomi.util.system.hasDisplayCutout
 import eu.kanade.tachiyomi.util.system.toast
 import kotlinx.coroutines.launch
 import mihon.app.di.appGraph
+import reikai.data.novel.tts.TtsServerException
+import reikai.data.novel.tts.TtsServerFailure
 import reikai.domain.novel.NovelPageLayout
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRenderingMode
@@ -55,6 +64,7 @@ import reikai.presentation.reader.rememberTtsOptions
 import reikai.presentation.reader.tenthsLabel
 import reikai.presentation.reader.volumeKeyScrollPreference
 import reikai.util.scaled
+import tachiyomi.core.common.i18n.stringResource
 import tachiyomi.i18n.MR
 import tachiyomi.presentation.core.i18n.stringResource
 import tachiyomi.presentation.core.util.collectAsState
@@ -110,6 +120,25 @@ object SettingsNovelReaderScreen : SearchableSettings {
         val scope = rememberCoroutineScope()
         var renderedBytes by remember { mutableLongStateOf(0L) }
         LaunchedEffect(Unit) { renderedBytes = renderedAudio.usedBytes() }
+        val serverClient = remember { context.appGraph.ttsServerClient }
+        val paired = novelPreferences.readerTtsServerToken().collectAsState().value.isNotBlank()
+        var pairing by remember { mutableStateOf(false) }
+        if (pairing) {
+            PairingDialog(
+                onDismiss = { pairing = false },
+                onPair = { code ->
+                    pairing = false
+                    scope.launch {
+                        try {
+                            serverClient.pair(code, "Reikai on ${Build.MODEL}")
+                            context.toast(MR.strings.pref_tts_server_paired)
+                        } catch (e: TtsServerException) {
+                            context.toast(e.failure.messageRes)
+                        }
+                    }
+                },
+            )
+        }
         // Search composes every screen for each query, and binding an engine there only to name three rows
         // would start one per keystroke, so it indexes them without one.
         val indexing = LocalSettingsIndexing.current
@@ -172,6 +201,66 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     },
                     title = stringResource(MR.strings.pref_tts_render_cap),
                     visible = audioSource != TtsAudioSource.LIVE,
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = novelPreferences.readerTtsRenderAhead(),
+                    entries = RENDER_AHEAD_CHAPTERS.associateWith { chaptersLabel(it) },
+                    title = stringResource(MR.strings.pref_tts_render_ahead),
+                    visible = audioSource != TtsAudioSource.LIVE,
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = novelPreferences.readerTtsKeepBehind(),
+                    entries = KEEP_BEHIND_CHAPTERS.associateWith { chaptersLabel(it) },
+                    title = stringResource(MR.strings.pref_tts_keep_behind),
+                    visible = audioSource != TtsAudioSource.LIVE,
+                ),
+                Preference.PreferenceItem.EditTextPreference(
+                    preference = novelPreferences.readerTtsServerUrl(),
+                    title = stringResource(MR.strings.pref_tts_server_url),
+                    visible = audioSource == TtsAudioSource.PC,
+                ),
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_tts_server_pair),
+                    subtitle = if (paired) {
+                        stringResource(MR.strings.pref_tts_server_paired)
+                    } else {
+                        stringResource(MR.strings.pref_tts_server_pair_summary)
+                    },
+                    visible = audioSource == TtsAudioSource.PC,
+                    onClick = { pairing = true },
+                ),
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_tts_server_test),
+                    visible = audioSource == TtsAudioSource.PC,
+                    onClick = {
+                        scope.launch {
+                            val message = try {
+                                val info = serverClient.info()
+                                // A server just paired picks its own first model and voice until one is chosen.
+                                val model = info.models.firstOrNull()
+                                if (model != null && novelPreferences.readerTtsServerModel().get().isBlank()) {
+                                    novelPreferences.readerTtsServerModel().set(model.id)
+                                    novelPreferences.readerTtsServerVoice().set(
+                                        model.voices.firstOrNull()?.id.orEmpty(),
+                                    )
+                                }
+                                context.stringResource(MR.strings.tts_server_ok, info.name)
+                            } catch (e: TtsServerException) {
+                                context.stringResource(e.failure.messageRes)
+                            }
+                            context.toast(message)
+                        }
+                    },
+                ),
+                Preference.PreferenceItem.EditTextPreference(
+                    preference = novelPreferences.readerTtsServerModel(),
+                    title = stringResource(MR.strings.pref_tts_server_model),
+                    visible = audioSource == TtsAudioSource.PC,
+                ),
+                Preference.PreferenceItem.EditTextPreference(
+                    preference = novelPreferences.readerTtsServerVoice(),
+                    title = stringResource(MR.strings.pref_tts_server_voice),
+                    visible = audioSource == TtsAudioSource.PC,
                 ),
                 Preference.PreferenceItem.TextPreference(
                     title = stringResource(MR.strings.pref_tts_render_clear),
@@ -651,3 +740,46 @@ private const val CUSTOM_COLOR = 0
 
 /** The pre-rendered audio limits offered, in MB. */
 private val RENDER_CAPS_MB = listOf(256, 512, 1024, 2048, 4096, 8192)
+
+private val RENDER_AHEAD_CHAPTERS = listOf(0, 1, 2, 3, 5, 10)
+private val KEEP_BEHIND_CHAPTERS = listOf(0, 1, 2, 3, 4, 5)
+
+@Composable
+private fun chaptersLabel(count: Int): String =
+    if (count == 0) stringResource(MR.strings.off) else stringResource(MR.strings.tts_chapters_count, count)
+
+private val TtsServerFailure.messageRes
+    get() = when (this) {
+        TtsServerFailure.UNREACHABLE -> MR.strings.tts_server_unreachable
+        TtsServerFailure.UNAUTHORIZED -> MR.strings.tts_server_unauthorized
+        TtsServerFailure.UNSUPPORTED -> MR.strings.tts_server_unsupported
+    }
+
+/** Asks for the code the PC render server shows, to trade it for a token. */
+@Composable
+private fun PairingDialog(onDismiss: () -> Unit, onPair: (String) -> Unit) {
+    var code by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(MR.strings.pref_tts_server_pair)) },
+        text = {
+            OutlinedTextField(
+                value = code,
+                onValueChange = { code = it.filter(Char::isDigit).take(PAIRING_CODE_LENGTH) },
+                label = { Text(stringResource(MR.strings.tts_server_pairing_code)) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onPair(code) }, enabled = code.length == PAIRING_CODE_LENGTH) {
+                Text(stringResource(MR.strings.action_ok))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(MR.strings.action_cancel)) }
+        },
+    )
+}
+
+private const val PAIRING_CODE_LENGTH = 6

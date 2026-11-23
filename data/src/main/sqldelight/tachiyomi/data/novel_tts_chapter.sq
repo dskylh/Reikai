@@ -1,0 +1,45 @@
+-- Chapters waiting for or done with read-aloud pre-rendering. pinned marks a chapter picked by hand, which
+-- the sliding window never cancels before it is reached. priority orders the queue: the window's
+-- chapters (0) before hand-picked ones (1). state: 0 queued, 1 rendered, 2 failed.
+CREATE TABLE novel_tts_chapter(
+    chapter_id INTEGER NOT NULL PRIMARY KEY,
+    pinned INTEGER NOT NULL,
+    priority INTEGER NOT NULL,
+    state INTEGER NOT NULL,
+    requested_at INTEGER NOT NULL
+);
+
+insertIfAbsent:
+INSERT OR IGNORE INTO novel_tts_chapter(chapter_id, pinned, priority, state, requested_at)
+VALUES (:chapterId, :pinned, :priority, 0, :requestedAt);
+
+-- A repeated request queues the chapter again, so a render made in another voice is checked, and never
+-- unpins it or lowers its place in the queue.
+requeue:
+UPDATE novel_tts_chapter
+SET state = 0,
+    pinned = max(pinned, :pinned),
+    priority = min(priority, :priority)
+WHERE chapter_id = :chapterId;
+
+nextQueued:
+SELECT chapter_id, priority
+FROM novel_tts_chapter
+WHERE state = 0
+ORDER BY priority, requested_at, chapter_id
+LIMIT 1;
+
+isQueued:
+SELECT count(*) FROM novel_tts_chapter WHERE chapter_id = :chapterId AND state = 0;
+
+setState:
+UPDATE novel_tts_chapter SET state = :state WHERE chapter_id = :chapterId;
+
+cancelUnpinnedQueued:
+DELETE FROM novel_tts_chapter WHERE chapter_id IN :chapterIds AND pinned = 0 AND state = 0;
+
+deleteChapters:
+DELETE FROM novel_tts_chapter WHERE chapter_id IN :chapterIds;
+
+deleteAll:
+DELETE FROM novel_tts_chapter;
