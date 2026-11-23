@@ -27,6 +27,12 @@ interface NovelTtsEngine {
     fun pieces(text: String, bySentence: Boolean): List<TtsPiece>
 
     /**
+     * The chapter whose [paragraphs] are being read, in order, so an engine that renders ahead knows what
+     * comes next. Called before each paragraph is spoken; an engine that speaks live ignores it.
+     */
+    fun prepare(chapterId: Long, paragraphs: List<String>) = Unit
+
+    /**
      * Speak [pieces] in order; [onDone] fires once when all of them finish (or fail). Replaces any
      * utterance already in progress. [onPieceStart] fires as each piece begins, with its index in [pieces].
      */

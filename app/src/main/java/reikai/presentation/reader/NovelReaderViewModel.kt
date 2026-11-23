@@ -43,6 +43,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import logcat.LogPriority
 import mihon.core.metro.AppCoroutineScope
+import reikai.data.novel.tts.PreRenderedTtsEngine
 import reikai.data.novel.tts.SystemTtsEngine
 import reikai.domain.download.downloadStateOf
 import reikai.domain.download.offersDownload
@@ -78,6 +79,7 @@ import reikai.domain.novel.model.effectiveHideChapterTitles
 import reikai.domain.novel.model.readerOrientation
 import reikai.domain.novel.ownersOf
 import reikai.domain.novel.track.TrackNovelChapter
+import reikai.domain.novel.tts.TtsAudioRepository
 import reikai.domain.novel.tts.TtsPlayback
 import reikai.domain.reader.ChapterIncognito
 import reikai.domain.reader.ChapterProgress
@@ -167,6 +169,7 @@ class NovelReaderViewModel(
     private val pageFetcher: NovelPageFetcher,
     private val adultChecker: AdultContentChecker,
     private val getNextNovelChapter: GetNextNovelChapter,
+    private val ttsAudio: TtsAudioRepository,
     // Dispatchers.IO, which is what launchIO would have used. Passed in so a JVM test can run the
     // whole session on its own scheduler.
     @Assisted private val io: CoroutineDispatcher = Dispatchers.IO,
@@ -672,7 +675,17 @@ class NovelReaderViewModel(
     val readAloud = ReadAloudController(
         scope = viewModelScope,
         preferences = novelPreferences,
-        createEngine = { enginePackage, onInit -> SystemTtsEngine(context, enginePackage, onInit) },
+        createEngine = { enginePackage, onInit ->
+            PreRenderedTtsEngine(
+                live = SystemTtsEngine(context, enginePackage, onInit),
+                context = context,
+                enginePackage = enginePackage,
+                preferences = novelPreferences,
+                store = ttsAudio,
+                scope = viewModelScope,
+                io = io,
+            )
+        },
         navigation = object : ReadAloudNavigation {
             override fun chapterAfter(chapterId: Long) = this@NovelReaderViewModel.chapterAfter(chapterId)
 

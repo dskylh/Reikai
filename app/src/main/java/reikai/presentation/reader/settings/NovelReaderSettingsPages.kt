@@ -45,6 +45,7 @@ import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRenderingMode
 import reikai.domain.novel.NovelTapLayout
 import reikai.domain.novel.NovelTextAlign
+import reikai.domain.novel.tts.TtsAudioSource
 import reikai.domain.novel.tts.TtsColorPreset
 import reikai.domain.novel.tts.TtsHighlightColors
 import reikai.domain.novel.tts.TtsHighlightStyle
@@ -545,6 +546,17 @@ internal fun ColumnScope.NovelReadAloudPage(preferences: NovelPreferences) {
         tenths = NovelTextRanges.readAloudPitchTenths,
         format = "%.1f",
     )
+    val sourcePref = preferences.readerTtsAudioSource()
+    val source by sourcePref.collectAsState()
+    SettingsChipRow(MR.strings.pref_tts_audio_source) {
+        TtsAudioSource.entries.forEach {
+            FilterChip(
+                selected = source == it,
+                onClick = { sourcePref.set(it) },
+                label = { Text(stringResource(it.titleRes)) },
+            )
+        }
+    }
 
     HeadingItem(MR.strings.pref_category_playback)
     CheckboxItem(

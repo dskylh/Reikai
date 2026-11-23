@@ -816,6 +816,13 @@
     <string name="pref_tts_voice">Voice</string>
     <string name="pref_tts_rate">Speed</string>
     <string name="pref_tts_pitch">Pitch</string>
+    <string name="pref_tts_audio_source">Audio source</string>
+    <string name="tts_audio_source_live">Live</string>
+    <string name="tts_audio_source_phone">Pre-rendered on this phone</string>
+    <string name="pref_tts_render_cap">Pre-rendered audio limit</string>
+    <string name="pref_tts_render_clear">Clear pre-rendered audio</string>
+    <string name="pref_tts_render_used">%1$s used</string>
+    <string name="tts_render_cleared">Pre-rendered audio cleared</string>
     <string name="pref_tts_auto_page_advance">Continue to the next chapter</string>
     <string name="pref_tts_scroll_to_top">Scroll to top</string>
     <string name="pref_tts_scroll_to_top_summary">Puts the paragraph being read at the top, not the middle</string>

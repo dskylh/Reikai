@@ -1,10 +1,14 @@
 package eu.kanade.presentation.more.settings.screen
 
+import android.text.format.Formatter
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -17,12 +21,15 @@ import eu.kanade.presentation.more.settings.screen.novel.NovelFontsScreen
 import eu.kanade.presentation.more.settings.screen.novel.NovelRegexRulesScreen
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
 import eu.kanade.tachiyomi.util.system.hasDisplayCutout
+import eu.kanade.tachiyomi.util.system.toast
+import kotlinx.coroutines.launch
 import mihon.app.di.appGraph
 import reikai.domain.novel.NovelPageLayout
 import reikai.domain.novel.NovelPreferences
 import reikai.domain.novel.NovelRenderingMode
 import reikai.domain.novel.NovelTapLayout
 import reikai.domain.novel.NovelTextAlign
+import reikai.domain.novel.tts.TtsAudioSource
 import reikai.domain.novel.tts.TtsColorPreset
 import reikai.domain.novel.tts.TtsHighlightColors
 import reikai.domain.novel.tts.TtsHighlightStyle
@@ -98,6 +105,11 @@ object SettingsNovelReaderScreen : SearchableSettings {
         val highlight by novelPreferences.readerTtsHighlight().collectAsState()
         val keepInView by novelPreferences.readerTtsKeepInView().collectAsState()
         val highlightStyle by novelPreferences.readerTtsHighlightStyle().collectAsState()
+        val audioSource by novelPreferences.readerTtsAudioSource().collectAsState()
+        val renderedAudio = remember { context.appGraph.renderedTtsAudio }
+        val scope = rememberCoroutineScope()
+        var renderedBytes by remember { mutableLongStateOf(0L) }
+        LaunchedEffect(Unit) { renderedBytes = renderedAudio.usedBytes() }
         // Search composes every screen for each query, and binding an engine there only to name three rows
         // would start one per keystroke, so it indexes them without one.
         val indexing = LocalSettingsIndexing.current
@@ -147,6 +159,33 @@ object SettingsNovelReaderScreen : SearchableSettings {
                     valueRange = NovelTextRanges.readAloudPitchTenths,
                     title = stringResource(MR.strings.pref_tts_pitch),
                     valueText = { tenthsLabel(it, "%.1f") },
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = novelPreferences.readerTtsAudioSource(),
+                    entries = TtsAudioSource.entries.associateWith { stringResource(it.titleRes) },
+                    title = stringResource(MR.strings.pref_tts_audio_source),
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = novelPreferences.readerTtsRenderCapMb(),
+                    entries = RENDER_CAPS_MB.associateWith {
+                        Formatter.formatShortFileSize(context, it * 1024L * 1024L)
+                    },
+                    title = stringResource(MR.strings.pref_tts_render_cap),
+                    visible = audioSource != TtsAudioSource.LIVE,
+                ),
+                Preference.PreferenceItem.TextPreference(
+                    title = stringResource(MR.strings.pref_tts_render_clear),
+                    subtitle = stringResource(
+                        MR.strings.pref_tts_render_used,
+                        Formatter.formatShortFileSize(context, renderedBytes),
+                    ),
+                    onClick = {
+                        scope.launch {
+                            renderedAudio.clear()
+                            renderedBytes = 0L
+                            context.toast(MR.strings.tts_render_cleared)
+                        }
+                    },
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = novelPreferences.readerTtsAutoPageAdvance(),
@@ -609,3 +648,6 @@ object SettingsNovelReaderScreen : SearchableSettings {
 
 /** Custom's key in a colour list. Fully transparent, so no colour the picker writes can equal it. */
 private const val CUSTOM_COLOR = 0
+
+/** The pre-rendered audio limits offered, in MB. */
+private val RENDER_CAPS_MB = listOf(256, 512, 1024, 2048, 4096, 8192)

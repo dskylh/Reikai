@@ -1,0 +1,41 @@
+-- Pre-rendered read-aloud audio, one file per paragraph and voice. paragraph_key is TtsParagraphKey's hash
+-- of the paragraph text and signature names the voice that rendered it, so a voice change misses instead
+-- of playing the old voice. chapter_id carries no foreign key: a deleted chapter's row must outlive it
+-- until eviction, which is what deletes its file.
+CREATE TABLE novel_tts_audio(
+    _id INTEGER NOT NULL PRIMARY KEY,
+    paragraph_key TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    chapter_id INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(paragraph_key, signature)
+);
+
+CREATE INDEX novel_tts_audio_created_index ON novel_tts_audio(created_at);
+
+find:
+SELECT file_path, duration_ms
+FROM novel_tts_audio
+WHERE paragraph_key = :key AND signature = :signature;
+
+upsert:
+INSERT OR REPLACE INTO novel_tts_audio(paragraph_key, signature, chapter_id, file_path, size_bytes, duration_ms, created_at)
+VALUES (:key, :signature, :chapterId, :path, :sizeBytes, :durationMs, :createdAt);
+
+totalBytes:
+SELECT coalesce(sum(size_bytes), 0) AS total FROM novel_tts_audio;
+
+oldest:
+SELECT _id, file_path, size_bytes
+FROM novel_tts_audio
+ORDER BY created_at, _id
+LIMIT :limit;
+
+deleteById:
+DELETE FROM novel_tts_audio WHERE _id = :id;
+
+deleteAll:
+DELETE FROM novel_tts_audio;

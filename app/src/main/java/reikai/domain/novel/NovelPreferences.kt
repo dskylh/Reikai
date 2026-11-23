@@ -12,6 +12,7 @@ import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import reikai.domain.novel.model.NovelMigrationFlag
+import reikai.domain.novel.tts.TtsAudioSource
 import reikai.domain.novel.tts.TtsHighlightColors
 import reikai.domain.novel.tts.TtsHighlightStyle
 import reikai.domain.reader.BOTTOM_ZONE_DEFAULT_PERCENT
@@ -323,6 +324,12 @@ class NovelPreferences(
 
     /** Whether the read-aloud controls float over the reader. Hiding them leaves playback running. */
     fun readerTtsControlsVisible() = preferenceStore.getBoolean("ln_reader_tts_controls_visible", false)
+
+    /** Where read-aloud's audio comes from: spoken live, or rendered to files ahead of playback. */
+    fun readerTtsAudioSource() = preferenceStore.getEnum("ln_reader_tts_audio_source", TtsAudioSource.LIVE)
+
+    /** The most pre-rendered audio kept, in MB. Past it the oldest renders are deleted first. */
+    fun readerTtsRenderCapMb() = preferenceStore.getInt("ln_reader_tts_render_cap_mb", 1024)
 
     /** Bold the start of each word (bionic reading) to ease skimming. */
     fun readerBionicReading() = preferenceStore.getBoolean("ln_reader_bionic_reading", false)

@@ -310,6 +310,8 @@ dependencies {
     implementation(libs.androidx.coreSplashScreen)
     // RK: MediaSession + media-style notification for novel read-aloud (TTS) background playback
     implementation(libs.androidx.media)
+    // RK: plays read-aloud audio rendered ahead of time
+    implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.recyclerView)
     implementation(libs.androidx.viewPager)
     implementation(libs.androidx.profileInstaller)

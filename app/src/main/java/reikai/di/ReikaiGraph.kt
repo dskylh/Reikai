@@ -15,6 +15,7 @@ import exh.ui.login.EhLoginActivity
 import kotlinx.coroutines.CoroutineScope
 import mihon.core.metro.AppCoroutineScope
 import mihon.core.migration.migrations.MergedDuplicateCarryMigration
+import reikai.data.novel.tts.RenderedTtsAudio
 import reikai.data.novel.update.NovelUpdateWorker
 import reikai.data.track.TrackerRefreshWorker
 import reikai.domain.category.GetNovelCategories
@@ -91,6 +92,7 @@ interface ReikaiGraph {
     // at construction, so every read has to build a fresh one.
     val galleryAdder: GalleryAdder
     val novelPreferences: NovelPreferences
+    val renderedTtsAudio: RenderedTtsAudio // the read-aloud settings show and clear it
     val novelSourceManager: NovelSourceManager
     val iReaderHostServices: IReaderHostServices // the extension loader builds IReader sources with it
     val novelImageRequests: NovelImageRequests // novel covers and pictures take their source's headers

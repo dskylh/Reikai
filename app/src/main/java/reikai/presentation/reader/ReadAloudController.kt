@@ -321,6 +321,7 @@ class ReadAloudController(
             return
         }
         val spoken = ++token
+        speaker.prepare(at.chapterId, paragraphs)
         val pieces = speaker.pieces(paragraphs[at.paragraph], bySentence)
         sentences = if (bySentence) pieces else emptyList()
         val first = if (sentenceIndex ==

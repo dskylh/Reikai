@@ -8,6 +8,12 @@ Reikai uses its own [Semantic Versioning](https://semver.org/) from the Mihon-ba
 
 ## [Unreleased]
 
+### Reader
+
+#### Added
+
+- **Novel read-aloud can now play paragraphs rendered ahead on your phone instead of speaking them live.** Pick Audio source in the read-aloud settings; a paragraph not ready yet is still spoken live.
+
 ## [0.5.1]
 
 ### Reader

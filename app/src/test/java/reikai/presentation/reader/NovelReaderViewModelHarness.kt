@@ -397,6 +397,8 @@ class NovelReaderViewModelHarness private constructor(
                 mergedChapterProvider,
                 NovelChapterSettings(novelRepo),
             ),
+            // Read-aloud's engine is never built by these tests.
+            ttsAudio = mockk(relaxed = true),
             io = dispatcher,
         ).also(::track)
     }
